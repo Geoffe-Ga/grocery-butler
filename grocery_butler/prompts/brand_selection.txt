@@ -1,0 +1,2 @@
+# Future use: Safeway brand selection
+This prompt will be implemented in Phase 3.
