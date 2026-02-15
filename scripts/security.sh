@@ -73,8 +73,15 @@ echo "=== Dependency Audit (pip-audit) ==="
 if $VERBOSE; then
     echo "Running pip-audit dependency checker..."
 fi
-VENV_PYTHON="$PROJECT_ROOT/.venv/bin/python"
-if [ -x "$VENV_PYTHON" ]; then
+# Find the venv Python - check local, then VIRTUAL_ENV, then worktree parent
+VENV_PYTHON=""
+if [ -x "$PROJECT_ROOT/.venv/bin/python" ]; then
+    VENV_PYTHON="$PROJECT_ROOT/.venv/bin/python"
+elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+    VENV_PYTHON="$VIRTUAL_ENV/bin/python"
+fi
+
+if [ -n "$VENV_PYTHON" ]; then
     PIPAPI_PYTHON_LOCATION="$VENV_PYTHON" pip-audit || { echo "✗ pip-audit found issues" >&2; exit 1; }
 else
     pip-audit || { echo "✗ pip-audit found issues" >&2; exit 1; }
