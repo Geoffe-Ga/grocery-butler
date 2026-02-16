@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Grocery Butler{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <nav class="nav-bar" role="navigation" aria-label="Main navigation">
+        <div class="nav-container">
+            <a href="/" class="nav-brand">Grocery Butler</a>
+            <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">
+                <span class="nav-toggle-bar"></span>
+                <span class="nav-toggle-bar"></span>
+                <span class="nav-toggle-bar"></span>
+            </button>
+            <ul class="nav-links">
+                {% for item in nav_items %}
+                <li>
+                    <a href="{{ item.url }}"
+                       class="nav-link{% if active_page == item.endpoint %} active{% endif %}"
+                       {% if active_page == item.endpoint %}aria-current="page"{% endif %}>
+                        {{ item.label }}
+                    </a>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+    </nav>
+
+    <main class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="flash-messages">
+            {% for category, message in messages %}
+            <div class="flash flash-{{ category }}" role="alert">
+                {{ message }}
+                <button class="flash-close" aria-label="Dismiss">&times;</button>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </main>
+
+    <footer class="footer">
+        <div class="container">
+            <p>Grocery Butler</p>
+        </div>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
