@@ -120,10 +120,87 @@ function initNavToggle() {
     });
 }
 
+/**
+ * Bind input handler for the recipe search/filter bar.
+ */
+function initRecipeSearch() {
+    var searchInput = document.getElementById("recipe-search");
+    if (!searchInput) {
+        return;
+    }
+
+    searchInput.addEventListener("input", function () {
+        var query = searchInput.value.toLowerCase().trim();
+        var cards = document.querySelectorAll(".recipe-card");
+        cards.forEach(function (card) {
+            var name = card.getAttribute("data-name") || "";
+            if (name.indexOf(query) !== -1) {
+                card.classList.remove("hidden");
+            } else {
+                card.classList.add("hidden");
+            }
+        });
+    });
+}
+
+/**
+ * Bind click handler for the add ingredient row button on recipe form.
+ */
+function initAddIngredientRow() {
+    var addBtn = document.getElementById("add-ingredient-row");
+    if (!addBtn) {
+        return;
+    }
+
+    addBtn.addEventListener("click", function () {
+        var container = document.getElementById("ingredient-rows");
+        if (!container) {
+            return;
+        }
+        var rows = container.querySelectorAll(".ingredient-row");
+        var idx = rows.length;
+        var categorySelect = container.querySelector("select");
+        var options = "";
+        if (categorySelect) {
+            var allOptions = categorySelect.querySelectorAll("option");
+            allOptions.forEach(function (opt) {
+                options += '<option value="' + opt.value + '">' + opt.textContent + "</option>";
+            });
+        }
+
+        var html =
+            '<div class="form-row ingredient-row" data-index="' + idx + '">' +
+            '<div class="form-group">' +
+            '<label for="ing_name_' + idx + '">Name</label>' +
+            '<input type="text" id="ing_name_' + idx + '" name="ing_name_' + idx + '" placeholder="e.g. pasta">' +
+            "</div>" +
+            '<div class="form-group">' +
+            '<label for="ing_qty_' + idx + '">Qty</label>' +
+            '<input type="number" id="ing_qty_' + idx + '" name="ing_qty_' + idx + '" step="0.01" value="1">' +
+            "</div>" +
+            '<div class="form-group">' +
+            '<label for="ing_unit_' + idx + '">Unit</label>' +
+            '<input type="text" id="ing_unit_' + idx + '" name="ing_unit_' + idx + '" placeholder="e.g. lb">' +
+            "</div>" +
+            '<div class="form-group">' +
+            '<label for="ing_category_' + idx + '">Category</label>' +
+            '<select id="ing_category_' + idx + '" name="ing_category_' + idx + '">' + options + "</select>" +
+            "</div>" +
+            '<div class="form-group form-group-check">' +
+            '<label for="ing_pantry_' + idx + '">' +
+            '<input type="checkbox" id="ing_pantry_' + idx + '" name="ing_pantry_' + idx + '"> Pantry' +
+            "</label></div></div>";
+
+        container.insertAdjacentHTML("beforeend", html);
+    });
+}
+
 /* Initialize on DOMContentLoaded */
 document.addEventListener("DOMContentLoaded", function () {
     initStatusButtons();
     initSearchFilter();
     initFlashDismiss();
     initNavToggle();
+    initRecipeSearch();
+    initAddIngredientRow();
 });

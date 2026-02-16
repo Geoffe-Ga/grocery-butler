@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}Pantry Staples - Grocery Butler{% endblock %}
+
+{% block content %}
+<h1>Pantry Staples</h1>
+
+<section class="add-item-section">
+    <h2>Add Staple</h2>
+    <form action="/pantry/add" method="post" class="add-item-form">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="ingredient">Ingredient</label>
+                <input type="text" id="ingredient" name="ingredient" required
+                       placeholder="e.g. cumin">
+            </div>
+            <div class="form-group">
+                <label for="category">Category</label>
+                <select id="category" name="category">
+                    {% for cat in categories %}
+                    <option value="{{ cat }}">{{ cat }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group form-group-btn">
+                <button type="submit" class="btn btn-primary">Add</button>
+            </div>
+        </div>
+    </form>
+</section>
+
+{% if staples %}
+<section class="pantry-list">
+    {% for staple in staples %}
+    <div class="pantry-card">
+        <div class="pantry-card-info">
+            <h3 class="pantry-card-name">{{ staple.display_name }}</h3>
+            {% if staple.category %}
+            <span class="pantry-card-category">{{ staple.category }}</span>
+            {% endif %}
+        </div>
+        <form action="/pantry/{{ staple.id }}/remove" method="post" class="inline-form">
+            <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+        </form>
+    </div>
+    {% endfor %}
+</section>
+{% else %}
+<section class="empty-state">
+    <p>No pantry staples configured. Add staples you always have on hand.</p>
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}{{ recipe.name }} - Grocery Butler{% endblock %}
+
+{% block content %}
+<h1>{{ recipe.name }}</h1>
+
+<div class="recipe-info">
+    <span class="recipe-meta-item">{{ recipe.servings }} servings</span>
+</div>
+
+{% if recipe.purchase_items %}
+<section class="ingredient-section">
+    <h2>Purchase Items</h2>
+    <ul class="ingredient-list">
+        {% for item in recipe.purchase_items %}
+        <li class="ingredient-item">
+            <span class="ingredient-name">{{ item.ingredient }}</span>
+            <span class="ingredient-qty">{{ item.quantity }} {{ item.unit }}</span>
+            <span class="ingredient-category badge">{{ item.category.value }}</span>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
+
+{% if recipe.pantry_items %}
+<section class="ingredient-section">
+    <h2>Pantry Items</h2>
+    <ul class="ingredient-list">
+        {% for item in recipe.pantry_items %}
+        <li class="ingredient-item">
+            <span class="ingredient-name">{{ item.ingredient }}</span>
+            <span class="ingredient-qty">{{ item.quantity }} {{ item.unit }}</span>
+            <span class="ingredient-category badge">{{ item.category.value }}</span>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
+
+<div class="page-actions">
+    <a href="/recipes" class="btn btn-secondary">Back to Recipes</a>
+    <form action="/recipes/{{ recipe_id }}/delete" method="post" class="inline-form"
+          onsubmit="return confirm('Delete this recipe?');">
+        <button type="submit" class="btn btn-danger">Delete Recipe</button>
+    </form>
+</div>
+{% endblock %}
