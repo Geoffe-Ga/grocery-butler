@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}Brand Preferences - Grocery Butler{% endblock %}
+
+{% block content %}
+<h1>Brand Preferences</h1>
+
+<section class="add-item-section">
+    <h2>Add Preference</h2>
+    <form action="/brands/add" method="post" class="add-item-form">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="match_target">Target</label>
+                <input type="text" id="match_target" name="match_target" required
+                       placeholder="e.g. milk or dairy">
+            </div>
+            <div class="form-group">
+                <label for="match_type">Match Type</label>
+                <select id="match_type" name="match_type">
+                    {% for mt in match_types %}
+                    <option value="{{ mt }}">{{ mt }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="brand">Brand</label>
+                <input type="text" id="brand" name="brand" required
+                       placeholder="e.g. Organic Valley">
+            </div>
+            <div class="form-group">
+                <label for="preference_type">Type</label>
+                <select id="preference_type" name="preference_type">
+                    {% for pt in pref_types %}
+                    <option value="{{ pt }}">{{ pt }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label for="notes">Notes</label>
+                <input type="text" id="notes" name="notes"
+                       placeholder="Optional notes">
+            </div>
+            <div class="form-group form-group-btn">
+                <button type="submit" class="btn btn-primary">Add</button>
+            </div>
+        </div>
+    </form>
+</section>
+
+{% if grouped_prefs.preferred or grouped_prefs.avoid %}
+    {% if grouped_prefs.preferred %}
+    <section class="brand-section">
+        <h2>Preferred Brands</h2>
+        <div class="brand-list">
+            {% for pref in grouped_prefs.preferred %}
+            <div class="brand-card">
+                <div class="brand-card-info">
+                    <h3 class="brand-card-name">{{ pref.brand }}</h3>
+                    <span class="brand-card-target">{{ pref.match_type.value }}: {{ pref.match_target }}</span>
+                    {% if pref.notes %}
+                    <span class="brand-card-notes">{{ pref.notes }}</span>
+                    {% endif %}
+                </div>
+                <form action="/brands/{{ loop.index }}/remove" method="post" class="inline-form">
+                    <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+                </form>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    {% if grouped_prefs.avoid %}
+    <section class="brand-section">
+        <h2>Avoided Brands</h2>
+        <div class="brand-list">
+            {% for pref in grouped_prefs.avoid %}
+            <div class="brand-card">
+                <div class="brand-card-info">
+                    <h3 class="brand-card-name">{{ pref.brand }}</h3>
+                    <span class="brand-card-target">{{ pref.match_type.value }}: {{ pref.match_target }}</span>
+                    {% if pref.notes %}
+                    <span class="brand-card-notes">{{ pref.notes }}</span>
+                    {% endif %}
+                </div>
+                <form action="/brands/{{ loop.index }}/remove" method="post" class="inline-form">
+                    <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+                </form>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+{% else %}
+<section class="empty-state">
+    <p>No brand preferences set. Add preferred or avoided brands above.</p>
+</section>
+{% endif %}
+{% endblock %}

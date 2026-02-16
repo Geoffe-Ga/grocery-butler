@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Preferences - Grocery Butler{% endblock %}
+
+{% block content %}
+<h1>Preferences</h1>
+
+<section class="add-item-section">
+    <form action="/preferences" method="post">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="default_servings">Default Servings</label>
+                <input type="number" id="default_servings" name="default_servings"
+                       value="{{ prefs.get('default_servings', '4') }}" min="1">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="default_units">Default Units</label>
+                <select id="default_units" name="default_units">
+                    <option value="imperial"{% if prefs.get('default_units', 'imperial') == 'imperial' %} selected{% endif %}>Imperial</option>
+                    <option value="metric"{% if prefs.get('default_units') == 'metric' %} selected{% endif %}>Metric</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label for="dietary_restrictions">Dietary Restrictions</label>
+                <input type="text" id="dietary_restrictions" name="dietary_restrictions"
+                       value="{{ prefs.get('dietary_restrictions', '') }}"
+                       placeholder="e.g. vegetarian, gluten-free">
+            </div>
+        </div>
+        <div class="page-actions">
+            <button type="submit" class="btn btn-primary">Save Preferences</button>
+        </div>
+    </form>
+</section>
+{% endblock %}

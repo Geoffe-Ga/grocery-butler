@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}Recipes - Grocery Butler{% endblock %}
+
+{% block content %}
+<h1>Recipes</h1>
+
+<div class="page-actions">
+    <a href="/recipes/add" class="btn btn-primary">Add Recipe</a>
+</div>
+
+<section class="filter-section">
+    <input type="text" id="recipe-search" class="search-input"
+           placeholder="Search recipes..." aria-label="Search recipes">
+</section>
+
+{% if recipes %}
+<section class="recipe-list" id="recipe-list">
+    {% for recipe in recipes %}
+    <a href="/recipes/{{ recipe.id }}" class="recipe-card"
+       data-name="{{ recipe.display_name|lower }}">
+        <div class="recipe-card-info">
+            <h3 class="recipe-card-name">{{ recipe.display_name }}</h3>
+            <div class="recipe-card-meta">
+                <span class="recipe-meta-item">{{ recipe.times_ordered }} orders</span>
+                <span class="recipe-meta-item">{{ recipe.ingredient_count }} ingredients</span>
+            </div>
+        </div>
+    </a>
+    {% endfor %}
+</section>
+{% else %}
+<section class="empty-state">
+    <p>No recipes yet. Add one to get started.</p>
+    <a href="/recipes/add" class="btn btn-primary">Add Recipe</a>
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}Shopping List - Grocery Butler{% endblock %}
+
+{% block content %}
+<h1>Shopping List</h1>
+
+<section class="add-item-section">
+    <h2>Generate Shopping List</h2>
+    <form action="/shopping-list/generate" method="post">
+        <div class="form-group">
+            <label for="meals">Meals (one per line)</label>
+            <textarea id="meals" name="meals" rows="4" class="form-textarea"
+                      placeholder="Spaghetti Bolognese&#10;Chicken Stir Fry"></textarea>
+        </div>
+        <div class="page-actions">
+            <button type="submit" class="btn btn-primary">Generate List</button>
+        </div>
+    </form>
+</section>
+
+{% if has_items %}
+<section class="shopping-list-items">
+    {% for category, items in grouped_items.items() %}
+    <div class="shopping-category">
+        <h2>{{ category }}</h2>
+        <ul class="shopping-items">
+            {% for item in items %}
+            <li class="shopping-item{% if item.from_meals == ['restock'] %} shopping-item-restock{% endif %}">
+                <span class="shopping-item-name">{{ item.ingredient }}</span>
+                <span class="shopping-item-qty">{{ item.quantity }} {{ item.unit }}</span>
+                {% if item.from_meals == ['restock'] %}
+                <span class="badge badge-out">restock</span>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endfor %}
+</section>
+
+<div class="page-actions">
+    <button type="button" class="btn btn-secondary btn-disabled"
+            title="Coming Soon" disabled>
+        Order from Safeway
+    </button>
+</div>
+{% else %}
+<section class="empty-state">
+    <p>No shopping list yet. Plan some meals to get started.</p>
+</section>
+{% endif %}
+{% endblock %}
