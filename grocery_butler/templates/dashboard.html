@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Grocery Butler{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+<section class="stats-grid">
+    <div class="stat-card">
+        <span class="stat-value">{{ recipe_count }}</span>
+        <span class="stat-label">Recipes</span>
+    </div>
+    <div class="stat-card">
+        <span class="stat-value">{{ inventory_count }}</span>
+        <span class="stat-label">Inventory Items</span>
+    </div>
+    <div class="stat-card">
+        <span class="stat-value">{{ restock_queue|length }}</span>
+        <span class="stat-label">Items to Restock</span>
+    </div>
+</section>
+
+{% if restock_queue %}
+<section class="restock-alert">
+    <h2>Restock Queue</h2>
+    <p>The following items need restocking:</p>
+    <ul class="restock-list">
+        {% for item in restock_queue %}
+        <li class="restock-item">
+            <span class="restock-name">{{ item.display_name }}</span>
+            <span class="badge badge-{{ item.status.value }}">{{ item.status.value }}</span>
+        </li>
+        {% endfor %}
+    </ul>
+    <a href="/inventory" class="btn btn-primary">Manage Inventory</a>
+</section>
+{% else %}
+<section class="empty-state">
+    <p>All items are stocked. Nothing to restock right now.</p>
+</section>
+{% endif %}
+
+<section class="quick-add">
+    <h2>Quick Links</h2>
+    <div class="quick-links">
+        <a href="/inventory" class="btn btn-secondary">View Inventory</a>
+        <a href="/recipes" class="btn btn-secondary">View Recipes</a>
+    </div>
+</section>
+{% endblock %}
