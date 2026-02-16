@@ -40,9 +40,7 @@ def create_app(db_path: str = "mealbot.db") -> Flask:
         static_folder="static",
     )
     app.config["DATABASE_PATH"] = db_path
-    app.config["SECRET_KEY"] = os.environ.get(
-        "FLASK_SECRET_KEY", os.urandom(32).hex()
-    )
+    app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", os.urandom(32).hex())
 
     init_db(db_path)
 
