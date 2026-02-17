@@ -3,7 +3,15 @@
 {% block title %}Dashboard - Grocery Butler{% endblock %}
 
 {% block content %}
-<h1>Dashboard</h1>
+<section class="hero">
+    <img src="{{ url_for('static', filename='img/satan-butler.png') }}"
+         alt="The Grocery Butler" class="hero-image">
+    <div class="hero-overlay"></div>
+    <div class="hero-content">
+        <h1 class="hero-title">Good evening.</h1>
+        <p class="hero-subtitle">Your pantry awaits inspection. I shall attend to every morsel, every crumb, every forgotten tin in the back of the cupboard.</p>
+    </div>
+</section>
 
 <section class="stats-grid">
     <div class="stat-card">

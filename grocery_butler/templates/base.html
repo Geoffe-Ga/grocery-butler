@@ -4,12 +4,18 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Grocery Butler{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
     <nav class="nav-bar" role="navigation" aria-label="Main navigation">
         <div class="nav-container">
-            <a href="/" class="nav-brand">Grocery Butler</a>
+            <a href="/" class="nav-brand">
+                <img src="{{ url_for('static', filename='img/satan-butler.png') }}"
+                     alt="" class="nav-brand-icon" width="32" height="32">
+                Grocery Butler
+            </a>
             <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">
                 <span class="nav-toggle-bar"></span>
                 <span class="nav-toggle-bar"></span>
@@ -48,7 +54,7 @@
 
     <footer class="footer">
         <div class="container">
-            <p>Grocery Butler</p>
+            <p><span class="footer-brand">Grocery Butler</span> &mdash; At your eternal service.</p>
         </div>
     </footer>
 
