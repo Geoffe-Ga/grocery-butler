@@ -29,7 +29,6 @@ class Config:
 
     # Required for Discord bot (optional if only running web/CLI)
     discord_bot_token: str = ""
-    discord_user_id: str = ""
 
     # Database
     database_path: str = "mealbot.db"
@@ -83,7 +82,6 @@ def load_config(env_path: str | Path | None = None) -> Config:
     return Config(
         anthropic_api_key=anthropic_api_key,
         discord_bot_token=os.getenv("DISCORD_BOT_TOKEN", ""),
-        discord_user_id=os.getenv("DISCORD_USER_ID", ""),
         database_path=os.getenv("DATABASE_PATH", "mealbot.db"),
         flask_port=flask_port,
         flask_debug=os.getenv("FLASK_DEBUG", "false").lower() in ("true", "1", "yes"),

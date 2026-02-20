@@ -527,6 +527,31 @@ def _remove_pantry_staple(store: RecipeStore, ingredient_name: str) -> int:
     return 1
 
 
+def _handle_bot() -> int:
+    """Handle the ``bot`` subcommand.
+
+    Loads configuration and starts the Discord bot. Requires
+    DISCORD_BOT_TOKEN in the environment.
+
+    Returns:
+        Exit code (0 for success, 1 for failure).
+    """
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    cfg = _load_config_safe()
+    if cfg is None:
+        return 1
+
+    from grocery_butler.bot import run_bot
+
+    try:
+        run_bot(cfg)
+    except Exception:
+        logger.exception("Discord bot exited with an error")
+        return 1
+    return 0
+
+
 # ------------------------------------------------------------------
 # Argument parser
 # ------------------------------------------------------------------
@@ -549,8 +574,23 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_restock_parser(subparsers)
     _add_recipes_parser(subparsers)
     _add_pantry_parser(subparsers)
+    _add_bot_parser(subparsers)
 
     return parser
+
+
+def _add_bot_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Add the ``bot`` subcommand parser.
+
+    Args:
+        subparsers: Subparsers action from the main parser.
+    """
+    subparsers.add_parser(
+        "bot",
+        help="Start the Discord bot.",
+    )
 
 
 def _add_plan_parser(
@@ -738,4 +778,6 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _handle_recipes(args)
     if command == "pantry":
         return _handle_pantry(args)
+    if command == "bot":
+        return _handle_bot()
     return 1  # pragma: no cover
