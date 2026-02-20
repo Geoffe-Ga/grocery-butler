@@ -16,6 +16,7 @@ from grocery_butler.cli import (
     _format_quantity,
     _format_recipes,
     _format_shopping_list,
+    _handle_bot,
     _remove_pantry_staple,
     main,
 )
@@ -462,6 +463,12 @@ class TestBuildParser:
         args = parser.parse_args(["pantry", "remove", "cumin"])
         assert args.action == "remove"
         assert args.ingredient_name == "cumin"
+
+    def test_bot_command(self):
+        """Test bot command parses correctly."""
+        parser = _build_parser()
+        args = parser.parse_args(["bot"])
+        assert args.command == "bot"
 
     def test_no_command_returns_none(self):
         """Test no command sets command to None."""
@@ -1133,6 +1140,61 @@ class TestHandlePlan:
 
 
 # ---------------------------------------------------------------------------
+# Bot subcommand handler tests
+# ---------------------------------------------------------------------------
+
+
+class TestHandleBot:
+    """Tests for _handle_bot."""
+
+    def _patch_run_bot(self, **kwargs):
+        """Patch run_bot via the lazy import inside _handle_bot.
+
+        Returns:
+            Patch context manager for ``run_bot``.
+        """
+        mock_bot_module = MagicMock()
+        mock_run = mock_bot_module.run_bot
+        for key, value in kwargs.items():
+            setattr(mock_run, key, value)
+        return patch.dict(
+            "sys.modules",
+            {"grocery_butler.bot": mock_bot_module},
+        ), mock_run
+
+    def test_starts_bot(self):
+        """Test bot subcommand calls run_bot with loaded config."""
+        mock_cfg = MagicMock()
+        modules_patch, mock_run = self._patch_run_bot()
+        with (
+            patch("grocery_butler.cli._load_config_safe", return_value=mock_cfg),
+            modules_patch,
+        ):
+            result = _handle_bot()
+        assert result == 0
+        mock_run.assert_called_once_with(mock_cfg)
+
+    def test_returns_1_when_config_missing(self):
+        """Test returns 1 when config loading fails."""
+        with patch("grocery_butler.cli._load_config_safe", return_value=None):
+            result = _handle_bot()
+        assert result == 1
+
+    def test_returns_1_on_bot_error(self):
+        """Test returns 1 when run_bot raises an exception."""
+        mock_cfg = MagicMock()
+        modules_patch, _mock_run = self._patch_run_bot(
+            side_effect=RuntimeError("connection failed"),
+        )
+        with (
+            patch("grocery_butler.cli._load_config_safe", return_value=mock_cfg),
+            modules_patch,
+        ):
+            result = _handle_bot()
+        assert result == 1
+
+
+# ---------------------------------------------------------------------------
 # Main entry point tests
 # ---------------------------------------------------------------------------
 
@@ -1164,6 +1226,18 @@ class TestMain:
         ):
             mock_cfg.return_value = MagicMock(database_path=db_path)
             main(["restock"])
+        assert exc_info.value.code == 0
+
+    def test_bot_command(self):
+        """Test main dispatches bot command."""
+        mock_cfg = MagicMock()
+        mock_bot_module = MagicMock()
+        with (
+            patch("grocery_butler.cli._load_config_safe", return_value=mock_cfg),
+            patch.dict("sys.modules", {"grocery_butler.bot": mock_bot_module}),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            main(["bot"])
         assert exc_info.value.code == 0
 
 

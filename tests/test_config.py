@@ -77,14 +77,16 @@ class TestLoadConfig:
         assert cfg.flask_port == 5000
         assert cfg.default_servings == 4
 
+    @patch("grocery_butler.config.load_dotenv")
     @patch.dict(os.environ, {}, clear=True)
-    def test_load_config_missing_api_key_raises(self) -> None:
+    def test_load_config_missing_api_key_raises(self, _mock_dotenv: object) -> None:
         """Test load_config raises ConfigError when ANTHROPIC_API_KEY missing."""
         with pytest.raises(ConfigError, match="ANTHROPIC_API_KEY is required"):
             load_config()
 
+    @patch("grocery_butler.config.load_dotenv")
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}, clear=True)
-    def test_load_config_empty_api_key_raises(self) -> None:
+    def test_load_config_empty_api_key_raises(self, _mock_dotenv: object) -> None:
         """Test load_config raises ConfigError when ANTHROPIC_API_KEY is empty."""
         with pytest.raises(ConfigError, match="ANTHROPIC_API_KEY is required"):
             load_config()
