@@ -1341,6 +1341,27 @@ class TestOnMessageEvent:
         message.reply.assert_not_called()
 
     @pytest.mark.asyncio()
+    async def test_ignores_non_member_author(self, bot):
+        """Test on_message ignores messages from non-Member authors (e.g., webhooks)."""
+        message = MagicMock()
+        message.author = MagicMock(spec=discord.User)  # User, not Member
+        message.guild = MagicMock()  # In a guild, so DM check passes
+        message.content = "out of milk"
+        message.reply = AsyncMock()
+
+        mock_user = MagicMock()
+        mock_user.id = 111111
+
+        with patch.object(
+            type(bot),
+            "user",
+            new_callable=PropertyMock,
+            return_value=mock_user,
+        ):
+            await bot.on_message(message)  # type: ignore[attr-defined]
+        message.reply.assert_not_called()
+
+    @pytest.mark.asyncio()
     async def test_ignores_user_without_manage_guild(self, bot):
         """Test on_message ignores users without manage_guild permission."""
         message = _make_guild_message(manage_guild=False, content="we are out of milk")

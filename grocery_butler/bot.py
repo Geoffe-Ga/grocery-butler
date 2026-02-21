@@ -7,6 +7,10 @@ the SQLite database with the Flask app via WAL mode.
 Uses Discord's native permission system: slash commands require
 ``manage_guild`` by default, which server admins can override per-role
 via Server Settings > Integrations > Manage.
+
+Security note: This is intentionally a multi-user model. Any guild member
+granted ``manage_guild`` (or access via the Integrations UI) can use the
+bot. Server admins are responsible for configuring role-based access.
 """
 
 from __future__ import annotations
@@ -906,7 +910,9 @@ def create_bot(config: Config) -> discord.Client:
         if message.guild is None:
             return
 
-        # Only process messages from users with manage_guild permission
+        # Only process messages from guild members with manage_guild permission.
+        # message.author can be discord.User for webhooks/system messages;
+        # permissions_for() requires discord.Member, so filter those out.
         member = message.author
         if not isinstance(member, discord.Member):
             return
