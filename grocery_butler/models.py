@@ -129,6 +129,8 @@ class InventoryItem(BaseModel):
     display_name: str
     category: IngredientCategory | None = None
     status: InventoryStatus = InventoryStatus.ON_HAND
+    current_quantity: float | None = None
+    current_unit: str | None = None
     default_quantity: float | None = None
     default_unit: str | None = None
     default_search_term: str | None = None

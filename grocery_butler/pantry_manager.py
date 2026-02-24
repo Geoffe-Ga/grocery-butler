@@ -77,6 +77,7 @@ class PantryManager:
         try:
             cursor = conn.execute(
                 "SELECT ingredient, display_name, category, status, "
+                "current_quantity, current_unit, "
                 "default_quantity, default_unit, default_search_term, notes "
                 "FROM household_inventory ORDER BY ingredient"
             )
@@ -97,6 +98,7 @@ class PantryManager:
         try:
             cursor = conn.execute(
                 "SELECT ingredient, display_name, category, status, "
+                "current_quantity, current_unit, "
                 "default_quantity, default_unit, default_search_term, notes "
                 "FROM household_inventory WHERE LOWER(ingredient) = ?",
                 (ingredient.lower(),),
@@ -123,13 +125,16 @@ class PantryManager:
             cursor = conn.execute(
                 "INSERT INTO household_inventory "
                 "(ingredient, display_name, category, status, "
+                "current_quantity, current_unit, "
                 "default_quantity, default_unit, default_search_term, notes) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     item.ingredient.lower(),
                     item.display_name,
                     item.category.value if item.category else None,
                     item.status.value,
+                    item.current_quantity,
+                    item.current_unit,
                     item.default_quantity,
                     item.default_unit,
                     item.default_search_term,
@@ -180,6 +185,26 @@ class PantryManager:
         finally:
             conn.close()
 
+    def update_quantity(self, ingredient: str, quantity: float, unit: str) -> None:
+        """Update an item's current quantity and unit.
+
+        Args:
+            ingredient: Ingredient name (case-insensitive).
+            quantity: The new quantity value.
+            unit: The unit for the quantity (e.g. 'gal', 'lb').
+        """
+        conn = get_connection(self._db_path)
+        try:
+            conn.execute(
+                "UPDATE household_inventory "
+                "SET current_quantity = ?, current_unit = ? "
+                "WHERE LOWER(ingredient) = ?",
+                (quantity, unit, ingredient.lower()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def mark_restocked(self, ingredients: list[str]) -> int:
         """Move matching items back to on_hand and set last_restocked.
 
@@ -202,7 +227,8 @@ class PantryManager:
             for name in lowered:
                 cursor = conn.execute(
                     "UPDATE household_inventory "
-                    "SET status = ?, last_restocked = ?, last_status_change = ? "
+                    "SET status = ?, last_restocked = ?, last_status_change = ?, "
+                    "current_quantity = default_quantity "
                     "WHERE LOWER(ingredient) = ?",
                     (InventoryStatus.ON_HAND.value, now, now, name),
                 )
@@ -222,6 +248,7 @@ class PantryManager:
         try:
             cursor = conn.execute(
                 "SELECT ingredient, display_name, category, status, "
+                "current_quantity, current_unit, "
                 "default_quantity, default_unit, default_search_term, notes "
                 "FROM household_inventory WHERE status IN (?, ?) "
                 "ORDER BY ingredient",
@@ -322,6 +349,8 @@ def _row_to_item(row: Any) -> InventoryItem:
         display_name=row["display_name"],
         category=row["category"],
         status=row["status"],
+        current_quantity=row["current_quantity"],
+        current_unit=row["current_unit"],
         default_quantity=row["default_quantity"],
         default_unit=row["default_unit"],
         default_search_term=row["default_search_term"],
@@ -343,7 +372,10 @@ def _format_inventory_context(items: list[InventoryItem]) -> str:
 
     lines = []
     for item in items:
-        lines.append(f"- {item.display_name}: {item.status.value}")
+        qty_str = ""
+        if item.current_quantity is not None and item.current_unit is not None:
+            qty_str = f" ({item.current_quantity:g} {item.current_unit})"
+        lines.append(f"- {item.display_name}: {item.status.value}{qty_str}")
     return "\n".join(lines)
 
 

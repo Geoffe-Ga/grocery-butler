@@ -173,7 +173,10 @@ def _format_inventory(items: list[InventoryItem]) -> str:
     lines: list[str] = []
     for item in items:
         tag = f"[{item.status.value.upper()}]"
-        lines.append(f"  {tag:<10s} {item.display_name}")
+        qty_str = ""
+        if item.current_quantity is not None and item.current_unit is not None:
+            qty_str = f"  ({item.current_quantity:g} {item.current_unit})"
+        lines.append(f"  {tag:<10s} {item.display_name}{qty_str}")
     return "\n".join(lines)
 
 
