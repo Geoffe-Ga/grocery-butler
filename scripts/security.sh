@@ -77,9 +77,8 @@ fi
 
 # Known vulnerability ignores (deps with no fix available):
 #   PYSEC-2022-42969: py 1.11.0 - deprecated package, transitive dep from pytest tooling
-#   CVE-2025-14009: nltk 3.9.2 - no fix version released yet
-#   Issue #3: Remove these once upstream fixes are available
-PIP_AUDIT_ARGS=("--ignore-vuln" "PYSEC-2022-42969" "--ignore-vuln" "CVE-2025-14009")
+#   Issue #3: Remove once pytest ecosystem drops the py transitive dependency
+PIP_AUDIT_ARGS=("--ignore-vuln" "PYSEC-2022-42969")
 
 VENV_PYTHON="${VIRTUAL_ENV:-$PROJECT_ROOT/.venv}/bin/python"
 if [ -x "$VENV_PYTHON" ]; then
