@@ -11,7 +11,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from grocery_butler.models import Ingredient, IngredientCategory, ParsedMeal
+from grocery_butler.models import Ingredient, IngredientCategory, ParsedMeal, parse_unit
 from grocery_butler.prompt_loader import load_prompt
 from grocery_butler.recipe_store import RecipeStore, normalize_recipe_name
 
@@ -75,7 +75,7 @@ def _parse_ingredient(data: dict[str, object]) -> Ingredient:
     return Ingredient(
         ingredient=str(data.get("ingredient", "")),
         quantity=quantity,
-        unit=str(data.get("unit", "")),
+        unit=parse_unit(str(data.get("unit", ""))),
         category=IngredientCategory(str(data.get("category", "other"))),
         notes=str(data.get("notes", "")),
         is_pantry_item=bool(data.get("is_pantry_item", False)),

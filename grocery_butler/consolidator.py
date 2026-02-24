@@ -11,7 +11,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from grocery_butler.models import IngredientCategory, ShoppingListItem
+from grocery_butler.models import IngredientCategory, ShoppingListItem, Unit, parse_unit
 from grocery_butler.prompt_loader import load_prompt
 
 if TYPE_CHECKING:
@@ -124,7 +124,7 @@ def _parse_shopping_item(data: dict[str, object]) -> ShoppingListItem:
     return ShoppingListItem(
         ingredient=str(data.get("ingredient", "")),
         quantity=quantity,
-        unit=str(data.get("unit", "")),
+        unit=parse_unit(str(data.get("unit", ""))),
         category=category,
         search_term=str(data.get("search_term", "")),
         from_meals=from_meals,
@@ -399,7 +399,7 @@ class Consolidator:
                 ShoppingListItem(
                     ingredient=ingredient_name,
                     quantity=quantity,
-                    unit=str(entry.get("unit", "")),
+                    unit=parse_unit(str(entry.get("unit", ""))),
                     category=category,
                     search_term=ingredient_name,
                     from_meals=from_meals,
@@ -432,7 +432,9 @@ class Consolidator:
                     quantity=inv.default_quantity
                     if inv.default_quantity is not None
                     else 1.0,
-                    unit=inv.default_unit if inv.default_unit is not None else "each",
+                    unit=inv.default_unit
+                    if inv.default_unit is not None
+                    else Unit.EACH,
                     category=inv.category
                     if inv.category is not None
                     else IngredientCategory.OTHER,
