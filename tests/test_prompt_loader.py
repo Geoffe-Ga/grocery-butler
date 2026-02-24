@@ -71,10 +71,19 @@ class TestLoadPrompt:
         assert "whole milk" in result
         assert "moderate" in result
 
-    def test_load_placeholder_substitution_ranking(self) -> None:
-        """Test loading placeholder substitution_ranking template."""
-        result = load_prompt("substitution_ranking")
-        assert "Phase 3" in result
+    def test_load_substitution_ranking(self) -> None:
+        """Test loading substitution_ranking template with variables."""
+        result = load_prompt(
+            "substitution_ranking",
+            ingredient="chicken thighs",
+            quantity="2",
+            unit="lb",
+            search_term="boneless chicken thighs",
+            alternatives_json="[]",
+            brand_preferences="None",
+        )
+        assert "chicken thighs" in result
+        assert "suitability" in result.lower()
 
     def test_load_brand_selection(self) -> None:
         """Test loading brand_selection template with variables."""
