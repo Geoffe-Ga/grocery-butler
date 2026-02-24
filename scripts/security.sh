@@ -75,15 +75,17 @@ if $VERBOSE; then
     echo "Running pip-audit dependency checker..."
 fi
 
-# Known vulnerability ignores (transitive deps we cannot directly control):
-#   PYSEC-2022-42969: py 1.11.0 - deprecated package pulled in by older pytest tooling
-PIP_AUDIT_ARGS="--ignore-vuln PYSEC-2022-42969"
+# Known vulnerability ignores (deps with no fix available):
+#   PYSEC-2022-42969: py 1.11.0 - deprecated package, transitive dep from pytest tooling
+#   CVE-2025-14009: nltk 3.9.2 - no fix version released yet
+#   Issue #3: Remove these once upstream fixes are available
+PIP_AUDIT_ARGS=("--ignore-vuln" "PYSEC-2022-42969" "--ignore-vuln" "CVE-2025-14009")
 
 VENV_PYTHON="${VIRTUAL_ENV:-$PROJECT_ROOT/.venv}/bin/python"
 if [ -x "$VENV_PYTHON" ]; then
-    PIPAPI_PYTHON_LOCATION="$VENV_PYTHON" pip-audit $PIP_AUDIT_ARGS || { echo "✗ pip-audit found issues" >&2; exit 1; }
+    PIPAPI_PYTHON_LOCATION="$VENV_PYTHON" pip-audit "${PIP_AUDIT_ARGS[@]}" || { echo "✗ pip-audit found issues" >&2; exit 1; }
 else
-    pip-audit $PIP_AUDIT_ARGS || { echo "✗ pip-audit found issues" >&2; exit 1; }
+    pip-audit "${PIP_AUDIT_ARGS[@]}" || { echo "✗ pip-audit found issues" >&2; exit 1; }
 fi
 
 if $FULL; then
