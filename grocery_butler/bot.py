@@ -4,8 +4,13 @@ Provides a Discord interface for managing household inventory, planning
 meals, and generating shopping lists. Runs as a separate process sharing
 the SQLite database with the Flask app via WAL mode.
 
-Single-server, single-authorized-user model: only responds to the user
-identified by ``DISCORD_USER_ID`` in the configuration.
+Uses Discord's native permission system: slash commands require
+``manage_guild`` by default, which server admins can override per-role
+via Server Settings > Integrations > Manage.
+
+Security note: This is intentionally a multi-user model. Any guild member
+granted ``manage_guild`` (or access via the Integrations UI) can use the
+bot. Server admins are responsible for configuring role-based access.
 """
 
 from __future__ import annotations
@@ -237,30 +242,6 @@ def _format_preferences(prefs: dict[str, str]) -> str:
     return _truncate("\n".join(lines))
 
 
-def _is_authorized(interaction: discord.Interaction, user_id: str) -> bool:
-    """Check whether the interaction user is the authorized user.
-
-    Args:
-        interaction: The Discord interaction to check.
-        user_id: The authorized Discord user ID string.
-
-    Returns:
-        True if the user is authorized.
-    """
-    return str(interaction.user.id) == user_id
-
-
-async def _deny(interaction: discord.Interaction) -> None:
-    """Send an unauthorized response.
-
-    Args:
-        interaction: The Discord interaction to respond to.
-    """
-    await interaction.response.send_message(
-        "You are not authorized to use this bot.", ephemeral=True
-    )
-
-
 def create_bot(config: Config) -> discord.Client:
     """Create and configure the Discord bot with all slash commands.
 
@@ -292,13 +273,13 @@ def create_bot(config: Config) -> discord.Client:
     meal_parser = MealParser(recipe_store)
     consolidator = Consolidator()
 
-    user_id = config.discord_user_id
-
     # ------------------------------------------------------------------
     # /meals command
     # ------------------------------------------------------------------
 
     @tree.command(name="meals", description="Plan meals and generate a shopping list")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(meals="Comma-separated list of meal names")
     async def meals_command(interaction: discord.Interaction, meals: str) -> None:
         """Run the full meal planning pipeline.
@@ -307,10 +288,6 @@ def create_bot(config: Config) -> discord.Client:
             interaction: Discord interaction context.
             meals: Comma-separated meal name string.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         await interaction.response.defer()
 
         try:
@@ -344,7 +321,10 @@ def create_bot(config: Config) -> discord.Client:
     # ------------------------------------------------------------------
 
     pantry_group = app_commands.Group(
-        name="pantry", description="Manage pantry staples"
+        name="pantry",
+        description="Manage pantry staples",
+        guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
     )
 
     @pantry_group.command(name="list", description="Show all pantry staples")
@@ -354,10 +334,6 @@ def create_bot(config: Config) -> discord.Client:
         Args:
             interaction: Discord interaction context.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             staples = await asyncio.to_thread(recipe_store.get_pantry_staples)
             result = _format_pantry_list(staples)
@@ -384,10 +360,6 @@ def create_bot(config: Config) -> discord.Client:
             ingredient: Ingredient name to add.
             category: Category string for the staple.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             await asyncio.to_thread(
                 recipe_store.add_pantry_staple, ingredient, category
@@ -410,10 +382,6 @@ def create_bot(config: Config) -> discord.Client:
             interaction: Discord interaction context.
             ingredient: Ingredient name to remove.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             staples = await asyncio.to_thread(recipe_store.get_pantry_staples)
             target = ingredient.strip().lower()
@@ -447,7 +415,10 @@ def create_bot(config: Config) -> discord.Client:
     # ------------------------------------------------------------------
 
     stock_group = app_commands.Group(
-        name="stock", description="Manage household inventory"
+        name="stock",
+        description="Manage household inventory",
+        guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
     )
 
     @stock_group.command(name="show", description="Show full inventory")
@@ -457,10 +428,6 @@ def create_bot(config: Config) -> discord.Client:
         Args:
             interaction: Discord interaction context.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             items = await asyncio.to_thread(pantry_manager.get_inventory)
             result = _format_inventory(items)
@@ -480,10 +447,6 @@ def create_bot(config: Config) -> discord.Client:
             interaction: Discord interaction context.
             item: Item name to mark as out.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             from grocery_butler.models import InventoryStatus
 
@@ -514,10 +477,6 @@ def create_bot(config: Config) -> discord.Client:
             interaction: Discord interaction context.
             item: Item name to mark as low.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             from grocery_butler.models import InventoryStatus
 
@@ -548,10 +507,6 @@ def create_bot(config: Config) -> discord.Client:
             interaction: Discord interaction context.
             item: Item name to mark as on_hand.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             from grocery_butler.models import InventoryStatus
 
@@ -585,10 +540,6 @@ def create_bot(config: Config) -> discord.Client:
             item: Item name to track.
             category: Category string.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             from grocery_butler.models import (
                 IngredientCategory,
@@ -624,7 +575,10 @@ def create_bot(config: Config) -> discord.Client:
     # ------------------------------------------------------------------
 
     restock_group = app_commands.Group(
-        name="restock", description="View and manage the restock queue"
+        name="restock",
+        description="View and manage the restock queue",
+        guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
     )
 
     @restock_group.command(name="show", description="Show the restock queue")
@@ -634,10 +588,6 @@ def create_bot(config: Config) -> discord.Client:
         Args:
             interaction: Discord interaction context.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             items = await asyncio.to_thread(pantry_manager.get_restock_queue)
             result = _format_restock_queue(items)
@@ -655,10 +605,6 @@ def create_bot(config: Config) -> discord.Client:
         Args:
             interaction: Discord interaction context.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             count = await asyncio.to_thread(pantry_manager.clear_restock_queue)
             await interaction.response.send_message(
@@ -677,7 +623,10 @@ def create_bot(config: Config) -> discord.Client:
     # ------------------------------------------------------------------
 
     brands_group = app_commands.Group(
-        name="brands", description="Manage brand preferences"
+        name="brands",
+        description="Manage brand preferences",
+        guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
     )
 
     @brands_group.command(name="show", description="Show all brand preferences")
@@ -687,10 +636,6 @@ def create_bot(config: Config) -> discord.Client:
         Args:
             interaction: Discord interaction context.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             prefs = await asyncio.to_thread(recipe_store.get_brand_preferences)
             result = _format_brands(prefs)
@@ -715,10 +660,6 @@ def create_bot(config: Config) -> discord.Client:
             target: Ingredient or category name.
             brand: The preferred brand name.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             from grocery_butler.models import (
                 BrandMatchType,
@@ -751,10 +692,6 @@ def create_bot(config: Config) -> discord.Client:
             interaction: Discord interaction context.
             brand: Brand name to avoid.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             from grocery_butler.models import (
                 BrandMatchType,
@@ -785,10 +722,6 @@ def create_bot(config: Config) -> discord.Client:
             interaction: Discord interaction context.
             target: The target to clear preferences for.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             prefs = await asyncio.to_thread(recipe_store.get_brand_preferences)
             removed = 0
@@ -822,7 +755,10 @@ def create_bot(config: Config) -> discord.Client:
     # ------------------------------------------------------------------
 
     recipes_group = app_commands.Group(
-        name="recipes", description="Manage saved recipes"
+        name="recipes",
+        description="Manage saved recipes",
+        guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
     )
 
     @recipes_group.command(name="list", description="List all saved recipes")
@@ -832,10 +768,6 @@ def create_bot(config: Config) -> discord.Client:
         Args:
             interaction: Discord interaction context.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             recipes = await asyncio.to_thread(recipe_store.list_recipes)
             result = _format_recipes(recipes)
@@ -855,10 +787,6 @@ def create_bot(config: Config) -> discord.Client:
             interaction: Discord interaction context.
             name: Recipe name to look up.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             meal = await asyncio.to_thread(recipe_store.find_recipe, name)
             if meal is None:
@@ -881,10 +809,6 @@ def create_bot(config: Config) -> discord.Client:
             interaction: Discord interaction context.
             name: Recipe name to delete.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             recipes = await asyncio.to_thread(recipe_store.list_recipes)
             from grocery_butler.recipe_store import normalize_recipe_name
@@ -915,7 +839,10 @@ def create_bot(config: Config) -> discord.Client:
     # ------------------------------------------------------------------
 
     prefs_group = app_commands.Group(
-        name="preferences", description="Manage user preferences"
+        name="preferences",
+        description="Manage user preferences",
+        guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
     )
 
     @prefs_group.command(name="show", description="Show current preferences")
@@ -925,10 +852,6 @@ def create_bot(config: Config) -> discord.Client:
         Args:
             interaction: Discord interaction context.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             prefs = await asyncio.to_thread(recipe_store.get_all_preferences)
             result = _format_preferences(prefs)
@@ -949,10 +872,6 @@ def create_bot(config: Config) -> discord.Client:
             key: Preference key.
             value: Preference value.
         """
-        if not _is_authorized(interaction, user_id):
-            await _deny(interaction)
-            return
-
         try:
             await asyncio.to_thread(recipe_store.set_preference, key, value)
             await interaction.response.send_message(f"Set **{key}** = {value}")
@@ -987,8 +906,18 @@ def create_bot(config: Config) -> discord.Client:
         if message.author == client.user:
             return
 
-        # Only process messages from authorized user
-        if str(message.author.id) != user_id:
+        # Ignore DMs (guild-only, consistent with slash commands)
+        if message.guild is None:
+            return
+
+        # Only process messages from guild members with manage_guild permission.
+        # message.author can be discord.User for webhooks/system messages;
+        # permissions_for() requires discord.Member, so filter those out.
+        member = message.author
+        if not isinstance(member, discord.Member):
+            return
+        perms = message.channel.permissions_for(member)
+        if not perms.manage_guild:
             return
 
         # Ignore messages that look like commands
@@ -1057,8 +986,6 @@ def run_bot(config: Config) -> None:
 
     if not config.discord_bot_token:
         raise ConfigError("DISCORD_BOT_TOKEN is required to run the bot.")
-    if not config.discord_user_id:
-        raise ConfigError("DISCORD_USER_ID is required to run the bot.")
 
     client = create_bot(config)
     client.run(config.discord_bot_token, log_handler=None)

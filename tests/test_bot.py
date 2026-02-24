@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
+import discord
 import pytest
 
 from grocery_butler.bot import (
@@ -15,7 +16,6 @@ from grocery_butler.bot import (
     _format_recipes,
     _format_restock_queue,
     _format_shopping_list,
-    _is_authorized,
     _truncate,
     create_bot,
     run_bot,
@@ -45,7 +45,6 @@ def config() -> Config:
     return Config(
         anthropic_api_key="sk-test",
         discord_bot_token="test-bot-token",
-        discord_user_id="123456789",
         database_path=":memory:",
     )
 
@@ -56,17 +55,6 @@ def config_no_token() -> Config:
     return Config(
         anthropic_api_key="sk-test",
         discord_bot_token="",
-        discord_user_id="123456789",
-    )
-
-
-@pytest.fixture()
-def config_no_user() -> Config:
-    """Return a Config missing Discord user ID."""
-    return Config(
-        anthropic_api_key="sk-test",
-        discord_bot_token="test-bot-token",
-        discord_user_id="",
     )
 
 
@@ -155,7 +143,7 @@ def sample_meal() -> ParsedMeal:
 
 @pytest.fixture()
 def mock_interaction() -> MagicMock:
-    """Return a mock Discord interaction for the authorized user."""
+    """Return a mock Discord interaction."""
     interaction = MagicMock()
     interaction.user = MagicMock()
     interaction.user.id = 123456789
@@ -167,18 +155,30 @@ def mock_interaction() -> MagicMock:
     return interaction
 
 
-@pytest.fixture()
-def mock_interaction_unauthorized() -> MagicMock:
-    """Return a mock Discord interaction for an unauthorized user."""
-    interaction = MagicMock()
-    interaction.user = MagicMock()
-    interaction.user.id = 987654321
-    interaction.response = MagicMock()
-    interaction.response.send_message = AsyncMock()
-    interaction.response.defer = AsyncMock()
-    interaction.followup = MagicMock()
-    interaction.followup.send = AsyncMock()
-    return interaction
+def _make_guild_message(
+    *, manage_guild: bool = True, content: str = "hello"
+) -> MagicMock:
+    """Create a mock guild message with configurable permissions.
+
+    Args:
+        manage_guild: Whether the author has manage_guild permission.
+        content: Message content string.
+
+    Returns:
+        Mock message with guild, channel, and permissions configured.
+    """
+    message = MagicMock()
+    message.author = MagicMock(spec=discord.Member)
+    message.author.id = 123456789
+    message.content = content
+    message.reply = AsyncMock()
+    message.guild = MagicMock()
+
+    perms = MagicMock(spec=discord.Permissions)
+    perms.manage_guild = manage_guild
+    message.channel.permissions_for.return_value = perms
+
+    return message
 
 
 # ---------------------------------------------------------------------------
@@ -511,23 +511,6 @@ class TestFormatPreferences:
 
 
 # ---------------------------------------------------------------------------
-# TestIsAuthorized
-# ---------------------------------------------------------------------------
-
-
-class TestIsAuthorized:
-    """Tests for the _is_authorized function."""
-
-    def test_authorized_user(self, mock_interaction):
-        """Test authorized user returns True."""
-        assert _is_authorized(mock_interaction, "123456789") is True
-
-    def test_unauthorized_user(self, mock_interaction_unauthorized):
-        """Test unauthorized user returns False."""
-        assert _is_authorized(mock_interaction_unauthorized, "123456789") is False
-
-
-# ---------------------------------------------------------------------------
 # TestCreateBot
 # ---------------------------------------------------------------------------
 
@@ -537,8 +520,6 @@ class TestCreateBot:
 
     def test_creates_client(self, config):
         """Test create_bot returns a discord Client."""
-        import discord
-
         bot = create_bot(config)
         assert isinstance(bot, discord.Client)
 
@@ -555,6 +536,70 @@ class TestCreateBot:
 
 
 # ---------------------------------------------------------------------------
+# TestDiscordPermissions - verify native permission decorators
+# ---------------------------------------------------------------------------
+
+
+class TestDiscordPermissions:
+    """Tests that commands use Discord-native permission settings."""
+
+    @pytest.fixture()
+    def bot(self, config):
+        """Create a bot instance for testing."""
+        return create_bot(config)
+
+    def _get_command(self, bot, name):
+        """Get a top-level command or group by name.
+
+        Args:
+            bot: The Discord bot client.
+            name: Command or group name.
+
+        Returns:
+            The command/group, or None if not found.
+        """
+        tree = bot.tree  # type: ignore[attr-defined]
+        for cmd in tree.get_commands():
+            if cmd.name == name:
+                return cmd
+        return None  # pragma: no cover
+
+    def test_meals_guild_only(self, bot):
+        """Test /meals has guild_only set."""
+        cmd = self._get_command(bot, "meals")
+        assert cmd is not None
+        assert cmd.guild_only is True
+
+    def test_meals_default_permissions(self, bot):
+        """Test /meals requires manage_guild by default."""
+        cmd = self._get_command(bot, "meals")
+        assert cmd is not None
+        assert cmd.default_permissions is not None
+        assert cmd.default_permissions.manage_guild is True
+
+    def test_command_groups_guild_only(self, bot):
+        """Test all command groups have guild_only set."""
+        group_names = ["pantry", "stock", "restock", "brands", "recipes", "preferences"]
+        for name in group_names:
+            group = self._get_command(bot, name)
+            assert group is not None, f"Group {name!r} not found"
+            assert group.guild_only is True, f"Group {name!r} not guild_only"
+
+    def test_command_groups_default_permissions(self, bot):
+        """Test all command groups require manage_guild by default."""
+        group_names = ["pantry", "stock", "restock", "brands", "recipes", "preferences"]
+        for name in group_names:
+            group = self._get_command(bot, name)
+            assert group is not None, f"Group {name!r} not found"
+            assert group.default_permissions is not None, (
+                f"Group {name!r} has no default_permissions"
+            )
+            assert group.default_permissions.manage_guild is True, (
+                f"Group {name!r} doesn't require manage_guild"
+            )
+
+
+# ---------------------------------------------------------------------------
 # TestRunBot
 # ---------------------------------------------------------------------------
 
@@ -566,11 +611,6 @@ class TestRunBot:
         """Test run_bot raises ConfigError when bot token is missing."""
         with pytest.raises(ConfigError, match="DISCORD_BOT_TOKEN"):
             run_bot(config_no_token)
-
-    def test_missing_user_id_raises(self, config_no_user):
-        """Test run_bot raises ConfigError when user ID is missing."""
-        with pytest.raises(ConfigError, match="DISCORD_USER_ID"):
-            run_bot(config_no_user)
 
     @patch("grocery_butler.bot.create_bot")
     def test_calls_client_run(self, mock_create_bot, config):
@@ -606,16 +646,6 @@ class TestMealsCommand:
         return None  # pragma: no cover
 
     @pytest.mark.asyncio()
-    async def test_meals_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /meals rejects unauthorized users."""
-        cmd = self._get_command(bot)
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized, meals="pasta")
-        mock_interaction_unauthorized.response.send_message.assert_called_once()
-        call_kwargs = mock_interaction_unauthorized.response.send_message.call_args
-        assert "not authorized" in str(call_kwargs)
-
-    @pytest.mark.asyncio()
     async def test_meals_empty_input(self, bot, mock_interaction):
         """Test /meals with empty input."""
         cmd = self._get_command(bot)
@@ -630,8 +660,6 @@ class TestMealsCommand:
         """Test /meals with valid input produces a shopping list."""
         cmd = self._get_command(bot)
         assert cmd is not None
-        # MealParser with no client returns stub meals; consolidate_simple
-        # handles empty purchase_items gracefully
         await cmd.callback(mock_interaction, meals="pasta, salad")
         mock_interaction.response.defer.assert_called_once()
         mock_interaction.followup.send.assert_called_once()
@@ -681,15 +709,6 @@ class TestPantryCommands:
         mock_interaction.response.send_message.assert_called_once()
 
     @pytest.mark.asyncio()
-    async def test_pantry_list_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /pantry list rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "list")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized)
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
-
-    @pytest.mark.asyncio()
     async def test_pantry_add(self, bot, mock_interaction):
         """Test /pantry add adds a staple."""
         cmd = self._get_subcommand(bot, "add")
@@ -697,17 +716,6 @@ class TestPantryCommands:
         await cmd.callback(mock_interaction, ingredient="cumin", category="pantry_dry")
         call_args = str(mock_interaction.response.send_message.call_args)
         assert "cumin" in call_args
-
-    @pytest.mark.asyncio()
-    async def test_pantry_add_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /pantry add rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "add")
-        assert cmd is not None
-        await cmd.callback(
-            mock_interaction_unauthorized, ingredient="cumin", category="pantry_dry"
-        )
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
 
     @pytest.mark.asyncio()
     async def test_pantry_add_error(self, bot, mock_interaction):
@@ -744,15 +752,6 @@ class TestPantryCommands:
         await cmd.callback(mock_interaction, ingredient="salt")
         call_args = str(mock_interaction.response.send_message.call_args)
         assert "Removed" in call_args
-
-    @pytest.mark.asyncio()
-    async def test_pantry_remove_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /pantry remove rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "remove")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized, ingredient="salt")
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
 
     @pytest.mark.asyncio()
     async def test_pantry_remove_error(self, bot, mock_interaction):
@@ -808,15 +807,6 @@ class TestStockCommands:
         mock_interaction.response.send_message.assert_called_once()
 
     @pytest.mark.asyncio()
-    async def test_stock_show_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /stock show rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "show")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized)
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
-
-    @pytest.mark.asyncio()
     async def test_stock_show_error(self, bot, mock_interaction):
         """Test /stock show handles errors gracefully."""
         cmd = self._get_subcommand(bot, "show")
@@ -837,15 +827,6 @@ class TestStockCommands:
         await cmd.callback(mock_interaction, item="nonexistent")
         call_args = str(mock_interaction.response.send_message.call_args)
         assert "not found" in call_args
-
-    @pytest.mark.asyncio()
-    async def test_stock_out_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /stock out rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "out")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized, item="milk")
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
 
     @pytest.mark.asyncio()
     async def test_stock_out_error(self, bot, mock_interaction):
@@ -870,15 +851,6 @@ class TestStockCommands:
         assert "not found" in call_args
 
     @pytest.mark.asyncio()
-    async def test_stock_low_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /stock low rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "low")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized, item="milk")
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
-
-    @pytest.mark.asyncio()
     async def test_stock_low_error(self, bot, mock_interaction):
         """Test /stock low handles errors gracefully."""
         cmd = self._get_subcommand(bot, "low")
@@ -901,15 +873,6 @@ class TestStockCommands:
         assert "not found" in call_args
 
     @pytest.mark.asyncio()
-    async def test_stock_good_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /stock good rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "good")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized, item="milk")
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
-
-    @pytest.mark.asyncio()
     async def test_stock_good_error(self, bot, mock_interaction):
         """Test /stock good handles errors gracefully."""
         cmd = self._get_subcommand(bot, "good")
@@ -930,19 +893,6 @@ class TestStockCommands:
         await cmd.callback(mock_interaction, item="cheese", category="dairy")
         call_args = str(mock_interaction.response.send_message.call_args)
         assert "tracking" in call_args
-
-    @pytest.mark.asyncio()
-    async def test_stock_add_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /stock add rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "add")
-        assert cmd is not None
-        await cmd.callback(
-            mock_interaction_unauthorized,
-            item="cheese",
-            category="dairy",
-        )
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
 
     @pytest.mark.asyncio()
     async def test_stock_add_invalid_category(self, bot, mock_interaction):
@@ -1038,15 +988,6 @@ class TestRestockCommands:
         mock_interaction.response.send_message.assert_called_once()
 
     @pytest.mark.asyncio()
-    async def test_restock_show_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /restock show rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "show")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized)
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
-
-    @pytest.mark.asyncio()
     async def test_restock_show_error(self, bot, mock_interaction):
         """Test /restock show handles errors gracefully."""
         cmd = self._get_subcommand(bot, "show")
@@ -1067,15 +1008,6 @@ class TestRestockCommands:
         await cmd.callback(mock_interaction)
         call_args = str(mock_interaction.response.send_message.call_args)
         assert "Cleared" in call_args
-
-    @pytest.mark.asyncio()
-    async def test_restock_clear_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /restock clear rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "clear")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized)
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
 
     @pytest.mark.asyncio()
     async def test_restock_clear_error(self, bot, mock_interaction):
@@ -1118,15 +1050,6 @@ class TestBrandsCommands:
         mock_interaction.response.send_message.assert_called_once()
 
     @pytest.mark.asyncio()
-    async def test_brands_show_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /brands show rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "show")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized)
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
-
-    @pytest.mark.asyncio()
     async def test_brands_show_error(self, bot, mock_interaction):
         """Test /brands show handles errors gracefully."""
         cmd = self._get_subcommand(bot, "show")
@@ -1148,17 +1071,6 @@ class TestBrandsCommands:
         call_args = str(mock_interaction.response.send_message.call_args)
         assert "milk" in call_args
         assert "Organic Valley" in call_args
-
-    @pytest.mark.asyncio()
-    async def test_brands_set_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /brands set rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "set")
-        assert cmd is not None
-        await cmd.callback(
-            mock_interaction_unauthorized, target="milk", brand="Organic Valley"
-        )
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
 
     @pytest.mark.asyncio()
     async def test_brands_set_error(self, bot, mock_interaction):
@@ -1183,15 +1095,6 @@ class TestBrandsCommands:
         assert "Generic Brand" in call_args
 
     @pytest.mark.asyncio()
-    async def test_brands_avoid_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /brands avoid rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "avoid")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized, brand="Generic Brand")
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
-
-    @pytest.mark.asyncio()
     async def test_brands_avoid_error(self, bot, mock_interaction):
         """Test /brands avoid handles errors gracefully."""
         cmd = self._get_subcommand(bot, "avoid")
@@ -1212,15 +1115,6 @@ class TestBrandsCommands:
         await cmd.callback(mock_interaction, target="nonexistent")
         call_args = str(mock_interaction.response.send_message.call_args)
         assert "No brand preferences" in call_args
-
-    @pytest.mark.asyncio()
-    async def test_brands_clear_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /brands clear rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "clear")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized, target="milk")
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
 
     @pytest.mark.asyncio()
     async def test_brands_clear_error(self, bot, mock_interaction):
@@ -1263,15 +1157,6 @@ class TestRecipesCommands:
         mock_interaction.response.send_message.assert_called_once()
 
     @pytest.mark.asyncio()
-    async def test_recipes_list_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /recipes list rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "list")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized)
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
-
-    @pytest.mark.asyncio()
     async def test_recipes_list_error(self, bot, mock_interaction):
         """Test /recipes list handles errors gracefully."""
         cmd = self._get_subcommand(bot, "list")
@@ -1294,15 +1179,6 @@ class TestRecipesCommands:
         assert "not found" in call_args
 
     @pytest.mark.asyncio()
-    async def test_recipes_show_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /recipes show rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "show")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized, name="pasta")
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
-
-    @pytest.mark.asyncio()
     async def test_recipes_show_error(self, bot, mock_interaction):
         """Test /recipes show handles errors gracefully."""
         cmd = self._get_subcommand(bot, "show")
@@ -1323,17 +1199,6 @@ class TestRecipesCommands:
         await cmd.callback(mock_interaction, name="nonexistent")
         call_args = str(mock_interaction.response.send_message.call_args)
         assert "not found" in call_args
-
-    @pytest.mark.asyncio()
-    async def test_recipes_forget_unauthorized(
-        self, bot, mock_interaction_unauthorized
-    ):
-        """Test /recipes forget rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "forget")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized, name="pasta")
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
 
     @pytest.mark.asyncio()
     async def test_recipes_forget_error(self, bot, mock_interaction):
@@ -1376,15 +1241,6 @@ class TestPreferencesCommands:
         mock_interaction.response.send_message.assert_called_once()
 
     @pytest.mark.asyncio()
-    async def test_prefs_show_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /preferences show rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "show")
-        assert cmd is not None
-        await cmd.callback(mock_interaction_unauthorized)
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
-
-    @pytest.mark.asyncio()
     async def test_prefs_show_error(self, bot, mock_interaction):
         """Test /preferences show handles errors gracefully."""
         cmd = self._get_subcommand(bot, "show")
@@ -1406,17 +1262,6 @@ class TestPreferencesCommands:
         call_args = str(mock_interaction.response.send_message.call_args)
         assert "default_servings" in call_args
         assert "6" in call_args
-
-    @pytest.mark.asyncio()
-    async def test_prefs_set_unauthorized(self, bot, mock_interaction_unauthorized):
-        """Test /preferences set rejects unauthorized users."""
-        cmd = self._get_subcommand(bot, "set")
-        assert cmd is not None
-        await cmd.callback(
-            mock_interaction_unauthorized, key="default_servings", value="6"
-        )
-        call_args = str(mock_interaction_unauthorized.response.send_message.call_args)
-        assert "not authorized" in call_args
 
     @pytest.mark.asyncio()
     async def test_prefs_set_error(self, bot, mock_interaction):
@@ -1478,15 +1323,49 @@ class TestOnMessageEvent:
         message.reply.assert_not_called()
 
     @pytest.mark.asyncio()
-    async def test_ignores_unauthorized_user(self, bot):
-        """Test on_message ignores messages from unauthorized users."""
+    async def test_ignores_dm_messages(self, bot):
+        """Test on_message ignores DMs (no guild)."""
+        message = _make_guild_message(manage_guild=True, content="out of milk")
+        message.guild = None  # DM message
+
+        mock_user = MagicMock()
+        mock_user.id = 111111
+
+        with patch.object(
+            type(bot),
+            "user",
+            new_callable=PropertyMock,
+            return_value=mock_user,
+        ):
+            await bot.on_message(message)  # type: ignore[attr-defined]
+        message.reply.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_ignores_non_member_author(self, bot):
+        """Test on_message ignores messages from non-Member authors (e.g., webhooks)."""
         message = MagicMock()
-        message.author = MagicMock()
-        message.author.id = 999999
-        message.content = "we are out of milk"
+        message.author = MagicMock(spec=discord.User)  # User, not Member
+        message.guild = MagicMock()  # In a guild, so DM check passes
+        message.content = "out of milk"
         message.reply = AsyncMock()
 
-        # Ensure the message author is not the bot itself
+        mock_user = MagicMock()
+        mock_user.id = 111111
+
+        with patch.object(
+            type(bot),
+            "user",
+            new_callable=PropertyMock,
+            return_value=mock_user,
+        ):
+            await bot.on_message(message)  # type: ignore[attr-defined]
+        message.reply.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_ignores_user_without_manage_guild(self, bot):
+        """Test on_message ignores users without manage_guild permission."""
+        message = _make_guild_message(manage_guild=False, content="we are out of milk")
+
         mock_user = MagicMock()
         mock_user.id = 111111
 
@@ -1502,11 +1381,7 @@ class TestOnMessageEvent:
     @pytest.mark.asyncio()
     async def test_ignores_command_messages(self, bot):
         """Test on_message ignores messages starting with /."""
-        message = MagicMock()
-        message.author = MagicMock()
-        message.author.id = 123456789
-        message.content = "/meals pasta"
-        message.reply = AsyncMock()
+        message = _make_guild_message(manage_guild=True, content="/meals pasta")
 
         mock_user = MagicMock()
         mock_user.id = 111111
@@ -1523,11 +1398,7 @@ class TestOnMessageEvent:
     @pytest.mark.asyncio()
     async def test_ignores_empty_messages(self, bot):
         """Test on_message ignores empty messages."""
-        message = MagicMock()
-        message.author = MagicMock()
-        message.author.id = 123456789
-        message.content = "   "
-        message.reply = AsyncMock()
+        message = _make_guild_message(manage_guild=True, content="   ")
 
         mock_user = MagicMock()
         mock_user.id = 111111
@@ -1544,11 +1415,7 @@ class TestOnMessageEvent:
     @pytest.mark.asyncio()
     async def test_no_updates_detected(self, bot):
         """Test on_message with no detected inventory updates."""
-        message = MagicMock()
-        message.author = MagicMock()
-        message.author.id = 123456789
-        message.content = "hello there"
-        message.reply = AsyncMock()
+        message = _make_guild_message(manage_guild=True, content="hello there")
 
         mock_user = MagicMock()
         mock_user.id = 111111
@@ -1566,11 +1433,7 @@ class TestOnMessageEvent:
     @pytest.mark.asyncio()
     async def test_high_confidence_update(self, bot):
         """Test on_message processes high-confidence updates."""
-        message = MagicMock()
-        message.author = MagicMock()
-        message.author.id = 123456789
-        message.content = "we are out of milk"
-        message.reply = AsyncMock()
+        message = _make_guild_message(manage_guild=True, content="we are out of milk")
 
         mock_user = MagicMock()
         mock_user.id = 111111
@@ -1607,11 +1470,9 @@ class TestOnMessageEvent:
     @pytest.mark.asyncio()
     async def test_low_confidence_clarification(self, bot):
         """Test on_message asks for clarification on low-conf."""
-        message = MagicMock()
-        message.author = MagicMock()
-        message.author.id = 123456789
-        message.content = "I think we might need milk"
-        message.reply = AsyncMock()
+        message = _make_guild_message(
+            manage_guild=True, content="I think we might need milk"
+        )
 
         mock_user = MagicMock()
         mock_user.id = 111111
@@ -1645,11 +1506,7 @@ class TestOnMessageEvent:
     @pytest.mark.asyncio()
     async def test_error_handling(self, bot):
         """Test on_message handles errors silently."""
-        message = MagicMock()
-        message.author = MagicMock()
-        message.author.id = 123456789
-        message.content = "out of milk"
-        message.reply = AsyncMock()
+        message = _make_guild_message(manage_guild=True, content="out of milk")
 
         mock_user = MagicMock()
         mock_user.id = 111111
@@ -1673,11 +1530,9 @@ class TestOnMessageEvent:
     @pytest.mark.asyncio()
     async def test_mixed_confidence_updates(self, bot):
         """Test on_message handles mix of high and low conf."""
-        message = MagicMock()
-        message.author = MagicMock()
-        message.author.id = 123456789
-        message.content = "out of milk, maybe low on eggs"
-        message.reply = AsyncMock()
+        message = _make_guild_message(
+            manage_guild=True, content="out of milk, maybe low on eggs"
+        )
 
         mock_user = MagicMock()
         mock_user.id = 111111

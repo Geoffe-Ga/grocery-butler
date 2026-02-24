@@ -21,7 +21,6 @@ class TestConfig:
         """Test Config uses correct default values."""
         cfg = Config(anthropic_api_key="sk-test")
         assert cfg.discord_bot_token == ""
-        assert cfg.discord_user_id == ""
         assert cfg.database_path == "mealbot.db"
         assert cfg.flask_port == 5000
         assert cfg.flask_debug is False
@@ -33,7 +32,6 @@ class TestConfig:
         cfg = Config(
             anthropic_api_key="sk-test",
             discord_bot_token="tok-123",
-            discord_user_id="uid-456",
             database_path="/tmp/test.db",
             flask_port=8080,
             flask_debug=True,
@@ -42,7 +40,6 @@ class TestConfig:
         )
         assert cfg.anthropic_api_key == "sk-test"
         assert cfg.discord_bot_token == "tok-123"
-        assert cfg.discord_user_id == "uid-456"
         assert cfg.database_path == "/tmp/test.db"
         assert cfg.flask_port == 8080
         assert cfg.flask_debug is True
@@ -116,7 +113,6 @@ class TestLoadConfig:
         {
             "ANTHROPIC_API_KEY": "sk-full",
             "DISCORD_BOT_TOKEN": "bot-tok",
-            "DISCORD_USER_ID": "uid-789",
             "DATABASE_PATH": "/data/meals.db",
             "FLASK_PORT": "9090",
             "FLASK_DEBUG": "true",
@@ -130,7 +126,6 @@ class TestLoadConfig:
         cfg = load_config()
         assert cfg.anthropic_api_key == "sk-full"
         assert cfg.discord_bot_token == "bot-tok"
-        assert cfg.discord_user_id == "uid-789"
         assert cfg.database_path == "/data/meals.db"
         assert cfg.flask_port == 9090
         assert cfg.flask_debug is True
