@@ -362,8 +362,8 @@ def _extract_json_text(raw: str) -> str:
     """
     text = raw.strip()
     if text.startswith("```"):
-        first_newline = text.index("\n")
-        text = text[first_newline + 1 :]
+        first_newline = text.find("\n")
+        text = text[len("```") :] if first_newline == -1 else text[first_newline + 1 :]
     if text.endswith("```"):
         text = text[: -len("```")]
     return text.strip()

@@ -258,7 +258,7 @@ class TestParseSingleRanking:
 
     def test_non_dict_returns_none(self) -> None:
         """Test non-dict entry returns None."""
-        assert _parse_single_ranking("not a dict", self._alts()) is None  # type: ignore[arg-type]
+        assert _parse_single_ranking("not a dict", self._alts()) is None  # type: ignore[arg-type]  # Issue #13: intentionally passing wrong type to test runtime guard
 
     def test_unknown_suitability_defaults(self) -> None:
         """Test unknown suitability defaults to acceptable."""
@@ -313,6 +313,10 @@ class TestExtractJsonText:
     def test_strips_fences(self) -> None:
         """Test markdown fences removed."""
         assert _extract_json_text("```json\n[1]\n```") == "[1]"
+
+    def test_fence_with_no_newline(self) -> None:
+        """Test fence marker with no newline strips the fence prefix."""
+        assert _extract_json_text("```") == ""
 
 
 # ------------------------------------------------------------------
