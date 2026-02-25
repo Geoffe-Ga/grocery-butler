@@ -176,7 +176,8 @@ class ProductSearchService:
         try:
             row = conn.execute(
                 "SELECT id, ingredient_description, safeway_product_id,"
-                " safeway_product_name, safeway_price, last_used,"
+                " safeway_product_name, safeway_price, safeway_size,"
+                " safeway_unit_price, safeway_in_stock, last_used,"
                 " times_selected, is_pinned"
                 " FROM product_mapping"
                 " WHERE ingredient_description = ?"
@@ -223,21 +224,34 @@ class ProductSearchService:
                     "UPDATE product_mapping"
                     " SET times_selected = times_selected + 1,"
                     " last_used = CURRENT_TIMESTAMP,"
-                    " safeway_price = ?"
+                    " safeway_price = ?,"
+                    " safeway_size = ?,"
+                    " safeway_unit_price = ?,"
+                    " safeway_in_stock = ?"
                     " WHERE id = ?",
-                    (product.price, row_id),
+                    (
+                        product.price,
+                        product.size,
+                        product.unit_price,
+                        product.in_stock,
+                        row_id,
+                    ),
                 )
             else:
                 cursor = conn.execute(
                     "INSERT INTO product_mapping"
                     " (ingredient_description, safeway_product_id,"
-                    "  safeway_product_name, safeway_price)"
-                    " VALUES (?, ?, ?, ?)",
+                    "  safeway_product_name, safeway_price,"
+                    "  safeway_size, safeway_unit_price, safeway_in_stock)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         search_term,
                         product.product_id,
                         product.name,
                         product.price,
+                        product.size,
+                        product.unit_price,
+                        product.in_stock,
                     ),
                 )
                 row_id = cursor.lastrowid
@@ -288,21 +302,35 @@ class ProductSearchService:
                     "UPDATE product_mapping"
                     " SET is_pinned = TRUE,"
                     " last_used = CURRENT_TIMESTAMP,"
-                    " safeway_price = ?"
+                    " safeway_price = ?,"
+                    " safeway_size = ?,"
+                    " safeway_unit_price = ?,"
+                    " safeway_in_stock = ?"
                     " WHERE id = ?",
-                    (product.price, row_id),
+                    (
+                        product.price,
+                        product.size,
+                        product.unit_price,
+                        product.in_stock,
+                        row_id,
+                    ),
                 )
             else:
                 cursor = conn.execute(
                     "INSERT INTO product_mapping"
                     " (ingredient_description, safeway_product_id,"
-                    "  safeway_product_name, safeway_price, is_pinned)"
-                    " VALUES (?, ?, ?, ?, TRUE)",
+                    "  safeway_product_name, safeway_price,"
+                    "  safeway_size, safeway_unit_price, safeway_in_stock,"
+                    "  is_pinned)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, TRUE)",
                     (
                         search_term,
                         product.product_id,
                         product.name,
                         product.price,
+                        product.size,
+                        product.unit_price,
+                        product.in_stock,
                     ),
                 )
                 row_id = cursor.lastrowid
@@ -476,6 +504,7 @@ def _safe_float(value: object) -> float | None:
     if value is None:
         return None
     try:
+        # Issue #11: value typed as `object` but float() accepts numeric-like values
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
@@ -505,7 +534,13 @@ def _row_to_cached_mapping(row: sqlite3.Row) -> CachedMapping:
             product_id=row["safeway_product_id"],
             name=row["safeway_product_name"],
             price=row["safeway_price"] or 0.0,
-            size="",
+            size=row["safeway_size"] or "",
+            unit_price=row["safeway_unit_price"],
+            in_stock=(
+                bool(row["safeway_in_stock"])
+                if row["safeway_in_stock"] is not None
+                else True
+            ),
         ),
         is_pinned=bool(row["is_pinned"]),
         times_selected=row["times_selected"],

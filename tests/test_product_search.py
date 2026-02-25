@@ -398,6 +398,8 @@ class TestCacheOperations:
             name="Organic Whole Milk",
             price=5.99,
             size="1 gal",
+            unit_price=0.047,
+            in_stock=True,
         )
 
     def test_save_and_retrieve_mapping(self, db_path: str) -> None:
@@ -413,6 +415,9 @@ class TestCacheOperations:
         assert cached.product.product_id == "UPC001"
         assert cached.product.name == "Organic Whole Milk"
         assert cached.product.price == 5.99
+        assert cached.product.size == "1 gal"
+        assert cached.product.unit_price == 0.047
+        assert cached.product.in_stock is True
         assert cached.is_pinned is False
         assert cached.times_selected == 1
 
@@ -676,14 +681,17 @@ class TestRowToCachedMapping:
             conn.execute(
                 "INSERT INTO product_mapping"
                 " (ingredient_description, safeway_product_id,"
-                "  safeway_product_name, safeway_price, is_pinned)"
-                " VALUES (?, ?, ?, ?, ?)",
-                ("milk", "UPC1", "Test Milk", 3.99, True),
+                "  safeway_product_name, safeway_price,"
+                "  safeway_size, safeway_unit_price, safeway_in_stock,"
+                "  is_pinned)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("milk", "UPC1", "Test Milk", 3.99, "1 gal", 0.031, True, True),
             )
             conn.commit()
             row = conn.execute(
                 "SELECT id, ingredient_description, safeway_product_id,"
-                " safeway_product_name, safeway_price, last_used,"
+                " safeway_product_name, safeway_price, safeway_size,"
+                " safeway_unit_price, safeway_in_stock, last_used,"
                 " times_selected, is_pinned"
                 " FROM product_mapping LIMIT 1"
             ).fetchone()
@@ -696,7 +704,44 @@ class TestRowToCachedMapping:
             assert result.product.product_id == "UPC1"
             assert result.product.name == "Test Milk"
             assert result.product.price == 3.99
+            assert result.product.size == "1 gal"
+            assert result.product.unit_price == 0.031
+            assert result.product.in_stock is True
             assert result.is_pinned is True
             assert result.times_selected == 1
+        finally:
+            conn.close()
+
+    def test_converts_row_null_optional_fields(self, db_path: str) -> None:
+        """Test converting a row with NULL size, unit_price, and in_stock."""
+        from grocery_butler.db import get_connection, init_db
+
+        init_db(db_path)
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO product_mapping"
+                " (ingredient_description, safeway_product_id,"
+                "  safeway_product_name, safeway_price, is_pinned)"
+                " VALUES (?, ?, ?, ?, ?)",
+                ("eggs", "UPC2", "Large Eggs", 2.49, False),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT id, ingredient_description, safeway_product_id,"
+                " safeway_product_name, safeway_price, safeway_size,"
+                " safeway_unit_price, safeway_in_stock, last_used,"
+                " times_selected, is_pinned"
+                " FROM product_mapping LIMIT 1"
+            ).fetchone()
+            assert row is not None
+
+            result = _row_to_cached_mapping(row)
+
+            assert result.product.size == ""
+            assert result.product.unit_price is None
+            assert (
+                result.product.in_stock is True
+            )  # defaults to TRUE via schema default
         finally:
             conn.close()
