@@ -205,8 +205,8 @@ def _parse_order_response(
     if response.get("status") == "error":
         return None
 
-    order_id = response.get("orderId", "")
-    if not order_id:
+    order_id = response.get("orderId")
+    if order_id is None:
         return None
 
     total_items = len(cart.items) + len(cart.restock_items)

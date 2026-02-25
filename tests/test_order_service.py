@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock
 
 from grocery_butler.models import (
@@ -246,6 +247,15 @@ class TestParseOrderResponse:
         assert result is not None
         assert result.total == cart.estimated_total
 
+    def test_integer_order_id_accepted(self) -> None:
+        """Test integer orderId (including 0) is accepted."""
+        response = {"orderId": 0, "status": "confirmed"}
+        cart = _make_cart()
+        result = _parse_order_response(response, cart)
+
+        assert result is not None
+        assert result.order_id == "0"
+
 
 # ------------------------------------------------------------------
 # Tests: _collect_restock_ingredients
@@ -282,7 +292,7 @@ class TestSubmitOrder:
 
     def _make_service(
         self,
-        api_response: dict | None = None,
+        api_response: dict[str, Any] | None = None,
         api_error: bool = False,
     ) -> OrderService:
         """Create an OrderService with mock dependencies.
