@@ -228,7 +228,8 @@ class PantryManager:
                 cursor = conn.execute(
                     "UPDATE household_inventory "
                     "SET status = ?, last_restocked = ?, last_status_change = ?, "
-                    "current_quantity = default_quantity "
+                    "current_quantity = default_quantity, "
+                    "current_unit = default_unit "
                     "WHERE LOWER(ingredient) = ?",
                     (InventoryStatus.ON_HAND.value, now, now, name),
                 )

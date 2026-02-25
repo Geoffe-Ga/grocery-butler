@@ -631,6 +631,45 @@ class TestHandleStock:
 
         assert code == 0
 
+    def test_set_quantity_with_status(self, db_path: str, capsys):
+        """Test setting quantity when updating status."""
+        pantry_mgr = PantryManager(db_path)
+        item = InventoryItem(
+            ingredient="milk",
+            display_name="Milk",
+            category=IngredientCategory.DAIRY,
+            status=InventoryStatus.ON_HAND,
+        )
+        pantry_mgr.add_item(item)
+
+        with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
+            mock_cfg.return_value = MagicMock(database_path=db_path)
+            from grocery_butler.cli import _handle_stock
+
+            parser = _build_parser()
+            args = parser.parse_args(
+                ["stock", "low", "milk", "--quantity", "0.25", "--unit", "gal"]
+            )
+            code = _handle_stock(args)
+
+        assert code == 0
+        captured = capsys.readouterr()
+        assert "0.25 gal" in captured.out
+
+        updated = pantry_mgr.get_item("milk")
+        assert updated is not None
+        assert updated.current_quantity == 0.25
+        assert updated.current_unit == "gal"
+
+    def test_parser_accepts_quantity_flags(self):
+        """Test parser accepts --quantity and --unit flags."""
+        parser = _build_parser()
+        args = parser.parse_args(
+            ["stock", "good", "milk", "--quantity", "1.0", "--unit", "gal"]
+        )
+        assert args.quantity == 1.0
+        assert args.unit == "gal"
+
 
 # ---------------------------------------------------------------------------
 # Restock subcommand handler tests

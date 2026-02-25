@@ -431,6 +431,13 @@ class TestMarkRestocked:
         updated = manager.get_item("milk")
         assert updated is not None
         assert updated.current_quantity == 1.0
+        assert updated.current_unit == "gal"
+
+    def test_update_quantity_nonexistent(self, manager: PantryManager) -> None:
+        """Test update_quantity on nonexistent item is a no-op."""
+        manager.update_quantity("nonexistent", 1.0, "gal")
+        item = manager.get_item("nonexistent")
+        assert item is None
 
 
 # ---------------------------------------------------------------------------

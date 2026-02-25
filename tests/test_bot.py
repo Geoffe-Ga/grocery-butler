@@ -322,6 +322,33 @@ class TestFormatInventory:
         assert "Mystery" in result
         assert "[" not in result
 
+    def test_quantity_shown(self):
+        """Test quantity and unit are shown when set."""
+        items = [
+            InventoryItem(
+                ingredient="milk",
+                display_name="Milk",
+                status=InventoryStatus.ON_HAND,
+                current_quantity=0.5,
+                current_unit="gal",
+            ),
+        ]
+        result = _format_inventory(items)
+        assert "0.5 gal" in result
+
+    def test_no_quantity_when_none(self):
+        """Test no quantity string when quantity is None."""
+        items = [
+            InventoryItem(
+                ingredient="eggs",
+                display_name="Eggs",
+                status=InventoryStatus.ON_HAND,
+            ),
+        ]
+        result = _format_inventory(items)
+        assert "Eggs" in result
+        assert "—" not in result
+
 
 # ---------------------------------------------------------------------------
 # TestFormatPantryList
@@ -396,6 +423,20 @@ class TestFormatRestockQueue:
         result = _format_restock_queue(items)
         assert "Bread" in result
         assert "\u26a0\ufe0f" in result
+
+    def test_current_quantity_shown(self):
+        """Test current quantity is shown when set."""
+        items = [
+            InventoryItem(
+                ingredient="milk",
+                display_name="Milk",
+                status=InventoryStatus.LOW,
+                current_quantity=0.25,
+                current_unit="gal",
+            ),
+        ]
+        result = _format_restock_queue(items)
+        assert "0.25 gal" in result
 
 
 # ---------------------------------------------------------------------------
