@@ -18,6 +18,7 @@ from grocery_butler.order_service import (
     _build_order_payload,
     _collect_restock_ingredients,
     _parse_order_response,
+    _safe_float,
     _serialize_cart_items,
 )
 
@@ -236,6 +237,15 @@ class TestParseOrderResponse:
         assert result is not None
         assert result.item_count == 2
 
+    def test_malformed_total_uses_cart_fallback(self) -> None:
+        """Test non-numeric total falls back to cart estimated_total."""
+        response = {"orderId": "ORD-1", "total": "N/A"}
+        cart = _make_cart()
+        result = _parse_order_response(response, cart)
+
+        assert result is not None
+        assert result.total == cart.estimated_total
+
 
 # ------------------------------------------------------------------
 # Tests: _collect_restock_ingredients
@@ -399,3 +409,50 @@ class TestSubmitOrder:
 
         assert result.success is False
         assert result.error_message == "Unknown order error"
+
+    def test_malformed_total_in_submit(self) -> None:
+        """Test malformed total in API response doesn't crash submit."""
+        service = self._make_service(
+            api_response={
+                "orderId": "ORD-123",
+                "status": "confirmed",
+                "total": "not-a-number",
+            }
+        )
+        result = service.submit_order(_make_cart())
+
+        assert result.success is True
+        assert result.confirmation is not None
+
+
+# ------------------------------------------------------------------
+# Tests: _safe_float
+# ------------------------------------------------------------------
+
+
+class TestSafeFloat:
+    """Tests for _safe_float."""
+
+    def test_valid_float(self) -> None:
+        """Test valid float value passes through."""
+        assert _safe_float(25.99, 0.0) == 25.99
+
+    def test_valid_int(self) -> None:
+        """Test integer value converts to float."""
+        assert _safe_float(10, 0.0) == 10.0
+
+    def test_valid_string(self) -> None:
+        """Test numeric string converts to float."""
+        assert _safe_float("12.50", 0.0) == 12.50
+
+    def test_none_returns_fallback(self) -> None:
+        """Test None returns fallback."""
+        assert _safe_float(None, 42.0) == 42.0
+
+    def test_invalid_string_returns_fallback(self) -> None:
+        """Test non-numeric string returns fallback."""
+        assert _safe_float("N/A", 99.0) == 99.0
+
+    def test_empty_string_returns_fallback(self) -> None:
+        """Test empty string returns fallback."""
+        assert _safe_float("", 5.0) == 5.0

@@ -8,7 +8,7 @@ for successfully ordered items.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -16,10 +16,6 @@ if TYPE_CHECKING:
     from grocery_butler.pantry_manager import PantryManager
 
 logger = logging.getLogger(__name__)
-
-
-class OrderError(Exception):
-    """Raised when order submission fails."""
 
 
 @dataclass
@@ -107,6 +103,7 @@ class OrderService:
                 "/abs/pub/web/orders",
                 json_data=payload,
             )
+            confirmation = _parse_order_response(response, cart)
         except Exception:
             logger.exception("Order submission failed")
             return OrderResult(
@@ -114,12 +111,13 @@ class OrderService:
                 error_message="Order submission failed — check logs",
             )
 
-        confirmation = _parse_order_response(response, cart)
         if confirmation is None:
-            return OrderResult(
-                success=False,
-                error_message=response.get("error", "Unknown order error"),
+            error_msg = (
+                response.get("error", "Unknown order error")
+                if isinstance(response, dict)
+                else "Unknown order error"
             )
+            return OrderResult(success=False, error_message=error_msg)
 
         restocked = self._restock_ordered_items(cart)
 
@@ -216,32 +214,28 @@ def _parse_order_response(
         order_id=str(order_id),
         status=str(response.get("status", "confirmed")),
         estimated_time=str(response.get("estimatedTime", "Unknown")),
-        total=float(response.get("total", cart.estimated_total)),
+        total=_safe_float(response.get("total"), cart.estimated_total),
         fulfillment_type=cart.recommended_fulfillment,
         item_count=total_items,
     )
 
 
-@dataclass
-class _IngredientCollector:
-    """Collects ingredient names from cart items.
+def _safe_float(value: Any, fallback: float) -> float:
+    """Safely convert a value to float, returning fallback on failure.
 
-    Attributes:
-        ingredients: Accumulated ingredient names.
+    Args:
+        value: Value to convert (may be None, str, or numeric).
+        fallback: Default to return if conversion fails.
+
+    Returns:
+        Converted float or fallback.
     """
-
-    ingredients: list[str] = field(default_factory=list)
-
-    def add_items(self, items: list[CartItem]) -> None:
-        """Add ingredients from cart items.
-
-        Args:
-            items: Cart items to extract ingredients from.
-        """
-        for item in items:
-            self.ingredients.append(
-                item.shopping_list_item.ingredient,
-            )
+    if value is None:
+        return fallback
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _collect_restock_ingredients(cart: CartSummary) -> list[str]:
@@ -253,6 +247,4 @@ def _collect_restock_ingredients(cart: CartSummary) -> list[str]:
     Returns:
         List of ingredient names to restock.
     """
-    collector = _IngredientCollector()
-    collector.add_items(cart.restock_items)
-    return collector.ingredients
+    return [item.shopping_list_item.ingredient for item in cart.restock_items]
