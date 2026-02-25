@@ -12,6 +12,8 @@ permissions:
 
 jobs:
   claude-review:
+    # Fork-safety: only run on internal PRs (fork PRs get read-only tokens)
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
 
     steps:
