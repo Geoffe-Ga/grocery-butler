@@ -340,7 +340,7 @@ class SafewayClient:
                 headers=self._get_auth_headers(),
             )
             response.raise_for_status()
-            return response.json()  # type: ignore[no-any-return]
+            return response.json()  # type: ignore[no-any-return]  # httpx returns Any
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
                 return None
