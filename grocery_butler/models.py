@@ -162,6 +162,34 @@ def parse_unit(raw: str) -> Unit:
     return Unit.EACH
 
 
+def _coerce_unit(v: object) -> Unit:
+    """Coerce a raw value to a Unit enum member.
+
+    Args:
+        v: Raw value (string, Unit, or other).
+
+    Returns:
+        Normalized Unit enum member.
+    """
+    if isinstance(v, Unit):
+        return v
+    return parse_unit(str(v))
+
+
+def _coerce_unit_optional(v: object) -> Unit | None:
+    """Coerce a raw value to a Unit enum member, allowing None.
+
+    Args:
+        v: Raw value (string, Unit, None, or other).
+
+    Returns:
+        Normalized Unit enum member, or None if input is None.
+    """
+    if v is None:
+        return None
+    return _coerce_unit(v)
+
+
 class PriceSensitivity(StrEnum):
     """User's price sensitivity for product selection."""
 
@@ -220,9 +248,7 @@ class Ingredient(BaseModel):
         Returns:
             Normalized Unit enum member.
         """
-        if isinstance(v, Unit):
-            return v
-        return parse_unit(str(v))
+        return _coerce_unit(v)
 
 
 class ParsedMeal(BaseModel):
@@ -258,9 +284,7 @@ class ShoppingListItem(BaseModel):
         Returns:
             Normalized Unit enum member.
         """
-        if isinstance(v, Unit):
-            return v
-        return parse_unit(str(v))
+        return _coerce_unit(v)
 
 
 class InventoryItem(BaseModel):
@@ -286,11 +310,7 @@ class InventoryItem(BaseModel):
         Returns:
             Normalized Unit enum member, or None.
         """
-        if v is None:
-            return None
-        if isinstance(v, Unit):
-            return v
-        return parse_unit(str(v))
+        return _coerce_unit_optional(v)
 
 
 class InventoryUpdate(BaseModel):

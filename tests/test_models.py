@@ -27,6 +27,8 @@ from grocery_butler.models import (
     SubstitutionResult,
     SubstitutionSuitability,
     Unit,
+    _coerce_unit,
+    _coerce_unit_optional,
     parse_unit,
 )
 
@@ -241,6 +243,46 @@ class TestParseUnit:
         """Test unrecognized strings default to EACH."""
         assert parse_unit("foobar") == Unit.EACH
         assert parse_unit("xyz123") == Unit.EACH
+
+
+class TestCoerceUnit:
+    """Tests for the _coerce_unit module-level helper."""
+
+    def test_unit_passthrough(self) -> None:
+        """Test Unit enum members are returned unchanged."""
+        assert _coerce_unit(Unit.LB) is Unit.LB
+
+    def test_string_alias_normalized(self) -> None:
+        """Test alias strings are resolved to Unit members."""
+        assert _coerce_unit("pounds") == Unit.LB
+
+    def test_exact_string_normalized(self) -> None:
+        """Test exact unit strings are resolved."""
+        assert _coerce_unit("lb") == Unit.LB
+
+    def test_unknown_string_defaults_to_each(self) -> None:
+        """Test unrecognized strings default to EACH."""
+        assert _coerce_unit("foobar") == Unit.EACH
+
+
+class TestCoerceUnitOptional:
+    """Tests for the _coerce_unit_optional module-level helper."""
+
+    def test_none_returns_none(self) -> None:
+        """Test None input is propagated as None."""
+        assert _coerce_unit_optional(None) is None
+
+    def test_unit_passthrough(self) -> None:
+        """Test Unit enum members are returned unchanged."""
+        assert _coerce_unit_optional(Unit.GAL) is Unit.GAL
+
+    def test_string_alias_normalized(self) -> None:
+        """Test alias strings are resolved."""
+        assert _coerce_unit_optional("gallon") == Unit.GAL
+
+    def test_exact_string_normalized(self) -> None:
+        """Test exact unit strings are resolved."""
+        assert _coerce_unit_optional("gal") == Unit.GAL
 
 
 class TestUnitValidatorOnModels:
