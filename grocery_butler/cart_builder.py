@@ -30,10 +30,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class CartBuildError(Exception):
-    """Raised when cart building encounters an unrecoverable error."""
-
-
 class CartBuilder:
     """Build a Safeway cart from shopping list items.
 
@@ -84,7 +80,6 @@ class CartBuilder:
         cart_items: list[CartItem] = []
         failed: list[ShoppingListItem] = []
         substituted: list[SubstitutionResult] = []
-        skipped: list[ShoppingListItem] = []
         restock_cart: list[CartItem] = []
 
         all_items = list(items)
@@ -118,7 +113,7 @@ class CartBuilder:
             items=cart_items,
             failed_items=failed,
             substituted_items=substituted,
-            skipped_items=skipped,
+            skipped_items=[],
             restock_items=restock_cart,
             subtotal=subtotal,
             fulfillment_options=fulfillment_options,
@@ -213,6 +208,12 @@ def _calculate_quantity(
     Parses the product size to determine unit quantity, then
     calculates how many products are needed to fulfill the
     shopping list quantity.
+
+    Note:
+        This calculation assumes that the units on the shopping list item
+        and the units embedded in the product size string are the same
+        (e.g., both in ounces, or both in pounds).  If the units differ
+        the resulting quantity will be incorrect.
 
     Args:
         item: Shopping list item with desired quantity.
