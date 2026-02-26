@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -49,6 +49,145 @@ class BrandMatchType(StrEnum):
 
     CATEGORY = "category"
     INGREDIENT = "ingredient"
+
+
+class Unit(StrEnum):
+    """Standardized grocery measurement units."""
+
+    # Volume
+    TSP = "tsp"
+    TBSP = "tbsp"
+    CUP = "cup"
+    FL_OZ = "fl_oz"
+    ML = "ml"
+    L = "l"
+    GAL = "gal"
+
+    # Weight
+    OZ = "oz"
+    LB = "lb"
+    G = "g"
+    KG = "kg"
+
+    # Count
+    EACH = "each"
+    DOZEN = "dozen"
+    BUNCH = "bunch"
+    HEAD = "head"
+    CLOVE = "clove"
+    SLICE = "slice"
+
+    # Packaging
+    CAN = "can"
+    BAG = "bag"
+    BOX = "box"
+    JAR = "jar"
+    BOTTLE = "bottle"
+    PACKAGE = "package"
+    BLOCK = "block"
+
+    # Other
+    PINCH = "pinch"
+    DASH = "dash"
+    TO_TASTE = "to_taste"
+
+
+_UNIT_ALIASES: dict[str, Unit] = {
+    # Weight plurals/variations
+    "lbs": Unit.LB,
+    "pound": Unit.LB,
+    "pounds": Unit.LB,
+    "ounce": Unit.OZ,
+    "ounces": Unit.OZ,
+    "gram": Unit.G,
+    "grams": Unit.G,
+    "kilogram": Unit.KG,
+    "kilograms": Unit.KG,
+    # Volume plurals/variations
+    "teaspoon": Unit.TSP,
+    "teaspoons": Unit.TSP,
+    "tablespoon": Unit.TBSP,
+    "tablespoons": Unit.TBSP,
+    "cups": Unit.CUP,
+    "fluid_ounce": Unit.FL_OZ,
+    "fluid ounce": Unit.FL_OZ,
+    "fluid_oz": Unit.FL_OZ,
+    "milliliter": Unit.ML,
+    "milliliters": Unit.ML,
+    "liter": Unit.L,
+    "liters": Unit.L,
+    "gallon": Unit.GAL,
+    "gallons": Unit.GAL,
+    # Count plurals
+    "piece": Unit.EACH,
+    "pieces": Unit.EACH,
+    "cloves": Unit.CLOVE,
+    "heads": Unit.HEAD,
+    "bunches": Unit.BUNCH,
+    "slices": Unit.SLICE,
+    # Packaging plurals
+    "cans": Unit.CAN,
+    "bags": Unit.BAG,
+    "boxes": Unit.BOX,
+    "jars": Unit.JAR,
+    "bottles": Unit.BOTTLE,
+    "packages": Unit.PACKAGE,
+    "pkg": Unit.PACKAGE,
+    "blocks": Unit.BLOCK,
+}
+
+
+def parse_unit(raw: str) -> Unit:
+    """Parse a raw unit string into a Unit enum member.
+
+    Handles exact matches, aliases, and case-insensitive lookup.
+    Falls back to Unit.EACH for unrecognized strings.
+
+    Args:
+        raw: Raw unit string from LLM output, database, or user input.
+
+    Returns:
+        Matching Unit enum member.
+    """
+    if not raw or not raw.strip():
+        return Unit.EACH
+    cleaned = raw.strip().lower()
+    try:
+        return Unit(cleaned)
+    except ValueError:
+        pass
+    result = _UNIT_ALIASES.get(cleaned)
+    if result is not None:
+        return result
+    return Unit.EACH
+
+
+def _coerce_unit(v: object) -> Unit:
+    """Coerce a raw value to a Unit enum member.
+
+    Args:
+        v: Raw value (string, Unit, or other).
+
+    Returns:
+        Normalized Unit enum member.
+    """
+    if isinstance(v, Unit):
+        return v
+    return parse_unit(str(v))
+
+
+def _coerce_unit_optional(v: object) -> Unit | None:
+    """Coerce a raw value to a Unit enum member, allowing None.
+
+    Args:
+        v: Raw value (string, Unit, None, or other).
+
+    Returns:
+        Normalized Unit enum member, or None if input is None.
+    """
+    if v is None:
+        return None
+    return _coerce_unit(v)
 
 
 class PriceSensitivity(StrEnum):
@@ -93,10 +232,23 @@ class Ingredient(BaseModel):
 
     ingredient: str
     quantity: float
-    unit: str
+    unit: Unit
     category: IngredientCategory
     notes: str = ""
     is_pantry_item: bool = False
+
+    @field_validator("unit", mode="before")
+    @classmethod
+    def _normalize_unit(cls, v: object) -> Unit:
+        """Normalize raw unit strings to Unit enum members.
+
+        Args:
+            v: Raw value (string, Unit, or other).
+
+        Returns:
+            Normalized Unit enum member.
+        """
+        return _coerce_unit(v)
 
 
 class ParsedMeal(BaseModel):
@@ -115,11 +267,24 @@ class ShoppingListItem(BaseModel):
 
     ingredient: str
     quantity: float
-    unit: str
+    unit: Unit
     category: IngredientCategory
     search_term: str
     from_meals: list[str]
     estimated_price: float | None = None
+
+    @field_validator("unit", mode="before")
+    @classmethod
+    def _normalize_unit(cls, v: object) -> Unit:
+        """Normalize raw unit strings to Unit enum members.
+
+        Args:
+            v: Raw value (string, Unit, or other).
+
+        Returns:
+            Normalized Unit enum member.
+        """
+        return _coerce_unit(v)
 
 
 class InventoryItem(BaseModel):
@@ -132,9 +297,22 @@ class InventoryItem(BaseModel):
     current_quantity: float | None = None
     current_unit: str | None = None
     default_quantity: float | None = None
-    default_unit: str | None = None
+    default_unit: Unit | None = None
     default_search_term: str | None = None
     notes: str = ""
+
+    @field_validator("default_unit", mode="before")
+    @classmethod
+    def _normalize_default_unit(cls, v: object) -> Unit | None:
+        """Normalize raw unit strings to Unit enum members.
+
+        Args:
+            v: Raw value (string, Unit, None, or other).
+
+        Returns:
+            Normalized Unit enum member, or None.
+        """
+        return _coerce_unit_optional(v)
 
 
 class InventoryUpdate(BaseModel):

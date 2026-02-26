@@ -236,7 +236,7 @@ class TestParseIngredient:
         result = _parse_ingredient(data)
         assert result.ingredient == "chicken thighs"
         assert result.quantity == 2.0
-        assert result.unit == "lbs"
+        assert result.unit == "lb"
         assert result.category == IngredientCategory.MEAT
         assert result.notes == "boneless"
         assert result.is_pantry_item is False
@@ -246,7 +246,7 @@ class TestParseIngredient:
         result = _parse_ingredient({})
         assert result.ingredient == ""
         assert result.quantity == 0.0
-        assert result.unit == ""
+        assert result.unit == "each"
         assert result.category == IngredientCategory.OTHER
         assert result.notes == ""
         assert result.is_pantry_item is False
@@ -360,7 +360,7 @@ class TestScaleIngredients:
         ]
         result = _scale_ingredients(items, 4, 8)
         assert result[0].ingredient == "chicken"
-        assert result[0].unit == "lbs"
+        assert result[0].unit == "lb"
         assert result[0].category == IngredientCategory.MEAT
         assert result[0].notes == "boneless"
 

@@ -26,6 +26,10 @@ from grocery_butler.models import (
     SubstitutionOption,
     SubstitutionResult,
     SubstitutionSuitability,
+    Unit,
+    _coerce_unit,
+    _coerce_unit_optional,
+    parse_unit,
 )
 
 # ---------------------------------------------------------------------------
@@ -126,6 +130,215 @@ class TestSubstitutionSuitability:
 
 
 # ---------------------------------------------------------------------------
+# Unit enum and parse_unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestUnit:
+    """Tests for Unit enum."""
+
+    def test_all_members_are_lowercase(self) -> None:
+        """Test all Unit values are lowercase strings."""
+        for member in Unit:
+            assert member.value == member.value.lower()
+
+    def test_unit_is_str(self) -> None:
+        """Test Unit members are strings (StrEnum)."""
+        assert isinstance(Unit.LB, str)
+        assert Unit.LB == "lb"
+
+    def test_known_members_exist(self) -> None:
+        """Test all expected unit members are defined."""
+        expected = {
+            "tsp",
+            "tbsp",
+            "cup",
+            "fl_oz",
+            "ml",
+            "l",
+            "gal",
+            "oz",
+            "lb",
+            "g",
+            "kg",
+            "each",
+            "dozen",
+            "bunch",
+            "head",
+            "clove",
+            "slice",
+            "can",
+            "bag",
+            "box",
+            "jar",
+            "bottle",
+            "package",
+            "block",
+            "pinch",
+            "dash",
+            "to_taste",
+        }
+        actual = {m.value for m in Unit}
+        assert expected == actual
+
+
+class TestParseUnit:
+    """Tests for parse_unit function."""
+
+    def test_exact_match(self) -> None:
+        """Test parse_unit with exact enum values."""
+        assert parse_unit("lb") == Unit.LB
+        assert parse_unit("tsp") == Unit.TSP
+        assert parse_unit("each") == Unit.EACH
+
+    def test_alias_weight(self) -> None:
+        """Test weight aliases normalize correctly."""
+        assert parse_unit("lbs") == Unit.LB
+        assert parse_unit("pound") == Unit.LB
+        assert parse_unit("pounds") == Unit.LB
+        assert parse_unit("ounce") == Unit.OZ
+        assert parse_unit("ounces") == Unit.OZ
+
+    def test_alias_volume(self) -> None:
+        """Test volume aliases normalize correctly."""
+        assert parse_unit("cups") == Unit.CUP
+        assert parse_unit("teaspoon") == Unit.TSP
+        assert parse_unit("teaspoons") == Unit.TSP
+        assert parse_unit("tablespoon") == Unit.TBSP
+        assert parse_unit("tablespoons") == Unit.TBSP
+        assert parse_unit("gallon") == Unit.GAL
+        assert parse_unit("gallons") == Unit.GAL
+
+    def test_alias_count(self) -> None:
+        """Test count aliases normalize correctly."""
+        assert parse_unit("piece") == Unit.EACH
+        assert parse_unit("pieces") == Unit.EACH
+        assert parse_unit("cloves") == Unit.CLOVE
+        assert parse_unit("heads") == Unit.HEAD
+
+    def test_alias_packaging(self) -> None:
+        """Test packaging aliases normalize correctly."""
+        assert parse_unit("cans") == Unit.CAN
+        assert parse_unit("jars") == Unit.JAR
+        assert parse_unit("bottles") == Unit.BOTTLE
+        assert parse_unit("pkg") == Unit.PACKAGE
+
+    def test_case_insensitive(self) -> None:
+        """Test parse_unit is case-insensitive."""
+        assert parse_unit("LB") == Unit.LB
+        assert parse_unit("Cups") == Unit.CUP
+        assert parse_unit("GALLON") == Unit.GAL
+
+    def test_whitespace_stripped(self) -> None:
+        """Test parse_unit strips whitespace."""
+        assert parse_unit("  lb  ") == Unit.LB
+        assert parse_unit("\tcup\n") == Unit.CUP
+
+    def test_empty_string_defaults_to_each(self) -> None:
+        """Test empty/blank strings default to EACH."""
+        assert parse_unit("") == Unit.EACH
+        assert parse_unit("   ") == Unit.EACH
+
+    def test_unknown_defaults_to_each(self) -> None:
+        """Test unrecognized strings default to EACH."""
+        assert parse_unit("foobar") == Unit.EACH
+        assert parse_unit("xyz123") == Unit.EACH
+
+
+class TestCoerceUnit:
+    """Tests for the _coerce_unit module-level helper."""
+
+    def test_unit_passthrough(self) -> None:
+        """Test Unit enum members are returned unchanged."""
+        assert _coerce_unit(Unit.LB) is Unit.LB
+
+    def test_string_alias_normalized(self) -> None:
+        """Test alias strings are resolved to Unit members."""
+        assert _coerce_unit("pounds") == Unit.LB
+
+    def test_exact_string_normalized(self) -> None:
+        """Test exact unit strings are resolved."""
+        assert _coerce_unit("lb") == Unit.LB
+
+    def test_unknown_string_defaults_to_each(self) -> None:
+        """Test unrecognized strings default to EACH."""
+        assert _coerce_unit("foobar") == Unit.EACH
+
+
+class TestCoerceUnitOptional:
+    """Tests for the _coerce_unit_optional module-level helper."""
+
+    def test_none_returns_none(self) -> None:
+        """Test None input is propagated as None."""
+        assert _coerce_unit_optional(None) is None
+
+    def test_unit_passthrough(self) -> None:
+        """Test Unit enum members are returned unchanged."""
+        assert _coerce_unit_optional(Unit.GAL) is Unit.GAL
+
+    def test_string_alias_normalized(self) -> None:
+        """Test alias strings are resolved."""
+        assert _coerce_unit_optional("gallon") == Unit.GAL
+
+    def test_exact_string_normalized(self) -> None:
+        """Test exact unit strings are resolved."""
+        assert _coerce_unit_optional("gal") == Unit.GAL
+
+
+class TestUnitValidatorOnModels:
+    """Tests for unit field_validator integration on models."""
+
+    def test_ingredient_normalizes_alias(self) -> None:
+        """Test Ingredient auto-normalizes unit aliases."""
+        ing = Ingredient(
+            ingredient="chicken",
+            quantity=2.0,
+            unit="lbs",
+            category=IngredientCategory.MEAT,
+        )
+        assert ing.unit == Unit.LB
+
+    def test_shopping_list_item_normalizes_alias(self) -> None:
+        """Test ShoppingListItem auto-normalizes unit aliases."""
+        item = ShoppingListItem(
+            ingredient="milk",
+            quantity=1.0,
+            unit="gallon",
+            category=IngredientCategory.DAIRY,
+            search_term="milk",
+            from_meals=["cereal"],
+        )
+        assert item.unit == Unit.GAL
+
+    def test_inventory_item_normalizes_default_unit(self) -> None:
+        """Test InventoryItem auto-normalizes default_unit aliases."""
+        item = InventoryItem(
+            ingredient="milk",
+            display_name="Milk",
+            default_unit="gallon",
+        )
+        assert item.default_unit == Unit.GAL
+
+    def test_inventory_item_default_unit_none_preserved(self) -> None:
+        """Test InventoryItem preserves None default_unit."""
+        item = InventoryItem(
+            ingredient="salt",
+            display_name="Salt",
+        )
+        assert item.default_unit is None
+
+    def test_ingredient_empty_unit_becomes_each(self) -> None:
+        """Test empty unit string becomes EACH on Ingredient."""
+        ing = Ingredient(
+            ingredient="egg",
+            quantity=2.0,
+            unit="",
+            category=IngredientCategory.OTHER,
+        )
+        assert ing.unit == Unit.EACH
+
+
+# ---------------------------------------------------------------------------
 # Core model tests
 # ---------------------------------------------------------------------------
 
@@ -143,7 +356,7 @@ class TestIngredient:
         )
         assert ing.ingredient == "flour"
         assert ing.quantity == 2.0
-        assert ing.unit == "cups"
+        assert ing.unit == "cup"
         assert ing.category == IngredientCategory.PANTRY_DRY
         assert ing.notes == ""
         assert ing.is_pantry_item is False

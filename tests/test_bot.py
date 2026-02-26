@@ -231,7 +231,7 @@ class TestFormatShoppingList:
     def test_includes_quantities(self, sample_shopping_items):
         """Test quantities and units are included."""
         result = _format_shopping_list(sample_shopping_items)
-        assert "2 lbs" in result
+        assert "2 lb" in result
         assert "1 head" in result
 
     def test_includes_meal_sources(self, sample_shopping_items):
@@ -407,7 +407,7 @@ class TestFormatRestockQueue:
         ]
         result = _format_restock_queue(items)
         assert "Milk" in result
-        assert "1 gallon" in result
+        assert "1 gal" in result
         assert "\u274c" in result
 
     def test_item_without_quantity(self):

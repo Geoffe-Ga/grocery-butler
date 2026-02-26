@@ -295,7 +295,7 @@ class TestFormatRestockQueue:
     def test_includes_quantity_info(self, sample_restock_queue: list[InventoryItem]):
         """Test quantity and unit are included."""
         result = _format_restock_queue(sample_restock_queue)
-        assert "1.0 gallon" in result
+        assert "1.0 gal" in result
 
     def test_all_on_hand_returns_none(self):
         """Test queue with only on_hand items returns 'None'."""
@@ -360,7 +360,7 @@ class TestParseShoppingItem:
         result = _parse_shopping_item(data)
         assert result.ingredient == "chicken thighs"
         assert result.quantity == 2.0
-        assert result.unit == "lbs"
+        assert result.unit == "lb"
         assert result.category == IngredientCategory.MEAT
         assert result.search_term == "boneless chicken thighs"
         assert result.from_meals == ["Chicken Tacos"]
@@ -371,7 +371,7 @@ class TestParseShoppingItem:
         result = _parse_shopping_item({})
         assert result.ingredient == ""
         assert result.quantity == 0.0
-        assert result.unit == ""
+        assert result.unit == "each"
         assert result.category == IngredientCategory.OTHER
         assert result.search_term == ""
         assert result.from_meals == []

@@ -27,6 +27,7 @@ from grocery_butler.models import (
     IngredientCategory,
     InventoryItem,
     InventoryStatus,
+    parse_unit,
 )
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
@@ -542,7 +543,7 @@ def _parse_ingredient_form_rows() -> list[Ingredient]:
             Ingredient(
                 ingredient=ing_name.lower(),
                 quantity=qty,
-                unit=unit,
+                unit=parse_unit(unit),
                 category=category,
                 is_pantry_item=is_pantry,
             )

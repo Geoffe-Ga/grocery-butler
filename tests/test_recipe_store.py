@@ -317,7 +317,7 @@ class TestRecipeCRUD:
 
         chicken = next(i for i in result.purchase_items if "chicken" in i.ingredient)
         assert chicken.quantity == 2.0
-        assert chicken.unit == "lbs"
+        assert chicken.unit == "lb"
         assert chicken.category == IngredientCategory.MEAT
 
 
