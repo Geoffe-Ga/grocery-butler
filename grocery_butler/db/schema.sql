@@ -75,17 +75,22 @@ CREATE TABLE IF NOT EXISTS preferences (
     value TEXT NOT NULL
 );
 
--- Future use: Safeway product mapping cache.
--- Nothing writes to this yet; included so the schema is ready for Phase 3.
+-- Safeway product mapping cache.
+-- Caches search results to avoid redundant API calls.
+-- Pinned mappings bypass the cache expiry and always return the same product.
 CREATE TABLE IF NOT EXISTS product_mapping (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ingredient_description TEXT NOT NULL,
     safeway_product_id TEXT NOT NULL,
     safeway_product_name TEXT NOT NULL,
     safeway_price REAL,
+    safeway_size TEXT,
+    safeway_unit_price REAL,
+    safeway_in_stock BOOLEAN DEFAULT TRUE,
     last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     times_selected INTEGER DEFAULT 1,
-    is_pinned BOOLEAN DEFAULT FALSE
+    is_pinned BOOLEAN DEFAULT FALSE,
+    UNIQUE(ingredient_description, safeway_product_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_product_mapping_ingredient
