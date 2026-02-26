@@ -28,7 +28,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            Please review this pull request and provide feedback using the following template:
+            Please review pull request #${{ github.event.pull_request.number }} and provide feedback using the following template:
 
             ## Summary
             Brief overview (2-3 sentences)
@@ -63,6 +63,6 @@ jobs:
 
             Use the repository's CLAUDE.md for guidance on style and conventions. Be constructive and helpful in your feedback.
 
-            Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
+            Use `gh pr comment ${{ github.event.pull_request.number }}` with your Bash tool to leave your review as a comment on PR #${{ github.event.pull_request.number }}.
 
           claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
