@@ -41,6 +41,11 @@ class Config:
     default_servings: int = 4
     default_units: str = "imperial"  # "imperial" or "metric"
 
+    # Safeway integration (optional — only needed for Phase 3)
+    safeway_username: str = ""
+    safeway_password: str = ""
+    safeway_store_id: str = ""
+
 
 def load_config(env_path: str | Path | None = None) -> Config:
     """Load and validate configuration from environment / .env file.
@@ -87,4 +92,7 @@ def load_config(env_path: str | Path | None = None) -> Config:
         flask_debug=os.getenv("FLASK_DEBUG", "false").lower() in ("true", "1", "yes"),
         default_servings=default_servings,
         default_units=os.getenv("DEFAULT_UNITS", "imperial"),
+        safeway_username=os.getenv("SAFEWAY_USERNAME", ""),
+        safeway_password=os.getenv("SAFEWAY_PASSWORD", ""),
+        safeway_store_id=os.getenv("SAFEWAY_STORE_ID", ""),
     )
