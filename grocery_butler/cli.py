@@ -173,7 +173,10 @@ def _format_inventory(items: list[InventoryItem]) -> str:
     lines: list[str] = []
     for item in items:
         tag = f"[{item.status.value.upper()}]"
-        lines.append(f"  {tag:<10s} {item.display_name}")
+        qty_str = ""
+        if item.current_quantity is not None and item.current_unit is not None:
+            qty_str = f"  ({item.current_quantity:g} {item.current_unit})"
+        lines.append(f"  {tag:<10s} {item.display_name}{qty_str}")
     return "\n".join(lines)
 
 
@@ -347,7 +350,14 @@ def _handle_stock(args: argparse.Namespace) -> int:
         return 1
 
     pantry_mgr.update_status(item_name, new_status)
-    print(f"Updated '{item_name}' to {new_status.value}.")
+
+    qty: float | None = getattr(args, "quantity", None)
+    unit: str | None = getattr(args, "unit", None)
+    if qty is not None and unit is not None:
+        pantry_mgr.update_quantity(item_name, qty, unit)
+        print(f"Updated '{item_name}' to {new_status.value} ({qty:g} {unit}).")
+    else:
+        print(f"Updated '{item_name}' to {new_status.value}.")
     return 0
 
 
@@ -652,6 +662,17 @@ def _add_stock_parser(
         nargs="?",
         default="other",
         help="Category (for 'add' action only).",
+    )
+    stock_parser.add_argument(
+        "--quantity",
+        type=float,
+        default=None,
+        help="Set current quantity (e.g. 2.0).",
+    )
+    stock_parser.add_argument(
+        "--unit",
+        default=None,
+        help="Unit for quantity (e.g. gal, lb).",
     )
 
 

@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS household_inventory (
     display_name TEXT NOT NULL,
     category TEXT,
     status TEXT NOT NULL DEFAULT 'on_hand',  -- 'on_hand', 'low', 'out'
+    current_quantity REAL,
+    current_unit TEXT,
     default_quantity REAL,
     default_unit TEXT,
     default_search_term TEXT,

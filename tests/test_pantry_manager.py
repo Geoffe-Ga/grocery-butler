@@ -277,6 +277,61 @@ class TestStatusLifecycle:
 
 
 # ---------------------------------------------------------------------------
+# TestUpdateQuantity
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateQuantity:
+    """Tests for update_quantity method."""
+
+    def test_update_quantity_basic(
+        self, manager: PantryManager, sample_item: InventoryItem
+    ) -> None:
+        """Test updating an item's current quantity."""
+        manager.add_item(sample_item)
+        manager.update_quantity("milk", 0.5, "gal")
+
+        item = manager.get_item("milk")
+        assert item is not None
+        assert item.current_quantity == 0.5
+        assert item.current_unit == "gal"
+
+    def test_update_quantity_case_insensitive(
+        self, manager: PantryManager, sample_item: InventoryItem
+    ) -> None:
+        """Test update_quantity matches case-insensitively."""
+        manager.add_item(sample_item)
+        manager.update_quantity("MILK", 2.0, "L")
+
+        item = manager.get_item("milk")
+        assert item is not None
+        assert item.current_quantity == 2.0
+        assert item.current_unit == "L"
+
+    def test_update_quantity_overwrites(
+        self, manager: PantryManager, sample_item: InventoryItem
+    ) -> None:
+        """Test updating quantity overwrites previous value."""
+        manager.add_item(sample_item)
+        manager.update_quantity("milk", 1.0, "gal")
+        manager.update_quantity("milk", 0.25, "gal")
+
+        item = manager.get_item("milk")
+        assert item is not None
+        assert item.current_quantity == 0.25
+
+    def test_item_added_without_quantity(
+        self, manager: PantryManager, sample_item: InventoryItem
+    ) -> None:
+        """Test new items have None quantity by default."""
+        manager.add_item(sample_item)
+        item = manager.get_item("milk")
+        assert item is not None
+        assert item.current_quantity is None
+        assert item.current_unit is None
+
+
+# ---------------------------------------------------------------------------
 # TestMarkRestocked
 # ---------------------------------------------------------------------------
 
@@ -355,6 +410,34 @@ class TestMarkRestocked:
 
         count = manager.mark_restocked(["milk", "nonexistent"])
         assert count == 1
+
+    def test_mark_restocked_resets_quantity(
+        self,
+        manager: PantryManager,
+    ) -> None:
+        """Test mark_restocked resets current_quantity to default_quantity."""
+        item = InventoryItem(
+            ingredient="milk",
+            display_name="Milk",
+            default_quantity=1.0,
+            default_unit="gal",
+            current_quantity=0.1,
+            current_unit="gal",
+        )
+        manager.add_item(item)
+        manager.update_status("milk", InventoryStatus.OUT)
+
+        manager.mark_restocked(["milk"])
+        updated = manager.get_item("milk")
+        assert updated is not None
+        assert updated.current_quantity == 1.0
+        assert updated.current_unit == "gal"
+
+    def test_update_quantity_nonexistent(self, manager: PantryManager) -> None:
+        """Test update_quantity on nonexistent item is a no-op."""
+        manager.update_quantity("nonexistent", 1.0, "gal")
+        item = manager.get_item("nonexistent")
+        assert item is None
 
 
 # ---------------------------------------------------------------------------

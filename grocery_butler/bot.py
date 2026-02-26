@@ -107,7 +107,10 @@ def _format_inventory(items: list[InventoryItem]) -> str:
     for item in items:
         emoji = _STATUS_EMOJI.get(item.status.value, "")
         cat_str = f" [{item.category.value}]" if item.category else ""
-        lines.append(f"{emoji} **{item.display_name}**{cat_str}")
+        qty_str = ""
+        if item.current_quantity is not None and item.current_unit is not None:
+            qty_str = f" — {item.current_quantity:g} {item.current_unit}"
+        lines.append(f"{emoji} **{item.display_name}**{cat_str}{qty_str}")
     return _truncate("\n".join(lines))
 
 
@@ -148,8 +151,10 @@ def _format_restock_queue(items: list[InventoryItem]) -> str:
     for item in items:
         emoji = _STATUS_EMOJI.get(item.status.value, "")
         qty_str = ""
-        if item.default_quantity is not None and item.default_unit is not None:
-            qty_str = f" ({item.default_quantity:g} {item.default_unit})"
+        if item.current_quantity is not None and item.current_unit is not None:
+            qty_str = f" ({item.current_quantity:g} {item.current_unit})"
+        elif item.default_quantity is not None and item.default_unit is not None:
+            qty_str = f" (reorder: {item.default_quantity:g} {item.default_unit})"
         lines.append(f"{emoji} **{item.display_name}**{qty_str}")
     return _truncate("\n".join(lines))
 
