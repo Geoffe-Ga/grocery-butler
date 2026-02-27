@@ -621,14 +621,19 @@ class TestHandleStock:
 
     def test_no_config_uses_default_path(self, db_path: str, capsys):
         """Test stock works with no config using default path."""
-        with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
+        with (
+            patch("grocery_butler.cli._load_config_safe") as mock_cfg,
+            patch("grocery_butler.cli.PantryManager") as mock_pm_cls,
+        ):
             mock_cfg.return_value = None
+            mock_pm_cls.return_value.get_inventory.return_value = []
             from grocery_butler.cli import _handle_stock
 
             parser = _build_parser()
             args = parser.parse_args(["stock"])
             code = _handle_stock(args)
 
+        mock_pm_cls.assert_called_once_with("mealbot.db")
         assert code == 0
 
     def test_set_quantity_with_status(self, db_path: str, capsys):
