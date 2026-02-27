@@ -75,16 +75,11 @@ if $VERBOSE; then
     echo "Running pip-audit dependency checker..."
 fi
 
-# Known vulnerability ignores (deps with no fix available):
-#   PYSEC-2022-42969: py 1.11.0 - deprecated package, transitive dep from pytest tooling
-#   Issue #3: Remove once pytest ecosystem drops the py transitive dependency
-PIP_AUDIT_ARGS=("--ignore-vuln" "PYSEC-2022-42969")
-
 VENV_PYTHON="${VIRTUAL_ENV:-$PROJECT_ROOT/.venv}/bin/python"
 if [ -x "$VENV_PYTHON" ]; then
-    PIPAPI_PYTHON_LOCATION="$VENV_PYTHON" pip-audit "${PIP_AUDIT_ARGS[@]}" || { echo "✗ pip-audit found issues" >&2; exit 1; }
+    PIPAPI_PYTHON_LOCATION="$VENV_PYTHON" pip-audit || { echo "✗ pip-audit found issues" >&2; exit 1; }
 else
-    pip-audit "${PIP_AUDIT_ARGS[@]}" || { echo "✗ pip-audit found issues" >&2; exit 1; }
+    pip-audit || { echo "✗ pip-audit found issues" >&2; exit 1; }
 fi
 
 if $FULL; then
