@@ -313,6 +313,10 @@ class _OrderConfirmView(discord.ui.View):
         await interaction.response.send_message("Order cancelled.")
         self.stop()
 
+    async def on_timeout(self) -> None:
+        """Clean up pipeline resources when the view times out."""
+        await asyncio.to_thread(self._pipeline.close)
+
 
 def _make_bot_anthropic_client(config: Config) -> object | None:
     """Create an Anthropic client from bot config.
@@ -358,6 +362,13 @@ def _format_cart_summary(cart: CartSummary) -> str:
                 f"  {ci.quantity_to_order}x {ci.safeway_product.name}"
                 f"  ${ci.estimated_cost:.2f}"
             )
+
+    if cart.substituted_items:
+        lines.append(f"\nSubstituted ({len(cart.substituted_items)}):")
+        for sub in cart.substituted_items:
+            orig = sub.original_item.ingredient
+            alt = sub.selected.product.name if sub.selected else "?"
+            lines.append(f"  {orig} -> {alt}")
 
     if cart.failed_items:
         lines.append(f"\nFailed ({len(cart.failed_items)}):")
