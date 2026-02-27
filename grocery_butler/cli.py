@@ -573,9 +573,6 @@ def _format_cart_summary(cart: CartSummary) -> str:
     Returns:
         Formatted cart summary string.
     """
-    if not isinstance(cart, CartSummary):
-        return "Invalid cart summary."
-
     lines: list[str] = ["=== Cart Summary ===", ""]
     lines.extend(_format_cart_items(f"Items ({len(cart.items)}):", cart.items))
     lines.extend(

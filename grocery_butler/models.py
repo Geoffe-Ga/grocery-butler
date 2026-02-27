@@ -394,7 +394,7 @@ class CartSummary(BaseModel):
     items: list[CartItem]
     failed_items: list[ShoppingListItem]
     substituted_items: list[SubstitutionResult]
-    skipped_items: list[ShoppingListItem]
+    skipped_items: list[ShoppingListItem] = []
     restock_items: list[CartItem]
     subtotal: float
     fulfillment_options: list[FulfillmentOption]

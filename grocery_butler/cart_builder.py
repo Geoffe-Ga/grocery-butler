@@ -84,7 +84,6 @@ class CartBuilder:
         cart_items: list[CartItem] = []
         failed: list[ShoppingListItem] = []
         substituted: list[SubstitutionResult] = []
-        skipped: list[ShoppingListItem] = []
         restock_cart: list[CartItem] = []
 
         all_items = list(items)
@@ -118,7 +117,6 @@ class CartBuilder:
             items=cart_items,
             failed_items=failed,
             substituted_items=substituted,
-            skipped_items=skipped,
             restock_items=restock_cart,
             subtotal=subtotal,
             fulfillment_options=fulfillment_options,
@@ -178,9 +176,12 @@ class CartBuilder:
             product: The out-of-stock product.
 
         Returns:
-            SubstitutionResult with alternatives.
+            SubstitutionResult with best alternative pre-selected.
         """
-        return self._substitution.find_substitutions(item, product)
+        result = self._substitution.find_substitutions(item, product)
+        if result.alternatives:
+            result.selected = result.alternatives[0]
+        return result
 
     def _get_fulfillment_options(self) -> list[FulfillmentOption]:
         """Query available fulfillment options from Safeway.

@@ -35,7 +35,11 @@ from grocery_butler.models import (
     InventoryStatus,
     InventoryUpdate,
     ParsedMeal,
+    SafewayProduct,
     ShoppingListItem,
+    SubstitutionOption,
+    SubstitutionResult,
+    SubstitutionSuitability,
 )
 
 # ---------------------------------------------------------------------------
@@ -1714,6 +1718,56 @@ class TestFormatCartSummaryBot:
         result = _format_cart_summary(cart)
         assert "Failed" in result
         assert "unicorn tears" in result
+
+    def test_format_with_substitution_shows_name(self) -> None:
+        """Test substituted items show the selected product name."""
+        from grocery_butler.models import CartSummary, FulfillmentType
+
+        alt_product = SafewayProduct(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="2 lb",
+        )
+        sub = SubstitutionResult(
+            status="alternatives_found",
+            original_item=ShoppingListItem(
+                ingredient="chicken thighs",
+                quantity=2.0,
+                unit="lb",
+                category=IngredientCategory.MEAT,
+                search_term="chicken thighs",
+                from_meals=["manual"],
+            ),
+            alternatives=[
+                SubstitutionOption(
+                    product=alt_product,
+                    suitability=SubstitutionSuitability.GOOD,
+                    reasoning="Similar cut",
+                ),
+            ],
+            selected=SubstitutionOption(
+                product=alt_product,
+                suitability=SubstitutionSuitability.GOOD,
+                reasoning="Similar cut",
+            ),
+            message="Found 1 alternative(s)",
+        )
+        cart = CartSummary(
+            items=[],
+            failed_items=[],
+            substituted_items=[sub],
+            restock_items=[],
+            subtotal=0.0,
+            fulfillment_options=[],
+            recommended_fulfillment=FulfillmentType.PICKUP,
+            estimated_total=0.0,
+        )
+
+        result = _format_cart_summary(cart)
+        assert "Substituted" in result
+        assert "Organic Chicken Thighs" in result
+        assert "?" not in result
 
 
 class TestFormatOrderResult:

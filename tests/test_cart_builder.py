@@ -22,7 +22,9 @@ from grocery_butler.models import (
     IngredientCategory,
     SafewayProduct,
     ShoppingListItem,
+    SubstitutionOption,
     SubstitutionResult,
+    SubstitutionSuitability,
 )
 
 # ------------------------------------------------------------------
@@ -466,6 +468,54 @@ class TestBuildCart:
 
         assert len(result.substituted_items) == 1
         assert result.substituted_items[0].status == "no_alternatives"
+
+    def test_out_of_stock_selects_best_alternative(self) -> None:
+        """Test that selected is set to first alternative when available."""
+        oos_product = _make_product(in_stock=False)
+        alt_product = _make_product(
+            product_id="ALT1", name="Organic Chicken Thighs", price=10.99
+        )
+        alt_option = SubstitutionOption(
+            product=alt_product,
+            suitability=SubstitutionSuitability.GOOD,
+            reasoning="Similar cut",
+        )
+        sub_result = SubstitutionResult(
+            status="alternatives_found",
+            original_item=_make_item(),
+            alternatives=[alt_option],
+            message="Found 1 alternative(s)",
+        )
+
+        mock_search = MagicMock()
+        mock_search.search_or_cached.return_value = [oos_product]
+
+        mock_selector = MagicMock()
+        mock_selector.select_product.return_value = _MockSelectionResult(
+            item=_make_item(),
+            product=oos_product,
+            reasoning="Test",
+        )
+
+        mock_substitution = MagicMock()
+        mock_substitution.find_substitutions.return_value = sub_result
+
+        mock_client = MagicMock()
+        mock_client.store_id = "1234"
+        mock_client.get.return_value = {}
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        cart = builder.build_cart([_make_item()])
+
+        assert len(cart.substituted_items) == 1
+        sub = cart.substituted_items[0]
+        assert sub.selected is not None
+        assert sub.selected.product.name == "Organic Chicken Thighs"
 
     def test_restock_items_separated(self) -> None:
         """Test restock items go to restock_items list."""
