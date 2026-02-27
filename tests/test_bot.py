@@ -19,6 +19,7 @@ from grocery_butler.bot import (
     _format_restock_queue,
     _format_shopping_list,
     _make_bot_anthropic_client,
+    _OrderConfirmView,
     _truncate,
     create_bot,
     run_bot,
@@ -1819,3 +1820,20 @@ class TestOrderCommandGroup:
         subcommand_names = {cmd.name for cmd in group.commands}
         assert "review" in subcommand_names
         assert "submit" in subcommand_names
+
+
+class TestOrderConfirmViewTimeout:
+    """Tests for _OrderConfirmView.on_timeout resource cleanup."""
+
+    def test_on_timeout_closes_pipeline(self):
+        """Test that on_timeout calls pipeline.close."""
+        import asyncio
+
+        async def _run():
+            mock_pipeline = MagicMock()
+            mock_cart = MagicMock()
+            view = _OrderConfirmView(mock_pipeline, mock_cart)
+            await view.on_timeout()
+            mock_pipeline.close.assert_called_once()
+
+        asyncio.run(_run())

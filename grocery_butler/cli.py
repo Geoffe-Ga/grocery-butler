@@ -22,7 +22,6 @@ from grocery_butler.models import (
     InventoryItem,
     InventoryStatus,
     ShoppingListItem,
-    Unit,
 )
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
@@ -57,19 +56,17 @@ def _load_config_safe() -> Config | None:
 def _make_anthropic_client(api_key: str) -> object | None:
     """Create an Anthropic client from the given API key.
 
+    Delegates to :func:`claude_utils.make_anthropic_client`.
+
     Args:
         api_key: Anthropic API key string.
 
     Returns:
         Anthropic client instance or None on import failure.
     """
-    try:
-        import anthropic
+    from grocery_butler.claude_utils import make_anthropic_client
 
-        return anthropic.Anthropic(api_key=api_key)
-    except Exception:
-        logger.warning("Anthropic client unavailable; Claude features disabled")
-        return None
+    return make_anthropic_client(api_key)
 
 
 # ------------------------------------------------------------------
@@ -699,24 +696,17 @@ def _parse_order_items(
 def _items_from_string(items_str: str) -> list[ShoppingListItem]:
     """Convert comma-separated item names to ShoppingListItem list.
 
+    Delegates to :func:`claude_utils.items_from_string`.
+
     Args:
         items_str: Comma-separated ingredient names.
 
     Returns:
         List of ShoppingListItem with defaults.
     """
-    names = [n.strip() for n in items_str.split(",") if n.strip()]
-    return [
-        ShoppingListItem(
-            ingredient=name.lower(),
-            quantity=1.0,
-            unit=Unit.EACH,
-            category=IngredientCategory.OTHER,
-            search_term=name.lower(),
-            from_meals=["manual"],
-        )
-        for name in names
-    ]
+    from grocery_butler.claude_utils import items_from_string
+
+    return items_from_string(items_str)
 
 
 def _items_from_meals(meals_str: str, cfg: Config) -> list[ShoppingListItem]:

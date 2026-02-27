@@ -253,25 +253,28 @@ def _format_preferences(prefs: dict[str, str]) -> str:
 class _OrderConfirmView(discord.ui.View):
     """Discord UI view with Confirm / Cancel buttons for order submission.
 
+    Stores a pre-built ``CartSummary`` so the confirmed order matches the
+    preview the user approved — no second build pass is needed.
+
     Attributes:
         pipeline: The SafewayPipeline instance to use for submission.
-        items: Shopping list items to order.
+        cart: Pre-built CartSummary to submit on confirm.
     """
 
     def __init__(
         self,
         pipeline: SafewayPipeline,
-        items: list[ShoppingListItem],
+        cart: CartSummary,
     ) -> None:
         """Initialize the confirmation view.
 
         Args:
             pipeline: SafewayPipeline instance.
-            items: ShoppingListItem list to submit.
+            cart: Pre-built CartSummary to submit on confirm.
         """
         super().__init__(timeout=120)
         self._pipeline = pipeline
-        self._items = items
+        self._cart = cart
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.green)
     async def confirm(
@@ -287,7 +290,9 @@ class _OrderConfirmView(discord.ui.View):
         """
         await interaction.response.defer()
         try:
-            order_result = await asyncio.to_thread(self._pipeline.run, self._items)
+            order_result = await asyncio.to_thread(
+                self._pipeline.submit_cart, self._cart
+            )
             msg = _format_order_result(order_result)
             await interaction.followup.send(msg)
         except Exception:
@@ -321,19 +326,17 @@ class _OrderConfirmView(discord.ui.View):
 def _make_bot_anthropic_client(config: Config) -> object | None:
     """Create an Anthropic client from bot config.
 
+    Delegates to :func:`claude_utils.make_anthropic_client`.
+
     Args:
         config: Application config with API key.
 
     Returns:
         Anthropic client or None if unavailable.
     """
-    try:
-        import anthropic
+    from grocery_butler.claude_utils import make_anthropic_client
 
-        return anthropic.Anthropic(api_key=config.anthropic_api_key)
-    except Exception:
-        logger.warning("Anthropic client unavailable; Claude features disabled")
-        return None
+    return make_anthropic_client(config.anthropic_api_key)
 
 
 def _format_cart_summary(cart: CartSummary) -> str:
@@ -1076,28 +1079,16 @@ def create_bot(config: Config) -> discord.Client:
         await interaction.response.defer()
 
         try:
-            from grocery_butler.models import IngredientCategory, ShoppingListItem, Unit
+            from grocery_butler.claude_utils import items_from_string
             from grocery_butler.safeway_pipeline import (
                 SafewayPipeline,
                 SafewayPipelineError,
             )
 
-            names = [n.strip() for n in items.split(",") if n.strip()]
-            if not names:
+            shopping_items = items_from_string(items)
+            if not shopping_items:
                 await interaction.followup.send("Please provide item names.")
                 return
-
-            shopping_items = [
-                ShoppingListItem(
-                    ingredient=n.lower(),
-                    quantity=1.0,
-                    unit=Unit.EACH,
-                    category=IngredientCategory.OTHER,
-                    search_term=n.lower(),
-                    from_meals=["manual"],
-                )
-                for n in names
-            ]
 
             anthropic_client = _make_bot_anthropic_client(config)
             pipeline = SafewayPipeline(config, config.database_path, anthropic_client)
@@ -1128,35 +1119,23 @@ def create_bot(config: Config) -> discord.Client:
         await interaction.response.defer()
 
         try:
-            from grocery_butler.models import IngredientCategory, ShoppingListItem, Unit
+            from grocery_butler.claude_utils import items_from_string
             from grocery_butler.safeway_pipeline import (
                 SafewayPipeline,
                 SafewayPipelineError,
             )
 
-            names = [n.strip() for n in items.split(",") if n.strip()]
-            if not names:
+            shopping_items = items_from_string(items)
+            if not shopping_items:
                 await interaction.followup.send("Please provide item names.")
                 return
-
-            shopping_items = [
-                ShoppingListItem(
-                    ingredient=n.lower(),
-                    quantity=1.0,
-                    unit=Unit.EACH,
-                    category=IngredientCategory.OTHER,
-                    search_term=n.lower(),
-                    from_meals=["manual"],
-                )
-                for n in names
-            ]
 
             anthropic_client = _make_bot_anthropic_client(config)
             pipeline = SafewayPipeline(config, config.database_path, anthropic_client)
             try:
                 cart = await asyncio.to_thread(pipeline.build_cart_only, shopping_items)
                 preview = _format_cart_summary(cart)
-                view = _OrderConfirmView(pipeline, shopping_items)
+                view = _OrderConfirmView(pipeline, cart)
                 await interaction.followup.send(
                     f"{preview}\n\nSubmit this order?", view=view
                 )

@@ -128,6 +128,24 @@ class SafewayPipeline:
         self._authenticate()
         return self._cart_builder.build_cart(items, restock_items)
 
+    def submit_cart(self, cart: CartSummary) -> OrderResult:
+        """Submit a pre-built cart to Safeway.
+
+        Use this when the cart has already been built via
+        :meth:`build_cart_only` and the user has confirmed.
+
+        Args:
+            cart: Pre-built cart summary to submit.
+
+        Returns:
+            OrderResult with confirmation or error details.
+
+        Raises:
+            SafewayPipelineError: If authentication fails.
+        """
+        self._authenticate()
+        return self._order_service.submit_order(cart)
+
     def close(self) -> None:
         """Clean up SafewayClient HTTP resources."""
         self._client.close()

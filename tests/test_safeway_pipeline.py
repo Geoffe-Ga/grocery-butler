@@ -363,6 +363,52 @@ class TestSafewayPipelineClose:
 
 
 # ---------------------------------------------------------------------------
+# Submit cart tests
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitCart:
+    """Tests for SafewayPipeline.submit_cart method."""
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_submit_cart_calls_order_service(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+    ):
+        """Test submit_cart delegates to order service without rebuilding."""
+        mock_client = mock_client_cls.return_value
+        mock_client.is_authenticated = True
+
+        expected = OrderResult(success=True)
+        mock_order_cls.return_value.submit_order.return_value = expected
+
+        pipeline = SafewayPipeline(safeway_config, ":memory:")
+        result = pipeline.submit_cart(mock_cart_summary)
+
+        assert result is expected
+        mock_order_cls.return_value.submit_order.assert_called_once_with(
+            mock_cart_summary
+        )
+        mock_cart_cls.return_value.build_cart.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Empty shopping list tests
 # ---------------------------------------------------------------------------
 
