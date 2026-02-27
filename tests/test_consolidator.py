@@ -787,7 +787,7 @@ class TestConsolidateWithClaude:
         consolidator.consolidate([sample_tacos_meal], [], pantry_staples)
         mock_client.messages.create.assert_called_once()
         call_kwargs = mock_client.messages.create.call_args
-        assert call_kwargs[1]["model"] == "claude-sonnet-4-20250514"
+        assert call_kwargs[1]["model"] == "claude-sonnet-4-6"
 
     def test_no_client_uses_simple_fallback(
         self,
@@ -991,7 +991,7 @@ class TestConsolidatorGetModel:
     def test_returns_correct_model(self):
         """Test model name is the expected Claude model."""
         consolidator = Consolidator()
-        assert consolidator._get_model() == "claude-sonnet-4-20250514"
+        assert consolidator._get_model() == "claude-sonnet-4-6"
 
 
 class TestConsolidatorBuildPrompt:

@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         ShoppingListItem,
     )
     from grocery_butler.order_service import OrderResult
+    from grocery_butler.safeway_pipeline import SafewayPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +248,70 @@ def _format_preferences(prefs: dict[str, str]) -> str:
     for key, value in sorted(prefs.items()):
         lines.append(f"- **{key}**: {value}")
     return _truncate("\n".join(lines))
+
+
+class _OrderConfirmView(discord.ui.View):
+    """Discord UI view with Confirm / Cancel buttons for order submission.
+
+    Attributes:
+        pipeline: The SafewayPipeline instance to use for submission.
+        items: Shopping list items to order.
+    """
+
+    def __init__(
+        self,
+        pipeline: SafewayPipeline,
+        items: list[ShoppingListItem],
+    ) -> None:
+        """Initialize the confirmation view.
+
+        Args:
+            pipeline: SafewayPipeline instance.
+            items: ShoppingListItem list to submit.
+        """
+        super().__init__(timeout=120)
+        self._pipeline = pipeline
+        self._items = items
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.green)
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[_OrderConfirmView],
+    ) -> None:
+        """Handle confirm button press.
+
+        Args:
+            interaction: Discord interaction context.
+            button: The button that was pressed.
+        """
+        await interaction.response.defer()
+        try:
+            order_result = await asyncio.to_thread(self._pipeline.run, self._items)
+            msg = _format_order_result(order_result)
+            await interaction.followup.send(msg)
+        except Exception:
+            logger.exception("Order submission failed")
+            await interaction.followup.send("Order submission failed.")
+        finally:
+            await asyncio.to_thread(self._pipeline.close)
+            self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[_OrderConfirmView],
+    ) -> None:
+        """Handle cancel button press.
+
+        Args:
+            interaction: Discord interaction context.
+            button: The button that was pressed.
+        """
+        await asyncio.to_thread(self._pipeline.close)
+        await interaction.response.send_message("Order cancelled.")
+        self.stop()
 
 
 def _make_bot_anthropic_client(config: Config) -> object | None:
@@ -1043,7 +1108,7 @@ def create_bot(config: Config) -> discord.Client:
     @order_group.command(name="submit", description="Build and submit a Safeway order")
     @app_commands.describe(items="Comma-separated item names (e.g. milk, eggs)")
     async def order_submit(interaction: discord.Interaction, items: str) -> None:
-        """Build cart and submit order to Safeway.
+        """Build cart, show preview, and submit order after confirmation.
 
         Args:
             interaction: Discord interaction context.
@@ -1078,11 +1143,15 @@ def create_bot(config: Config) -> discord.Client:
             anthropic_client = _make_bot_anthropic_client(config)
             pipeline = SafewayPipeline(config, config.database_path, anthropic_client)
             try:
-                order_result = await asyncio.to_thread(pipeline.run, shopping_items)
-                msg = _format_order_result(order_result)
-                await interaction.followup.send(msg)
-            finally:
+                cart = await asyncio.to_thread(pipeline.build_cart_only, shopping_items)
+                preview = _format_cart_summary(cart)
+                view = _OrderConfirmView(pipeline, shopping_items)
+                await interaction.followup.send(
+                    f"{preview}\n\nSubmit this order?", view=view
+                )
+            except Exception:
                 await asyncio.to_thread(pipeline.close)
+                raise
 
         except SafewayPipelineError as exc:
             await interaction.followup.send(f"Pipeline error: {exc}")

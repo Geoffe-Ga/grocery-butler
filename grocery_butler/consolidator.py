@@ -526,4 +526,4 @@ class Consolidator:
         Returns:
             Model identifier string.
         """
-        return "claude-sonnet-4-20250514"
+        return "claude-sonnet-4-6"
