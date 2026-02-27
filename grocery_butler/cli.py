@@ -16,13 +16,16 @@ from typing import TYPE_CHECKING
 from grocery_butler.consolidator import Consolidator
 from grocery_butler.meal_parser import MealParser
 from grocery_butler.models import (
+    CartItem,
     IngredientCategory,
     InventoryItem,
     InventoryStatus,
     ShoppingListItem,
+    Unit,
 )
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
+from grocery_butler.safeway_pipeline import SafewayPipeline, SafewayPipelineError
 
 if TYPE_CHECKING:
     from grocery_butler.config import Config
@@ -537,6 +540,210 @@ def _remove_pantry_staple(store: RecipeStore, ingredient_name: str) -> int:
     return 1
 
 
+def _format_cart_items(
+    header: str,
+    items: list[CartItem],
+) -> list[str]:
+    """Format a section of cart items for display.
+
+    Args:
+        header: Section header text.
+        items: CartItem instances to format.
+
+    Returns:
+        Lines for this section.
+    """
+    if not items:
+        return []
+    lines = [header]
+    for ci in items:
+        lines.append(
+            f"  {ci.quantity_to_order}x {ci.safeway_product.name}"
+            f"  ${ci.estimated_cost:.2f}"
+        )
+    lines.append("")
+    return lines
+
+
+def _format_cart_summary(cart: object) -> str:
+    """Format a CartSummary for terminal display.
+
+    Args:
+        cart: CartSummary instance.
+
+    Returns:
+        Formatted cart summary string.
+    """
+    from grocery_butler.models import CartSummary
+
+    if not isinstance(cart, CartSummary):
+        return "Invalid cart summary."
+
+    lines: list[str] = ["=== Cart Summary ===", ""]
+    lines.extend(_format_cart_items(f"Items ({len(cart.items)}):", cart.items))
+    lines.extend(
+        _format_cart_items(
+            f"Restock Items ({len(cart.restock_items)}):", cart.restock_items
+        )
+    )
+
+    if cart.failed_items:
+        lines.append(f"Failed ({len(cart.failed_items)}):")
+        for item in cart.failed_items:
+            lines.append(f"  - {item.ingredient}")
+        lines.append("")
+
+    if cart.substituted_items:
+        lines.append(f"Substituted ({len(cart.substituted_items)}):")
+        for sub in cart.substituted_items:
+            orig = sub.original_item.ingredient
+            alt = sub.selected.product.name if sub.selected else "(no substitute found)"
+            lines.append(f"  {orig} -> {alt}")
+        lines.append("")
+
+    lines.append(f"Subtotal:  ${cart.subtotal:.2f}")
+    lines.append(f"Fulfillment: {cart.recommended_fulfillment.value}")
+    lines.append(f"Est. Total: ${cart.estimated_total:.2f}")
+
+    return "\n".join(lines)
+
+
+def _handle_order(args: argparse.Namespace) -> int:
+    """Handle the ``order`` subcommand.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for failure).
+    """
+    cfg = _load_config_safe()
+    if cfg is None:
+        print(
+            "Error: Missing configuration. "
+            "Copy .env.example to .env and fill in your keys.",
+            file=sys.stderr,
+        )
+        return 1
+
+    client = _make_anthropic_client(cfg.anthropic_api_key)
+
+    try:
+        pipeline = SafewayPipeline(cfg, cfg.database_path, client)
+    except SafewayPipelineError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    items = _parse_order_items(args, cfg)
+    if items is None:
+        return 1
+
+    dry_run: bool = getattr(args, "dry_run", False)
+
+    try:
+        if dry_run:
+            cart = pipeline.build_cart_only(items)
+            print(_format_cart_summary(cart))
+            return 0
+
+        result = pipeline.run(items)
+        if result.success and result.confirmation:
+            print(f"Order submitted! ID: {result.confirmation.order_id}")
+            print(
+                f"Status: {result.confirmation.status} "
+                f"({result.confirmation.item_count} items, "
+                f"${result.confirmation.total:.2f})"
+            )
+            if result.items_restocked:
+                print(f"Restocked {result.items_restocked} inventory items.")
+            return 0
+
+        print(f"Order failed: {result.error_message}", file=sys.stderr)
+        return 1
+    except SafewayPipelineError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        pipeline.close()
+
+
+def _parse_order_items(
+    args: argparse.Namespace,
+    cfg: Config,
+) -> list[ShoppingListItem] | None:
+    """Parse order items from CLI arguments.
+
+    Args:
+        args: Parsed arguments with items or meals.
+        cfg: Application configuration.
+
+    Returns:
+        List of ShoppingListItem or None on error.
+    """
+    items_str: str | None = getattr(args, "items", None)
+    meals_str: str | None = getattr(args, "meals", None)
+
+    if items_str:
+        return _items_from_string(items_str)
+
+    if meals_str:
+        return _items_from_meals(meals_str, cfg)
+
+    print(
+        "Error: Provide --items or --meals.",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _items_from_string(items_str: str) -> list[ShoppingListItem]:
+    """Convert comma-separated item names to ShoppingListItem list.
+
+    Args:
+        items_str: Comma-separated ingredient names.
+
+    Returns:
+        List of ShoppingListItem with defaults.
+    """
+    names = [n.strip() for n in items_str.split(",") if n.strip()]
+    return [
+        ShoppingListItem(
+            ingredient=name.lower(),
+            quantity=1.0,
+            unit=Unit.EACH,
+            category=IngredientCategory.OTHER,
+            search_term=name.lower(),
+            from_meals=["manual"],
+        )
+        for name in names
+    ]
+
+
+def _items_from_meals(meals_str: str, cfg: Config) -> list[ShoppingListItem]:
+    """Parse meals and consolidate into shopping list items.
+
+    Args:
+        meals_str: Comma-separated meal names.
+        cfg: Application config.
+
+    Returns:
+        Consolidated shopping list items.
+    """
+    client = _make_anthropic_client(cfg.anthropic_api_key)
+    store = RecipeStore(cfg.database_path)
+    parser = MealParser(store, anthropic_client=client, config=cfg)
+    consolidator = Consolidator(anthropic_client=client, config=cfg)
+
+    meal_names = [m.strip() for m in meals_str.split(",") if m.strip()]
+    parsed_meals = parser.parse_meals(meal_names)
+
+    pantry_mgr = PantryManager(cfg.database_path, anthropic_client=client)
+    restock_queue = pantry_mgr.get_restock_queue()
+    pantry_staple_names = store.get_pantry_staple_names()
+
+    return consolidator.consolidate(parsed_meals, restock_queue, pantry_staple_names)
+
+
 def _handle_bot() -> int:
     """Handle the ``bot`` subcommand.
 
@@ -580,6 +787,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     _add_plan_parser(subparsers)
+    _add_order_parser(subparsers)
     _add_stock_parser(subparsers)
     _add_restock_parser(subparsers)
     _add_recipes_parser(subparsers)
@@ -587,6 +795,36 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_bot_parser(subparsers)
 
     return parser
+
+
+def _add_order_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Add the ``order`` subcommand parser.
+
+    Args:
+        subparsers: Subparsers action from the main parser.
+    """
+    order_parser = subparsers.add_parser(
+        "order",
+        help="Build and submit a Safeway grocery order.",
+    )
+    order_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Build cart and show summary without submitting.",
+    )
+    order_parser.add_argument(
+        "--items",
+        default=None,
+        help="Comma-separated list of items (e.g. 'milk, eggs, bread').",
+    )
+    order_parser.add_argument(
+        "--meals",
+        default=None,
+        help="Comma-separated list of meals to plan and order.",
+    )
 
 
 def _add_bot_parser(
@@ -791,6 +1029,8 @@ def _dispatch(args: argparse.Namespace) -> int:
     command: str = args.command
     if command == "plan":
         return _handle_plan(args)
+    if command == "order":
+        return _handle_order(args)
     if command == "stock":
         return _handle_stock(args)
     if command == "restock":

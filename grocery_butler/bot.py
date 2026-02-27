@@ -26,10 +26,12 @@ if TYPE_CHECKING:
     from grocery_butler.config import Config
     from grocery_butler.models import (
         BrandPreference,
+        CartSummary,
         InventoryItem,
         ParsedMeal,
         ShoppingListItem,
     )
+    from grocery_butler.order_service import OrderResult
 
 logger = logging.getLogger(__name__)
 
@@ -245,6 +247,92 @@ def _format_preferences(prefs: dict[str, str]) -> str:
     for key, value in sorted(prefs.items()):
         lines.append(f"- **{key}**: {value}")
     return _truncate("\n".join(lines))
+
+
+def _make_bot_anthropic_client(config: Config) -> object | None:
+    """Create an Anthropic client from bot config.
+
+    Args:
+        config: Application config with API key.
+
+    Returns:
+        Anthropic client or None if unavailable.
+    """
+    try:
+        import anthropic
+
+        return anthropic.Anthropic(api_key=config.anthropic_api_key)
+    except Exception:
+        return None
+
+
+def _format_cart_summary(cart: CartSummary) -> str:
+    """Format a CartSummary for Discord display.
+
+    Args:
+        cart: Cart summary to format.
+
+    Returns:
+        Formatted cart summary string with code block.
+    """
+    lines: list[str] = []
+
+    if cart.items:
+        lines.append(f"Items ({len(cart.items)}):")
+        for ci in cart.items:
+            lines.append(
+                f"  {ci.quantity_to_order}x {ci.safeway_product.name}"
+                f"  ${ci.estimated_cost:.2f}"
+            )
+
+    if cart.restock_items:
+        lines.append(f"\nRestock ({len(cart.restock_items)}):")
+        for ci in cart.restock_items:
+            lines.append(
+                f"  {ci.quantity_to_order}x {ci.safeway_product.name}"
+                f"  ${ci.estimated_cost:.2f}"
+            )
+
+    if cart.failed_items:
+        lines.append(f"\nFailed ({len(cart.failed_items)}):")
+        for item in cart.failed_items:
+            lines.append(f"  - {item.ingredient}")
+
+    lines.append(f"\nSubtotal: ${cart.subtotal:.2f}")
+    lines.append(f"Fulfillment: {cart.recommended_fulfillment.value}")
+    lines.append(f"Est. Total: ${cart.estimated_total:.2f}")
+
+    return _truncate("```\n" + "\n".join(lines) + "\n```")
+
+
+def _format_order_result(result: OrderResult) -> str:
+    """Format an OrderResult for Discord display.
+
+    Args:
+        result: Order result to format.
+
+    Returns:
+        Formatted order result string.
+    """
+    if not result.success:
+        return f"Order failed: {result.error_message}"
+
+    if result.confirmation is None:
+        return "Order submitted but no confirmation received."
+
+    conf = result.confirmation
+    lines = [
+        f"Order submitted! ID: **{conf.order_id}**",
+        f"Status: {conf.status}",
+        f"Items: {conf.item_count}",
+        f"Total: ${conf.total:.2f}",
+        f"Fulfillment: {conf.fulfillment_type.value}",
+        f"Est. Time: {conf.estimated_time}",
+    ]
+    if result.items_restocked:
+        lines.append(f"Restocked {result.items_restocked} inventory items.")
+
+    return "\n".join(lines)
 
 
 def create_bot(config: Config) -> discord.Client:
@@ -887,6 +975,134 @@ def create_bot(config: Config) -> discord.Client:
             )
 
     tree.add_command(prefs_group)
+
+    # ------------------------------------------------------------------
+    # /order command group
+    # ------------------------------------------------------------------
+
+    order_group = app_commands.Group(
+        name="order",
+        description="Safeway grocery ordering",
+        guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    @order_group.command(name="review", description="Build cart and show summary")
+    @app_commands.describe(items="Comma-separated item names (e.g. milk, eggs)")
+    async def order_review(interaction: discord.Interaction, items: str) -> None:
+        """Build a Safeway cart and show summary without ordering.
+
+        Args:
+            interaction: Discord interaction context.
+            items: Comma-separated item names.
+        """
+        await interaction.response.defer()
+
+        try:
+            from grocery_butler.models import IngredientCategory, ShoppingListItem, Unit
+            from grocery_butler.safeway_pipeline import (
+                SafewayPipeline,
+                SafewayPipelineError,
+            )
+
+            names = [n.strip() for n in items.split(",") if n.strip()]
+            if not names:
+                await interaction.followup.send("Please provide item names.")
+                return
+
+            shopping_items = [
+                ShoppingListItem(
+                    ingredient=n.lower(),
+                    quantity=1.0,
+                    unit=Unit.EACH,
+                    category=IngredientCategory.OTHER,
+                    search_term=n.lower(),
+                    from_meals=["manual"],
+                )
+                for n in names
+            ]
+
+            anthropic_client = _make_bot_anthropic_client(config)
+            pipeline = SafewayPipeline(config, config.database_path, anthropic_client)
+            try:
+                cart = await asyncio.to_thread(pipeline.build_cart_only, shopping_items)
+                result = _format_cart_summary(cart)
+                await interaction.followup.send(f"Cart preview:\n{result}")
+            finally:
+                await asyncio.to_thread(pipeline.close)
+
+        except SafewayPipelineError as exc:
+            await interaction.followup.send(f"Pipeline error: {exc}")
+        except Exception:
+            logger.exception("Error in /order review")
+            await interaction.followup.send(
+                "Sorry, something went wrong building the cart."
+            )
+
+    @order_group.command(name="submit", description="Build and submit a Safeway order")
+    @app_commands.describe(items="Comma-separated item names (e.g. milk, eggs)")
+    async def order_submit(interaction: discord.Interaction, items: str) -> None:
+        """Build cart and submit order to Safeway.
+
+        Args:
+            interaction: Discord interaction context.
+            items: Comma-separated item names.
+        """
+        await interaction.response.defer()
+
+        try:
+            from grocery_butler.models import IngredientCategory, ShoppingListItem, Unit
+            from grocery_butler.safeway_pipeline import (
+                SafewayPipeline,
+                SafewayPipelineError,
+            )
+
+            names = [n.strip() for n in items.split(",") if n.strip()]
+            if not names:
+                await interaction.followup.send("Please provide item names.")
+                return
+
+            shopping_items = [
+                ShoppingListItem(
+                    ingredient=n.lower(),
+                    quantity=1.0,
+                    unit=Unit.EACH,
+                    category=IngredientCategory.OTHER,
+                    search_term=n.lower(),
+                    from_meals=["manual"],
+                )
+                for n in names
+            ]
+
+            anthropic_client = _make_bot_anthropic_client(config)
+            pipeline = SafewayPipeline(config, config.database_path, anthropic_client)
+            try:
+                order_result = await asyncio.to_thread(pipeline.run, shopping_items)
+                msg = _format_order_result(order_result)
+                await interaction.followup.send(msg)
+            finally:
+                await asyncio.to_thread(pipeline.close)
+
+        except SafewayPipelineError as exc:
+            await interaction.followup.send(f"Pipeline error: {exc}")
+        except Exception:
+            logger.exception("Error in /order submit")
+            await interaction.followup.send(
+                "Sorry, something went wrong submitting the order."
+            )
+
+    @order_group.command(name="status", description="Check recent order status")
+    async def order_status(interaction: discord.Interaction) -> None:
+        """Check recent order status (placeholder).
+
+        Args:
+            interaction: Discord interaction context.
+        """
+        await interaction.response.send_message(
+            "Order status tracking is not yet implemented."
+        )
+
+    tree.add_command(order_group)
 
     # ------------------------------------------------------------------
     # Event handlers
