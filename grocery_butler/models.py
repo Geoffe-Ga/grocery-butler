@@ -7,6 +7,7 @@ including future Safeway models that aren't used yet.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, field_validator
 
@@ -383,7 +384,7 @@ class FulfillmentOption(BaseModel):
     type: FulfillmentType
     available: bool
     fee: float
-    windows: list[dict]
+    windows: list[dict[str, Any]]
     next_window: str | None = None
 
 
