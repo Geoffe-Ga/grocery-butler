@@ -68,6 +68,7 @@ def _make_anthropic_client(api_key: str) -> object | None:
 
         return anthropic.Anthropic(api_key=api_key)
     except Exception:
+        logger.warning("Anthropic client unavailable; Claude features disabled")
         return None
 
 

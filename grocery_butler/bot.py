@@ -263,6 +263,7 @@ def _make_bot_anthropic_client(config: Config) -> object | None:
 
         return anthropic.Anthropic(api_key=config.anthropic_api_key)
     except Exception:
+        logger.warning("Anthropic client unavailable; Claude features disabled")
         return None
 
 
@@ -1090,17 +1091,6 @@ def create_bot(config: Config) -> discord.Client:
             await interaction.followup.send(
                 "Sorry, something went wrong submitting the order."
             )
-
-    @order_group.command(name="status", description="Check recent order status")
-    async def order_status(interaction: discord.Interaction) -> None:
-        """Check recent order status (placeholder).
-
-        Args:
-            interaction: Discord interaction context.
-        """
-        await interaction.response.send_message(
-            "Order status tracking is not yet implemented."
-        )
 
     tree.add_command(order_group)
 

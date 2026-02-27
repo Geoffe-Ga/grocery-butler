@@ -1379,6 +1379,17 @@ class TestMakeAnthropicClient:
             result = _make_anthropic_client("fake-key")
             assert result is None
 
+    def test_logs_warning_on_failure(self, caplog):
+        """Test warning is logged when anthropic client creation fails."""
+        import logging
+
+        from grocery_butler.cli import _make_anthropic_client
+
+        with patch.dict("sys.modules", {"anthropic": None}):
+            with caplog.at_level(logging.WARNING, logger="grocery_butler.cli"):
+                _make_anthropic_client("fake-key")
+            assert "Anthropic client unavailable" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # Order subcommand handler tests

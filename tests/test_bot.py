@@ -1768,10 +1768,19 @@ class TestMakeBotAnthropicClient:
     """Tests for _make_bot_anthropic_client."""
 
     def test_returns_none_on_import_error(self, config):
-        """Test returns None when anthropic import fails."""
+        """Test returns None and logs warning when anthropic import fails."""
         with patch.dict("sys.modules", {"anthropic": None}):
             result = _make_bot_anthropic_client(config)
             assert result is None
+
+    def test_logs_warning_on_failure(self, config, caplog):
+        """Test warning is logged when anthropic client creation fails."""
+        with patch.dict("sys.modules", {"anthropic": None}):
+            import logging
+
+            with caplog.at_level(logging.WARNING, logger="grocery_butler.bot"):
+                _make_bot_anthropic_client(config)
+            assert "Anthropic client unavailable" in caplog.text
 
 
 class TestOrderCommandGroup:
@@ -1804,10 +1813,9 @@ class TestOrderCommandGroup:
         assert group is not None
 
     def test_order_subcommands(self, bot):
-        """Test /order has review, submit, and status subcommands."""
+        """Test /order has review and submit subcommands."""
         group = self._get_group(bot, "order")
         assert group is not None
         subcommand_names = {cmd.name for cmd in group.commands}
         assert "review" in subcommand_names
         assert "submit" in subcommand_names
-        assert "status" in subcommand_names
