@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+from grocery_butler.claude_utils import extract_json_text, filter_avoided_brands
 from grocery_butler.models import (
     BrandMatchType,
     BrandPreference,
@@ -16,9 +17,7 @@ from grocery_butler.models import (
 )
 from grocery_butler.substitution_service import (
     SubstitutionService,
-    _extract_json_text,
     _fallback_ranking,
-    _filter_avoided,
     _format_brand_prefs,
     _parse_ranking_response,
     _parse_single_ranking,
@@ -100,17 +99,17 @@ def _make_pref(
 
 
 # ------------------------------------------------------------------
-# Tests: _filter_avoided
+# Tests: filter_avoided_brands
 # ------------------------------------------------------------------
 
 
 class TestFilterAvoided:
-    """Tests for _filter_avoided."""
+    """Tests for filter_avoided_brands."""
 
     def test_no_prefs(self) -> None:
         """Test all products returned with no preferences."""
         products = [_make_product(name="A"), _make_product(name="B")]
-        assert len(_filter_avoided(products, [])) == 2
+        assert len(filter_avoided_brands(products, [])) == 2
 
     def test_removes_avoided(self) -> None:
         """Test avoided brand products are filtered out."""
@@ -119,7 +118,7 @@ class TestFilterAvoided:
             _make_product(product_id="2", name="Perdue Chicken"),
         ]
         prefs = [_make_pref("Tyson", BrandPreferenceType.AVOID)]
-        result = _filter_avoided(products, prefs)
+        result = filter_avoided_brands(products, prefs)
 
         assert len(result) == 1
         assert result[0].product_id == "2"
@@ -299,20 +298,20 @@ class TestFallbackRanking:
 
 
 # ------------------------------------------------------------------
-# Tests: _extract_json_text
+# Tests: extract_json_text
 # ------------------------------------------------------------------
 
 
 class TestExtractJsonText:
-    """Tests for _extract_json_text."""
+    """Tests for extract_json_text."""
 
     def test_plain_json(self) -> None:
         """Test plain JSON passes through."""
-        assert _extract_json_text("[1, 2]") == "[1, 2]"
+        assert extract_json_text("[1, 2]") == "[1, 2]"
 
     def test_strips_fences(self) -> None:
         """Test markdown fences removed."""
-        assert _extract_json_text("```json\n[1]\n```") == "[1]"
+        assert extract_json_text("```json\n[1]\n```") == "[1]"
 
 
 # ------------------------------------------------------------------

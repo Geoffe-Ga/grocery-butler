@@ -11,6 +11,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from grocery_butler.claude_utils import extract_json_text
 from grocery_butler.models import IngredientCategory, ShoppingListItem, Unit, parse_unit
 from grocery_butler.prompt_loader import load_prompt
 
@@ -19,24 +20,6 @@ if TYPE_CHECKING:
     from grocery_butler.models import InventoryItem, ParsedMeal
 
 logger = logging.getLogger(__name__)
-
-
-def _extract_json_text(raw: str) -> str:
-    """Extract JSON from a Claude response, stripping markdown fences.
-
-    Args:
-        raw: Raw text from Claude's response.
-
-    Returns:
-        Cleaned string ready for JSON parsing.
-    """
-    text = raw.strip()
-    if text.startswith("```"):
-        first_newline = text.index("\n")
-        text = text[first_newline + 1 :]
-    if text.endswith("```"):
-        text = text[: -len("```")]
-    return text.strip()
 
 
 def _format_pantry_staples(pantry_staples: list[str]) -> str:
@@ -142,7 +125,7 @@ def _parse_response_items(response_text: str) -> list[ShoppingListItem] | None:
         List of ShoppingListItem or None if parsing fails.
     """
     try:
-        cleaned = _extract_json_text(response_text)
+        cleaned = extract_json_text(response_text)
         data = json.loads(cleaned)
     except (json.JSONDecodeError, ValueError):
         logger.warning("Failed to parse consolidation response")

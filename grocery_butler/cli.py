@@ -17,6 +17,7 @@ from grocery_butler.consolidator import Consolidator
 from grocery_butler.meal_parser import MealParser
 from grocery_butler.models import (
     CartItem,
+    CartSummary,
     IngredientCategory,
     InventoryItem,
     InventoryStatus,
@@ -565,7 +566,7 @@ def _format_cart_items(
     return lines
 
 
-def _format_cart_summary(cart: object) -> str:
+def _format_cart_summary(cart: CartSummary) -> str:
     """Format a CartSummary for terminal display.
 
     Args:
@@ -574,8 +575,6 @@ def _format_cart_summary(cart: object) -> str:
     Returns:
         Formatted cart summary string.
     """
-    from grocery_butler.models import CartSummary
-
     if not isinstance(cart, CartSummary):
         return "Invalid cart summary."
 

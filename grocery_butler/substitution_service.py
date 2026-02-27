@@ -12,6 +12,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from grocery_butler.claude_utils import extract_json_text, filter_avoided_brands
 from grocery_butler.models import (
     BrandPreference,
     BrandPreferenceType,
@@ -88,7 +89,7 @@ class SubstitutionService:
             item.ingredient,
             category=item.category.value,
         )
-        filtered = _filter_avoided(alternatives, brand_prefs)
+        filtered = filter_avoided_brands(alternatives, brand_prefs)
         if not filtered:
             return SubstitutionResult(
                 status="all_avoided",
@@ -216,31 +217,6 @@ class SubstitutionService:
 # ------------------------------------------------------------------
 
 
-def _filter_avoided(
-    products: list[SafewayProduct],
-    brand_prefs: list[BrandPreference],
-) -> list[SafewayProduct]:
-    """Remove products from avoided brands.
-
-    Args:
-        products: Candidate products.
-        brand_prefs: Brand preferences.
-
-    Returns:
-        Products not matching avoided brands.
-    """
-    avoided = {
-        pref.brand.lower()
-        for pref in brand_prefs
-        if pref.preference_type == BrandPreferenceType.AVOID
-    }
-    if not avoided:
-        return products
-    return [
-        p for p in products if not any(brand in p.name.lower() for brand in avoided)
-    ]
-
-
 def _format_brand_prefs(prefs: list[BrandPreference]) -> str:
     """Format brand preferences as text.
 
@@ -276,7 +252,7 @@ def _parse_ranking_response(
     Returns:
         Ordered list of SubstitutionOption, or None on parse failure.
     """
-    cleaned = _extract_json_text(text)
+    cleaned = extract_json_text(text)
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
@@ -349,21 +325,3 @@ def _fallback_ranking(
         )
         for p in sorted_alts
     ]
-
-
-def _extract_json_text(raw: str) -> str:
-    """Extract JSON from Claude response, stripping markdown fences.
-
-    Args:
-        raw: Raw text from Claude.
-
-    Returns:
-        Cleaned string ready for JSON parsing.
-    """
-    text = raw.strip()
-    if text.startswith("```"):
-        first_newline = text.index("\n")
-        text = text[first_newline + 1 :]
-    if text.endswith("```"):
-        text = text[: -len("```")]
-    return text.strip()

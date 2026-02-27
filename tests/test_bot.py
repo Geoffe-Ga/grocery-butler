@@ -1767,11 +1767,11 @@ class TestFormatOrderResult:
 class TestMakeBotAnthropicClient:
     """Tests for _make_bot_anthropic_client."""
 
-    def test_returns_none_on_error(self, config):
-        """Test returns None when anthropic is unavailable."""
+    def test_returns_none_on_import_error(self, config):
+        """Test returns None when anthropic import fails."""
         with patch.dict("sys.modules", {"anthropic": None}):
             result = _make_bot_anthropic_client(config)
-            assert result is None or result is not None
+            assert result is None
 
 
 class TestOrderCommandGroup:

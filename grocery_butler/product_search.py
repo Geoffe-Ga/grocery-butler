@@ -464,11 +464,11 @@ def _parse_price(item: dict[str, Any]) -> float:
     return 0.0
 
 
-def _safe_float(value: object) -> float | None:
+def _safe_float(value: float | int | str | None) -> float | None:
     """Safely convert a value to float.
 
     Args:
-        value: Any value that might be numeric.
+        value: Numeric or string value that might be convertible to float.
 
     Returns:
         Float value, or None if conversion fails.
@@ -476,7 +476,7 @@ def _safe_float(value: object) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)  # type: ignore[arg-type]
+        return float(value)
     except (TypeError, ValueError):
         return None
 

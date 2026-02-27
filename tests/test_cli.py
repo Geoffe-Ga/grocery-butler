@@ -1361,17 +1361,11 @@ class TestLoadConfigSafe:
         from grocery_butler.cli import _load_config_safe
 
         with patch(
-            "grocery_butler.cli.load_config",
+            "grocery_butler.config.load_config",
             side_effect=RuntimeError("no env"),
-            create=True,
         ):
-            # The function uses its own import, so we patch differently
             result = _load_config_safe()
-            # It catches exceptions so it should return None or a Config
-            # depending on env. Since no .env, it returns None.
-            # This is hard to test in isolation without env setup.
-            # The key point is it doesn't raise.
-            assert result is None or result is not None
+            assert result is None
 
 
 class TestMakeAnthropicClient:
@@ -1383,8 +1377,7 @@ class TestMakeAnthropicClient:
 
         with patch.dict("sys.modules", {"anthropic": None}):
             result = _make_anthropic_client("fake-key")
-            # Should not raise; may return None or client depending on env
-            assert result is None or result is not None
+            assert result is None
 
 
 # ---------------------------------------------------------------------------

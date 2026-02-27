@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
+from grocery_butler.claude_utils import extract_json_text, filter_avoided_brands
 from grocery_butler.models import (
     BrandMatchType,
     BrandPreference,
@@ -15,8 +16,6 @@ from grocery_butler.models import (
 )
 from grocery_butler.product_selector import (
     ProductSelector,
-    _extract_json_text,
-    _filter_avoided_brands,
     _format_brand_preferences,
     _get_preferred_brands,
     _heuristic_select,
@@ -112,17 +111,17 @@ def _make_pref(
 
 
 # ------------------------------------------------------------------
-# Tests: _filter_avoided_brands
+# Tests: filter_avoided_brands
 # ------------------------------------------------------------------
 
 
 class TestFilterAvoidedBrands:
-    """Tests for _filter_avoided_brands."""
+    """Tests for filter_avoided_brands."""
 
     def test_no_prefs_returns_all(self) -> None:
         """Test all products returned when no preferences."""
         products = [_make_product(name="Brand A"), _make_product(name="Brand B")]
-        result = _filter_avoided_brands(products, [])
+        result = filter_avoided_brands(products, [])
         assert len(result) == 2
 
     def test_filters_avoided_brand(self) -> None:
@@ -132,7 +131,7 @@ class TestFilterAvoidedBrands:
             _make_product(product_id="2", name="Organic Valley Milk"),
         ]
         prefs = [_make_pref("Great Value", BrandPreferenceType.AVOID)]
-        result = _filter_avoided_brands(products, prefs)
+        result = filter_avoided_brands(products, prefs)
 
         assert len(result) == 1
         assert result[0].product_id == "2"
@@ -141,14 +140,14 @@ class TestFilterAvoidedBrands:
         """Test that brand matching is case-insensitive."""
         products = [_make_product(name="GREAT VALUE Milk")]
         prefs = [_make_pref("great value", BrandPreferenceType.AVOID)]
-        result = _filter_avoided_brands(products, prefs)
+        result = filter_avoided_brands(products, prefs)
         assert result == []
 
     def test_preferred_brands_not_filtered(self) -> None:
         """Test that preferred brands are NOT filtered out."""
         products = [_make_product(name="Organic Valley Milk")]
         prefs = [_make_pref("Organic Valley", BrandPreferenceType.PREFERRED)]
-        result = _filter_avoided_brands(products, prefs)
+        result = filter_avoided_brands(products, prefs)
         assert len(result) == 1
 
 
@@ -350,25 +349,25 @@ class TestParseSelectionResponse:
 
 
 # ------------------------------------------------------------------
-# Tests: _extract_json_text
+# Tests: extract_json_text
 # ------------------------------------------------------------------
 
 
 class TestExtractJsonText:
-    """Tests for _extract_json_text."""
+    """Tests for extract_json_text."""
 
     def test_plain_json(self) -> None:
         """Test plain JSON passes through."""
-        assert _extract_json_text('{"a": 1}') == '{"a": 1}'
+        assert extract_json_text('{"a": 1}') == '{"a": 1}'
 
     def test_strips_fences(self) -> None:
         """Test markdown fences are removed."""
-        result = _extract_json_text('```json\n{"a": 1}\n```')
+        result = extract_json_text('```json\n{"a": 1}\n```')
         assert result == '{"a": 1}'
 
     def test_strips_whitespace(self) -> None:
         """Test leading/trailing whitespace is stripped."""
-        assert _extract_json_text("  {}\n  ") == "{}"
+        assert extract_json_text("  {}\n  ") == "{}"
 
 
 # ------------------------------------------------------------------

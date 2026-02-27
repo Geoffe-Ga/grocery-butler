@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from grocery_butler.claude_utils import extract_json_text, filter_avoided_brands
 from grocery_butler.models import (
     BrandPreference,
     BrandPreferenceType,
@@ -101,7 +102,7 @@ class ProductSelector:
             )
 
         brand_prefs = self._get_brand_preferences(item)
-        filtered = _filter_avoided_brands(candidates, brand_prefs)
+        filtered = filter_avoided_brands(candidates, brand_prefs)
 
         if not filtered:
             return SelectionResult(
@@ -284,31 +285,6 @@ class ProductSelector:
 # ------------------------------------------------------------------
 
 
-def _filter_avoided_brands(
-    products: list[SafewayProduct],
-    brand_prefs: list[BrandPreference],
-) -> list[SafewayProduct]:
-    """Remove products whose name contains an avoided brand.
-
-    Args:
-        products: Candidate products.
-        brand_prefs: Brand preferences to check.
-
-    Returns:
-        Products not matching any avoided brand.
-    """
-    avoided = {
-        pref.brand.lower()
-        for pref in brand_prefs
-        if pref.preference_type == BrandPreferenceType.AVOID
-    }
-    if not avoided:
-        return products
-    return [
-        p for p in products if not any(brand in p.name.lower() for brand in avoided)
-    ]
-
-
 def _get_preferred_brands(
     brand_prefs: list[BrandPreference],
 ) -> set[str]:
@@ -412,7 +388,7 @@ def _parse_selection_response(
     Returns:
         Tuple of (selected_product, reasoning) or None on parse failure.
     """
-    cleaned = _extract_json_text(text)
+    cleaned = extract_json_text(text)
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
@@ -435,21 +411,3 @@ def _parse_selection_response(
         return (candidates[index], reasoning)
 
     return None
-
-
-def _extract_json_text(raw: str) -> str:
-    """Extract JSON from a Claude response, stripping markdown fences.
-
-    Args:
-        raw: Raw text from Claude's response.
-
-    Returns:
-        Cleaned string ready for JSON parsing.
-    """
-    text = raw.strip()
-    if text.startswith("```"):
-        first_newline = text.index("\n")
-        text = text[first_newline + 1 :]
-    if text.endswith("```"):
-        text = text[: -len("```")]
-    return text.strip()
