@@ -55,20 +55,46 @@ class TestLoadPrompt:
         assert "milk" in result
         assert "eggs" in result
 
-    def test_load_placeholder_product_selection(self) -> None:
-        """Test loading placeholder template without variables."""
-        result = load_prompt("product_selection")
-        assert "Phase 3" in result
+    def test_load_product_selection(self) -> None:
+        """Test loading product_selection template with variables."""
+        result = load_prompt(
+            "product_selection",
+            ingredient="whole milk",
+            quantity="1.0",
+            unit="gal",
+            search_term="whole milk gallon",
+            category="dairy",
+            products_json="[]",
+            brand_preferences="No preferences",
+            price_sensitivity="moderate",
+        )
+        assert "whole milk" in result
+        assert "moderate" in result
 
-    def test_load_placeholder_substitution_ranking(self) -> None:
-        """Test loading placeholder substitution_ranking template."""
-        result = load_prompt("substitution_ranking")
-        assert "Phase 3" in result
+    def test_load_substitution_ranking(self) -> None:
+        """Test loading substitution_ranking template with variables."""
+        result = load_prompt(
+            "substitution_ranking",
+            ingredient="chicken thighs",
+            quantity="2",
+            unit="lb",
+            search_term="boneless chicken thighs",
+            alternatives_json="[]",
+            brand_preferences="None",
+        )
+        assert "chicken thighs" in result
+        assert "suitability" in result.lower()
 
-    def test_load_placeholder_brand_selection(self) -> None:
-        """Test loading placeholder brand_selection template."""
-        result = load_prompt("brand_selection")
-        assert "Phase 3" in result
+    def test_load_brand_selection(self) -> None:
+        """Test loading brand_selection template with variables."""
+        result = load_prompt(
+            "brand_selection",
+            products_json="[]",
+            avoided_brands="Great Value",
+            preferred_brands="Organic Valley",
+        )
+        assert "Great Value" in result
+        assert "Organic Valley" in result
 
     def test_missing_variable_raises_key_error(self) -> None:
         """Test that missing template variable raises KeyError."""

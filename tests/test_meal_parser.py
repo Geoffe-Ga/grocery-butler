@@ -8,10 +8,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from grocery_butler.claude_utils import extract_json_text
 from grocery_butler.meal_parser import (
     MealParser,
     _build_stub_meal,
-    _extract_json_text,
     _parse_ingredient,
     _parse_meal_from_dict,
     _scale_ingredients,
@@ -197,27 +197,27 @@ class TestBuildStubMeal:
 
 
 class TestExtractJsonText:
-    """Tests for _extract_json_text helper."""
+    """Tests for extract_json_text helper."""
 
     def test_plain_json(self):
         """Test plain JSON passes through."""
         text = '{"key": "value"}'
-        assert _extract_json_text(text) == text
+        assert extract_json_text(text) == text
 
     def test_strips_markdown_fences(self):
         """Test markdown code fences are stripped."""
         text = '```json\n{"key": "value"}\n```'
-        assert _extract_json_text(text) == '{"key": "value"}'
+        assert extract_json_text(text) == '{"key": "value"}'
 
     def test_strips_plain_fences(self):
         """Test plain code fences are stripped."""
         text = '```\n{"key": "value"}\n```'
-        assert _extract_json_text(text) == '{"key": "value"}'
+        assert extract_json_text(text) == '{"key": "value"}'
 
     def test_strips_whitespace(self):
         """Test surrounding whitespace is stripped."""
         text = '  {"key": "value"}  '
-        assert _extract_json_text(text) == '{"key": "value"}'
+        assert extract_json_text(text) == '{"key": "value"}'
 
 
 class TestParseIngredient:

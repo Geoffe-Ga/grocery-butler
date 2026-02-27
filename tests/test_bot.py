@@ -9,13 +9,17 @@ import pytest
 
 from grocery_butler.bot import (
     _format_brands,
+    _format_cart_summary,
     _format_inventory,
+    _format_order_result,
     _format_pantry_list,
     _format_preferences,
     _format_recipe_detail,
     _format_recipes,
     _format_restock_queue,
     _format_shopping_list,
+    _make_bot_anthropic_client,
+    _OrderConfirmView,
     _truncate,
     create_bot,
     run_bot,
@@ -31,7 +35,11 @@ from grocery_butler.models import (
     InventoryStatus,
     InventoryUpdate,
     ParsedMeal,
+    SafewayProduct,
     ShoppingListItem,
+    SubstitutionOption,
+    SubstitutionResult,
+    SubstitutionSuitability,
 )
 
 # ---------------------------------------------------------------------------
@@ -620,7 +628,15 @@ class TestDiscordPermissions:
 
     def test_command_groups_guild_only(self, bot):
         """Test all command groups have guild_only set."""
-        group_names = ["pantry", "stock", "restock", "brands", "recipes", "preferences"]
+        group_names = [
+            "pantry",
+            "stock",
+            "restock",
+            "brands",
+            "recipes",
+            "preferences",
+            "order",
+        ]
         for name in group_names:
             group = self._get_command(bot, name)
             assert group is not None, f"Group {name!r} not found"
@@ -628,7 +644,15 @@ class TestDiscordPermissions:
 
     def test_command_groups_default_permissions(self, bot):
         """Test all command groups require manage_guild by default."""
-        group_names = ["pantry", "stock", "restock", "brands", "recipes", "preferences"]
+        group_names = [
+            "pantry",
+            "stock",
+            "restock",
+            "brands",
+            "recipes",
+            "preferences",
+            "order",
+        ]
         for name in group_names:
             group = self._get_command(bot, name)
             assert group is not None, f"Group {name!r} not found"
@@ -1616,3 +1640,254 @@ class TestOnMessageEvent:
 
         # Should reply twice: once for high-conf, once for low-conf
         assert message.reply.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Order bot formatters
+# ---------------------------------------------------------------------------
+
+
+class TestFormatCartSummaryBot:
+    """Tests for _format_cart_summary in bot module."""
+
+    def test_format_with_items(self):
+        """Test formatting a cart summary with items."""
+        from grocery_butler.models import (
+            CartItem,
+            CartSummary,
+            FulfillmentType,
+            SafewayProduct,
+        )
+
+        product = SafewayProduct(product_id="P1", name="Milk", price=4.99, size="1 gal")
+        cart_item = CartItem(
+            shopping_list_item=ShoppingListItem(
+                ingredient="milk",
+                quantity=1.0,
+                unit="gal",
+                category=IngredientCategory.DAIRY,
+                search_term="milk",
+                from_meals=["manual"],
+            ),
+            safeway_product=product,
+            quantity_to_order=1,
+            estimated_cost=4.99,
+        )
+        cart = CartSummary(
+            items=[cart_item],
+            failed_items=[],
+            substituted_items=[],
+            skipped_items=[],
+            restock_items=[],
+            subtotal=4.99,
+            fulfillment_options=[],
+            recommended_fulfillment=FulfillmentType.PICKUP,
+            estimated_total=4.99,
+        )
+
+        result = _format_cart_summary(cart)
+        assert "Milk" in result
+        assert "$4.99" in result
+        assert "```" in result
+
+    def test_format_with_failed_items(self):
+        """Test formatting cart with failed items."""
+        from grocery_butler.models import CartSummary, FulfillmentType
+
+        cart = CartSummary(
+            items=[],
+            failed_items=[
+                ShoppingListItem(
+                    ingredient="unicorn tears",
+                    quantity=1.0,
+                    unit="each",
+                    category=IngredientCategory.OTHER,
+                    search_term="unicorn tears",
+                    from_meals=["manual"],
+                ),
+            ],
+            substituted_items=[],
+            skipped_items=[],
+            restock_items=[],
+            subtotal=0.0,
+            fulfillment_options=[],
+            recommended_fulfillment=FulfillmentType.PICKUP,
+            estimated_total=0.0,
+        )
+
+        result = _format_cart_summary(cart)
+        assert "Failed" in result
+        assert "unicorn tears" in result
+
+    def test_format_with_substitution_shows_name(self) -> None:
+        """Test substituted items show the selected product name."""
+        from grocery_butler.models import CartSummary, FulfillmentType
+
+        alt_product = SafewayProduct(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="2 lb",
+        )
+        sub = SubstitutionResult(
+            status="alternatives_found",
+            original_item=ShoppingListItem(
+                ingredient="chicken thighs",
+                quantity=2.0,
+                unit="lb",
+                category=IngredientCategory.MEAT,
+                search_term="chicken thighs",
+                from_meals=["manual"],
+            ),
+            alternatives=[
+                SubstitutionOption(
+                    product=alt_product,
+                    suitability=SubstitutionSuitability.GOOD,
+                    reasoning="Similar cut",
+                ),
+            ],
+            selected=SubstitutionOption(
+                product=alt_product,
+                suitability=SubstitutionSuitability.GOOD,
+                reasoning="Similar cut",
+            ),
+            message="Found 1 alternative(s)",
+        )
+        cart = CartSummary(
+            items=[],
+            failed_items=[],
+            substituted_items=[sub],
+            restock_items=[],
+            subtotal=0.0,
+            fulfillment_options=[],
+            recommended_fulfillment=FulfillmentType.PICKUP,
+            estimated_total=0.0,
+        )
+
+        result = _format_cart_summary(cart)
+        assert "Substituted" in result
+        assert "Organic Chicken Thighs" in result
+        assert "?" not in result
+
+
+class TestFormatOrderResult:
+    """Tests for _format_order_result in bot module."""
+
+    def test_format_success(self):
+        """Test formatting a successful order result."""
+        from grocery_butler.models import FulfillmentType
+        from grocery_butler.order_service import OrderConfirmation, OrderResult
+
+        result = OrderResult(
+            success=True,
+            confirmation=OrderConfirmation(
+                order_id="ORD-123",
+                status="confirmed",
+                estimated_time="2 hours",
+                total=24.99,
+                fulfillment_type=FulfillmentType.PICKUP,
+                item_count=5,
+            ),
+            items_restocked=2,
+        )
+
+        formatted = _format_order_result(result)
+        assert "ORD-123" in formatted
+        assert "confirmed" in formatted
+        assert "$24.99" in formatted
+        assert "Restocked 2" in formatted
+
+    def test_format_failure(self):
+        """Test formatting a failed order result."""
+        from grocery_butler.order_service import OrderResult
+
+        result = OrderResult(
+            success=False,
+            error_message="Payment declined",
+        )
+
+        formatted = _format_order_result(result)
+        assert "failed" in formatted.lower()
+        assert "Payment declined" in formatted
+
+    def test_format_success_no_confirmation(self):
+        """Test formatting success with missing confirmation."""
+        from grocery_butler.order_service import OrderResult
+
+        result = OrderResult(success=True, confirmation=None)
+        formatted = _format_order_result(result)
+        assert "no confirmation" in formatted.lower()
+
+
+class TestMakeBotAnthropicClient:
+    """Tests for _make_bot_anthropic_client."""
+
+    def test_returns_none_on_import_error(self, config):
+        """Test returns None and logs warning when anthropic import fails."""
+        with patch.dict("sys.modules", {"anthropic": None}):
+            result = _make_bot_anthropic_client(config)
+            assert result is None
+
+    def test_logs_warning_on_failure(self, config, caplog):
+        """Test warning is logged when anthropic client creation fails."""
+        with patch.dict("sys.modules", {"anthropic": None}):
+            import logging
+
+            with caplog.at_level(logging.WARNING, logger="grocery_butler.bot"):
+                _make_bot_anthropic_client(config)
+            assert "Anthropic client unavailable" in caplog.text
+
+
+class TestOrderCommandGroup:
+    """Tests for /order command group registration."""
+
+    @pytest.fixture()
+    def bot(self, config):
+        """Create a bot instance for testing."""
+        return create_bot(config)
+
+    def _get_group(self, bot, name):
+        """Get command group by name.
+
+        Args:
+            bot: Discord client.
+            name: Group name.
+
+        Returns:
+            The command group.
+        """
+        tree = bot.tree  # type: ignore[attr-defined]
+        for cmd in tree.get_commands():
+            if cmd.name == name:
+                return cmd
+        return None  # pragma: no cover
+
+    def test_order_group_exists(self, bot):
+        """Test /order command group is registered."""
+        group = self._get_group(bot, "order")
+        assert group is not None
+
+    def test_order_subcommands(self, bot):
+        """Test /order has review and submit subcommands."""
+        group = self._get_group(bot, "order")
+        assert group is not None
+        subcommand_names = {cmd.name for cmd in group.commands}
+        assert "review" in subcommand_names
+        assert "submit" in subcommand_names
+
+
+class TestOrderConfirmViewTimeout:
+    """Tests for _OrderConfirmView.on_timeout resource cleanup."""
+
+    def test_on_timeout_closes_pipeline(self):
+        """Test that on_timeout calls pipeline.close."""
+        import asyncio
+
+        async def _run():
+            mock_pipeline = MagicMock()
+            mock_cart = MagicMock()
+            view = _OrderConfirmView(mock_pipeline, mock_cart)
+            await view.on_timeout()
+            mock_pipeline.close.assert_called_once()
+
+        asyncio.run(_run())

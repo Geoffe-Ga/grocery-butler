@@ -7,10 +7,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from grocery_butler.claude_utils import extract_json_text
 from grocery_butler.consolidator import (
     Consolidator,
     _build_ingredient_text,
-    _extract_json_text,
     _flatten_meal_ingredients,
     _format_inventory_overrides,
     _format_pantry_staples,
@@ -238,27 +238,27 @@ def _valid_consolidation_json() -> str:
 
 
 class TestExtractJsonText:
-    """Tests for _extract_json_text helper."""
+    """Tests for extract_json_text helper."""
 
     def test_plain_json(self):
         """Test plain JSON passes through."""
         text = '{"key": "value"}'
-        assert _extract_json_text(text) == text
+        assert extract_json_text(text) == text
 
     def test_strips_markdown_fences(self):
         """Test markdown code fences are stripped."""
         text = '```json\n[{"key": "value"}]\n```'
-        assert _extract_json_text(text) == '[{"key": "value"}]'
+        assert extract_json_text(text) == '[{"key": "value"}]'
 
     def test_strips_plain_fences(self):
         """Test plain code fences are stripped."""
         text = '```\n[{"key": "value"}]\n```'
-        assert _extract_json_text(text) == '[{"key": "value"}]'
+        assert extract_json_text(text) == '[{"key": "value"}]'
 
     def test_strips_whitespace(self):
         """Test surrounding whitespace is stripped."""
         text = '  [{"key": "value"}]  '
-        assert _extract_json_text(text) == '[{"key": "value"}]'
+        assert extract_json_text(text) == '[{"key": "value"}]'
 
 
 class TestFormatPantryStaples:
@@ -787,7 +787,7 @@ class TestConsolidateWithClaude:
         consolidator.consolidate([sample_tacos_meal], [], pantry_staples)
         mock_client.messages.create.assert_called_once()
         call_kwargs = mock_client.messages.create.call_args
-        assert call_kwargs[1]["model"] == "claude-sonnet-4-20250514"
+        assert call_kwargs[1]["model"] == "claude-sonnet-4-6"
 
     def test_no_client_uses_simple_fallback(
         self,
@@ -991,7 +991,7 @@ class TestConsolidatorGetModel:
     def test_returns_correct_model(self):
         """Test model name is the expected Claude model."""
         consolidator = Consolidator()
-        assert consolidator._get_model() == "claude-sonnet-4-20250514"
+        assert consolidator._get_model() == "claude-sonnet-4-6"
 
 
 class TestConsolidatorBuildPrompt:

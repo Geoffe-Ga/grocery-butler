@@ -11,6 +11,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from grocery_butler.claude_utils import extract_json_text
 from grocery_butler.models import Ingredient, IngredientCategory, ParsedMeal, parse_unit
 from grocery_butler.prompt_loader import load_prompt
 from grocery_butler.recipe_store import RecipeStore, normalize_recipe_name
@@ -41,24 +42,6 @@ def _build_stub_meal(name: str, servings: int) -> ParsedMeal:
         purchase_items=[],
         pantry_items=[],
     )
-
-
-def _extract_json_text(raw: str) -> str:
-    """Extract JSON from a Claude response, stripping markdown fences.
-
-    Args:
-        raw: Raw text from Claude's response.
-
-    Returns:
-        Cleaned string ready for JSON parsing.
-    """
-    text = raw.strip()
-    if text.startswith("```"):
-        first_newline = text.index("\n")
-        text = text[first_newline + 1 :]
-    if text.endswith("```"):
-        text = text[: -len("```")]
-    return text.strip()
 
 
 def _parse_ingredient(data: dict[str, object]) -> Ingredient:
@@ -280,7 +263,7 @@ class MealParser:
             Matched ParsedMeal or None.
         """
         try:
-            data = json.loads(_extract_json_text(response_text))
+            data = json.loads(extract_json_text(response_text))
         except (json.JSONDecodeError, ValueError):
             logger.warning("Failed to parse fuzzy match response")
             return None
@@ -412,7 +395,7 @@ class MealParser:
             ParsedMeal or None if parsing fails.
         """
         try:
-            cleaned = _extract_json_text(response_text)
+            cleaned = extract_json_text(response_text)
             data = json.loads(cleaned)
         except (json.JSONDecodeError, ValueError):
             logger.warning("Failed to parse decomposition response")
@@ -536,7 +519,7 @@ class MealParser:
         Returns:
             Model identifier string.
         """
-        return "claude-sonnet-4-20250514"
+        return "claude-sonnet-4-6"
 
     @staticmethod
     def _adjust_servings(
