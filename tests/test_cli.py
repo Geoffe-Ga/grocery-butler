@@ -632,9 +632,7 @@ class TestHandleStock:
             patch("grocery_butler.cli.PantryManager") as mock_pm_cls,
         ):
             mock_cfg.return_value = None
-            mock_pm = MagicMock()
-            mock_pm.get_inventory.return_value = []
-            mock_pm_cls.return_value = mock_pm
+            mock_pm_cls.return_value.get_inventory.return_value = []
             from grocery_butler.cli import _handle_stock
 
             parser = _build_parser()
