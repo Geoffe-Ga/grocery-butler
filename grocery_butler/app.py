@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 from typing import TYPE_CHECKING
 
 from flask import Flask, flash, g, jsonify, redirect, render_template, request, url_for
 
+from grocery_butler.db.adapter import IntegrityError
+
 if TYPE_CHECKING:
     from werkzeug.wrappers import Response
 
+    from grocery_butler.db.adapter import DatabaseConnection
     from grocery_butler.models import Ingredient
 
 from grocery_butler.db import get_connection, init_db
@@ -62,17 +64,17 @@ def create_app(db_path: str = "mealbot.db") -> Flask:
     return app
 
 
-def _get_db() -> sqlite3.Connection:
+def _get_db() -> DatabaseConnection:
     """Get a database connection for the current request.
 
     Returns:
-        SQLite connection with WAL mode enabled.
+        Database connection with appropriate settings enabled.
     """
     if "db" not in g:
         from flask import current_app
 
         g.db = get_connection(current_app.config["DATABASE_PATH"])
-    conn: sqlite3.Connection = g.db
+    conn: DatabaseConnection = g.db
     return conn
 
 
@@ -343,7 +345,7 @@ def _register_inventory_routes(app: Flask) -> None:
         try:
             pantry_mgr.add_item(item)
             flash(f"Added {display_name} to inventory.", "success")
-        except sqlite3.IntegrityError:
+        except IntegrityError:
             flash(f"{display_name} already exists in inventory.", "error")
 
         return redirect(url_for("inventory"))
@@ -498,7 +500,7 @@ def _handle_recipe_add_post(app: Flask) -> Response:
         recipe_id = recipe_store.save_recipe(meal)
         flash(f"Recipe '{name}' saved.", "success")
         return redirect(url_for("recipe_detail", recipe_id=recipe_id))
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         flash(f"A recipe named '{name}' already exists.", "error")
         return redirect(url_for("recipe_add"))
 
@@ -695,7 +697,7 @@ def _register_pantry_routes(app: Flask) -> None:
             recipe_store.add_pantry_staple(ingredient, category)
             display_name = ingredient.strip().title()
             flash(f"Added {display_name} to pantry staples.", "success")
-        except sqlite3.IntegrityError:
+        except IntegrityError:
             flash(f"{ingredient.title()} is already a pantry staple.", "error")
 
         return redirect(url_for("pantry"))
@@ -797,7 +799,7 @@ def _register_brand_routes(app: Flask) -> None:
         try:
             recipe_store.add_brand_preference(pref)
             flash(f"Added brand preference for {brand}.", "success")
-        except sqlite3.IntegrityError:
+        except IntegrityError:
             flash(f"Brand preference for {brand} already exists.", "error")
 
         return redirect(url_for("brands"))

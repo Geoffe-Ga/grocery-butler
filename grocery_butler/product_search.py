@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    import sqlite3
+    from grocery_butler.db.adapter import DatabaseConnection, DictRow
 
 from grocery_butler.db import get_connection, init_db
 from grocery_butler.models import SafewayProduct
@@ -84,11 +84,11 @@ class ProductSearchService:
         self._db_path = db_path
         init_db(db_path)
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> DatabaseConnection:
         """Create a new database connection.
 
         Returns:
-            Configured sqlite3.Connection.
+            Configured DatabaseConnection.
         """
         return get_connection(self._db_path)
 
@@ -481,11 +481,11 @@ def _safe_float(value: float | int | str | None) -> float | None:
         return None
 
 
-def _row_to_cached_mapping(row: sqlite3.Row) -> CachedMapping:
+def _row_to_cached_mapping(row: DictRow) -> CachedMapping:
     """Convert a database row to a CachedMapping.
 
     Args:
-        row: A sqlite3.Row from the product_mapping table.
+        row: A dict-like row from the product_mapping table.
 
     Returns:
         Populated CachedMapping instance.

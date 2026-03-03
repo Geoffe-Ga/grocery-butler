@@ -32,6 +32,7 @@ class Config:
 
     # Database
     database_path: str = "mealbot.db"
+    database_url: str = ""
 
     # Flask
     flask_port: int = 5000
@@ -84,10 +85,13 @@ def load_config(env_path: str | Path | None = None) -> Config:
             f"DEFAULT_SERVINGS must be an integer, got: {default_servings_raw!r}"
         ) from err
 
+    database_url = os.getenv("DATABASE_URL", "")
+
     return Config(
         anthropic_api_key=anthropic_api_key,
         discord_bot_token=os.getenv("DISCORD_BOT_TOKEN", ""),
         database_path=os.getenv("DATABASE_PATH", "mealbot.db"),
+        database_url=database_url,
         flask_port=flask_port,
         flask_debug=os.getenv("FLASK_DEBUG", "false").lower() in ("true", "1", "yes"),
         default_servings=default_servings,

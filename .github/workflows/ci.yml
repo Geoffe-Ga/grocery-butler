@@ -20,6 +20,21 @@ jobs:
       matrix:
         python-version: ['3.11', '3.12', '3.13']
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: grocery_test
+          POSTGRES_PASSWORD: grocery_test
+          POSTGRES_DB: grocery_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U grocery_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -78,6 +93,7 @@ jobs:
         run: ./scripts/coverage.sh --xml --html
         env:
           PYTHONPATH: ${{ github.workspace }}
+          TEST_DATABASE_URL: postgresql://grocery_test:grocery_test@localhost:5432/grocery_test
 
       - name: Verify branch coverage
         run: |

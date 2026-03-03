@@ -22,6 +22,7 @@ class TestConfig:
         cfg = Config(anthropic_api_key="sk-test")
         assert cfg.discord_bot_token == ""
         assert cfg.database_path == "mealbot.db"
+        assert cfg.database_url == ""
         assert cfg.flask_port == 5000
         assert cfg.flask_debug is False
         assert cfg.default_servings == 4
@@ -179,3 +180,26 @@ class TestLoadConfig:
         with patch.dict(os.environ, {}, clear=True):
             cfg = load_config(env_path=env_file)
         assert cfg.anthropic_api_key == "sk-from-file"
+
+    @patch.dict(
+        os.environ,
+        {
+            "ANTHROPIC_API_KEY": "sk-test",
+            "DATABASE_URL": "postgresql://user:pass@host:5432/db",
+        },
+        clear=True,
+    )
+    def test_load_config_database_url(self) -> None:
+        """Test load_config reads DATABASE_URL environment variable."""
+        cfg = load_config()
+        assert cfg.database_url == "postgresql://user:pass@host:5432/db"
+
+    @patch.dict(
+        os.environ,
+        {"ANTHROPIC_API_KEY": "sk-test"},
+        clear=True,
+    )
+    def test_load_config_database_url_defaults_empty(self) -> None:
+        """Test database_url defaults to empty string when not set."""
+        cfg = load_config()
+        assert cfg.database_url == ""

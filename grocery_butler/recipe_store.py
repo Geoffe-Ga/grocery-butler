@@ -21,7 +21,7 @@ from grocery_butler.models import (
 )
 
 if TYPE_CHECKING:
-    import sqlite3
+    from grocery_butler.db.adapter import DatabaseConnection, DictRow
 
 
 _ARTICLE_RE = re.compile(r"^(a|an|the)\s+", re.IGNORECASE)
@@ -51,8 +51,8 @@ def normalize_recipe_name(name: str) -> str:
 
 
 def _row_to_parsed_meal(
-    recipe_row: sqlite3.Row,
-    ingredient_rows: list[sqlite3.Row],
+    recipe_row: DictRow,
+    ingredient_rows: list[DictRow],
 ) -> ParsedMeal:
     """Convert database rows to a ParsedMeal model.
 
@@ -100,11 +100,11 @@ class RecipeStore:
         self._db_path = db_path
         init_db(db_path)
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> DatabaseConnection:
         """Create a new database connection.
 
         Returns:
-            Configured sqlite3.Connection.
+            Configured DatabaseConnection.
         """
         return get_connection(self._db_path)
 
@@ -141,7 +141,7 @@ class RecipeStore:
 
     def _insert_ingredients(
         self,
-        conn: sqlite3.Connection,
+        conn: DatabaseConnection,
         recipe_id: int,
         meal: ParsedMeal,
     ) -> None:
@@ -611,7 +611,7 @@ class RecipeStore:
 
     @staticmethod
     def _rows_to_brand_prefs(
-        rows: list[sqlite3.Row],
+        rows: list[DictRow],
     ) -> list[BrandPreference]:
         """Convert brand preference rows to models.
 

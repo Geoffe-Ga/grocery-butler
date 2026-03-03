@@ -337,10 +337,10 @@ class PantryManager:
 
 
 def _row_to_item(row: Any) -> InventoryItem:
-    """Convert a sqlite3.Row to an InventoryItem model.
+    """Convert a database row to an InventoryItem model.
 
     Args:
-        row: A sqlite3.Row from the household_inventory table.
+        row: A dict-like row from the household_inventory table.
 
     Returns:
         Populated InventoryItem instance.
