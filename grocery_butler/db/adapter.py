@@ -338,23 +338,18 @@ def _create_postgres_connection(db_url: str) -> PostgresConnection:
 # PostgreSQL backend
 # ------------------------------------------------------------------
 
-_INSERT_RETURNING_RE: re.Pattern[str] | None = None
+_INSERT_RETURNING_RE: re.Pattern[str] = re.compile(r"^\s*INSERT\s+", re.IGNORECASE)
 
-
-def _get_insert_returning_re() -> re.Pattern[str]:
-    """Lazily compile and cache the INSERT…RETURNING regex.
-
-    Returns:
-        Compiled regex that detects INSERT without RETURNING.
-    """
-    global _INSERT_RETURNING_RE
-    if _INSERT_RETURNING_RE is None:
-        _INSERT_RETURNING_RE = re.compile(r"^\s*INSERT\s+", re.IGNORECASE)
-    return _INSERT_RETURNING_RE
+# Matches a ``?`` placeholder that is NOT inside a single-quoted string.
+# Group 1 captures quoted strings (to skip them); group 2 captures bare ``?``.
+_PLACEHOLDER_RE: re.Pattern[str] = re.compile(r"('(?:[^'\\]|\\.)*')|\?")
 
 
 def _translate_placeholders(sql: str) -> str:
     """Convert SQLite ``?`` placeholders to PostgreSQL ``%s``.
+
+    Only replaces ``?`` that appear outside of single-quoted SQL string
+    literals.  A ``?`` inside a literal (e.g. ``'what?'``) is left as-is.
 
     Args:
         sql: SQL string with ``?`` placeholders.
@@ -362,7 +357,15 @@ def _translate_placeholders(sql: str) -> str:
     Returns:
         SQL string with ``%s`` placeholders.
     """
-    return sql.replace("?", "%s")
+
+    def _replace(match: re.Match[str]) -> str:
+        # Group 1 matched a quoted string — return it unchanged.
+        if match.group(1) is not None:
+            return match.group(0)
+        # Bare ``?`` — replace with ``%s``.
+        return "%s"
+
+    return _PLACEHOLDER_RE.sub(_replace, sql)
 
 
 def _inject_returning(sql: str) -> tuple[str, bool]:
@@ -377,8 +380,7 @@ def _inject_returning(sql: str) -> tuple[str, bool]:
     Returns:
         Tuple of (modified SQL, whether RETURNING was injected).
     """
-    pattern = _get_insert_returning_re()
-    if pattern.match(sql) and "RETURNING" not in sql.upper():
+    if _INSERT_RETURNING_RE.match(sql) and "RETURNING" not in sql.upper():
         return sql.rstrip().rstrip(";") + " RETURNING id", True
     return sql, False
 

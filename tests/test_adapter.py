@@ -306,6 +306,20 @@ class TestTranslatePlaceholders:
         sql = "SELECT COUNT(*) FROM t"
         assert _translate_placeholders(sql) == sql
 
+    def test_preserves_question_mark_inside_string_literal(self) -> None:
+        """Test ? inside single-quoted SQL strings is not replaced."""
+        sql = "INSERT INTO t (note) VALUES ('what?') WHERE id = ?"
+        assert _translate_placeholders(sql) == (
+            "INSERT INTO t (note) VALUES ('what?') WHERE id = %s"
+        )
+
+    def test_multiple_literals_with_bare_placeholders(self) -> None:
+        """Test mixed string literals and bare ? placeholders."""
+        sql = "SELECT * FROM t WHERE note = 'why?' AND id = ? AND tag = 'ok?'"
+        assert _translate_placeholders(sql) == (
+            "SELECT * FROM t WHERE note = 'why?' AND id = %s AND tag = 'ok?'"
+        )
+
 
 class TestInjectReturning:
     """Tests for the _inject_returning helper."""
