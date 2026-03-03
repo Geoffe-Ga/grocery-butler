@@ -17,6 +17,11 @@ from grocery_butler.db import (
     get_connection,
     init_db,
 )
+from grocery_butler.db.adapter import (
+    DatabaseConnection,
+    IntegrityError,
+    SQLiteConnection,
+)
 
 
 class TestConstants:
@@ -52,11 +57,12 @@ class TestGetConnection:
     """Tests for get_connection function."""
 
     def test_returns_connection(self, tmp_path: Path) -> None:
-        """Test get_connection returns a sqlite3 Connection."""
+        """Test get_connection returns a DatabaseConnection."""
         db_path = str(tmp_path / "test.db")
         conn = get_connection(db_path)
         try:
-            assert isinstance(conn, sqlite3.Connection)
+            assert isinstance(conn, DatabaseConnection)
+            assert isinstance(conn, SQLiteConnection)
         finally:
             conn.close()
 
@@ -65,7 +71,8 @@ class TestGetConnection:
         db_path = str(tmp_path / "test.db")
         conn = get_connection(db_path)
         try:
-            result = conn.execute("PRAGMA journal_mode").fetchone()
+            assert isinstance(conn, SQLiteConnection)
+            result = conn.raw.execute("PRAGMA journal_mode").fetchone()
             assert result[0] == "wal"
         finally:
             conn.close()
@@ -75,7 +82,8 @@ class TestGetConnection:
         db_path = str(tmp_path / "test.db")
         conn = get_connection(db_path)
         try:
-            result = conn.execute("PRAGMA foreign_keys").fetchone()
+            assert isinstance(conn, SQLiteConnection)
+            result = conn.raw.execute("PRAGMA foreign_keys").fetchone()
             assert result[0] == 1
         finally:
             conn.close()
@@ -85,7 +93,8 @@ class TestGetConnection:
         db_path = str(tmp_path / "test.db")
         conn = get_connection(db_path)
         try:
-            assert conn.row_factory is sqlite3.Row
+            assert isinstance(conn, SQLiteConnection)
+            assert conn.raw.row_factory is sqlite3.Row
         finally:
             conn.close()
 
@@ -220,7 +229,7 @@ class TestInitDb:
         conn = get_connection(db_path)
         try:
             # Inserting a recipe_ingredient with a non-existent recipe_id should fail
-            with pytest.raises(sqlite3.IntegrityError):
+            with pytest.raises(IntegrityError):
                 conn.execute(
                     "INSERT INTO recipe_ingredients "
                     "(recipe_id, ingredient, quantity, unit, category, "
