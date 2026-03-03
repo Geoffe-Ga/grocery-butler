@@ -394,16 +394,20 @@ class PostgresCursorResult:
         self,
         cursor: Any,
         returning_injected: bool = False,
+        *,
+        noop: bool = False,
     ) -> None:
         """Initialize with an underlying psycopg2 cursor.
 
         Args:
             cursor: The psycopg2 cursor.
             returning_injected: Whether RETURNING id was added to the SQL.
+            noop: If True, no query was executed (e.g. skipped PRAGMA).
         """
         self._cursor = cursor
         self._lastrowid: int | None = None
-        if returning_injected:
+        self._noop = noop
+        if returning_injected and not noop:
             row = cursor.fetchone()
             if row is not None:
                 self._lastrowid = row["id"]
@@ -432,6 +436,8 @@ class PostgresCursorResult:
         Returns:
             A RealDictRow or None.
         """
+        if self._noop:
+            return None
         return self._cursor.fetchone()
 
     def fetchall(self) -> list[Any]:
@@ -440,6 +446,8 @@ class PostgresCursorResult:
         Returns:
             List of RealDictRow objects.
         """
+        if self._noop:
+            return []
         return list(self._cursor.fetchall())
 
 
@@ -485,7 +493,7 @@ class PostgresConnection:
             cursor = self._conn.cursor(
                 cursor_factory=psycopg2.extras.RealDictCursor,
             )
-            return PostgresCursorResult(cursor)
+            return PostgresCursorResult(cursor, noop=True)
 
         translated = _translate_placeholders(stripped)
         translated, returning_injected = _inject_returning(translated)
