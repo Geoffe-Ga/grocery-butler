@@ -120,6 +120,37 @@ This project maintains MAXIMUM QUALITY standards:
 - **All Linters**: Must pass with zero violations
 - **Type Coverage**: 100% type hints
 
+## Deploying to Railway
+
+The project includes a `Procfile` for [Railway](https://railway.app/) deployment with two processes:
+
+| Process | Command | Description |
+|---------|---------|-------------|
+| `web` | `gunicorn grocery_butler.app:create_app()` | Flask web app |
+| `worker` | `python -m grocery_butler.bot` | Discord bot |
+
+### Required Environment Variables
+
+Set these in your Railway project settings:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | PostgreSQL connection URL (auto-injected by Railway Postgres plugin) |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude-powered features |
+| `DISCORD_BOT_TOKEN` | Yes (worker) | Discord bot token for the worker process |
+| `FLASK_SECRET_KEY` | Yes (web) | Stable secret key for Flask sessions (generate once, reuse) |
+| `SAFEWAY_USERNAME` | Yes | Safeway account username |
+| `SAFEWAY_PASSWORD` | Yes | Safeway account password |
+| `SAFEWAY_STORE_ID` | Yes | Safeway store ID for product searches |
+| `PORT` | Auto | Injected by Railway for the web process |
+
+### Quick Start
+
+1. Connect your Railway project to this GitHub repo
+2. Add a PostgreSQL plugin (provides `DATABASE_URL` automatically)
+3. Set the required environment variables above
+4. Railway auto-deploys on push to `main`
+
 ## License
 
 MIT License
