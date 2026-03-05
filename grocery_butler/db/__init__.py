@@ -53,24 +53,12 @@ def get_connection(db_path: str) -> DatabaseConnection:
     return create_connection(db_path)
 
 
-def _is_postgres(db_path: str) -> bool:
-    """Check if the database path is a PostgreSQL URL.
-
-    Args:
-        db_path: Database path or URL.
-
-    Returns:
-        True if the path is a PostgreSQL URL.
-    """
-    return db_path.startswith(("postgresql://", "postgres://"))
-
-
 def init_db(db_path: str) -> None:
-    """Initialize the database schema and seed data.
+    """Initialize the database schema and seed data via migrations.
 
-    Idempotent: safe to call multiple times. Uses IF NOT EXISTS for
-    all table creation and INSERT OR IGNORE (SQLite) or
-    ON CONFLICT DO NOTHING (PostgreSQL) for seed data.
+    Delegates to the migration runner which applies any pending SQL
+    migrations in version order. Idempotent: safe to call multiple
+    times.
 
     For ``:memory:`` databases, opens a keepalive connection so that
     the shared in-memory database persists across connections.
@@ -82,42 +70,6 @@ def init_db(db_path: str) -> None:
     if db_path == ":memory:" and _memory_keepalive is None:
         _memory_keepalive = get_connection(db_path)
 
-    is_pg = _is_postgres(db_path)
+    from grocery_butler.db.migrate import migrate
 
-    conn = get_connection(db_path)
-    try:
-        # Create tables from the appropriate schema file
-        schema_file = SCHEMA_PG_PATH if is_pg else SCHEMA_PATH
-        schema_sql = schema_file.read_text()
-        conn.executescript(schema_sql)
-
-        # Seed SQL varies by backend
-        if is_pg:
-            pantry_sql = (
-                "INSERT INTO pantry_staples "
-                "(ingredient, display_name, category) VALUES (?, ?, ?) "
-                "ON CONFLICT DO NOTHING"
-            )
-            pref_sql = (
-                "INSERT INTO preferences (key, value) VALUES (?, ?) "
-                "ON CONFLICT DO NOTHING"
-            )
-        else:
-            pantry_sql = (
-                "INSERT OR IGNORE INTO pantry_staples "
-                "(ingredient, display_name, category) VALUES (?, ?, ?)"
-            )
-            pref_sql = "INSERT OR IGNORE INTO preferences (key, value) VALUES (?, ?)"
-
-        # Seed pantry staples
-        for ingredient, category in DEFAULT_PANTRY:
-            display_name = ingredient.replace("_", " ").title()
-            conn.execute(pantry_sql, (ingredient, display_name, category))
-
-        # Seed default preferences
-        for key, value in DEFAULT_PREFERENCES.items():
-            conn.execute(pref_sql, (key, value))
-
-        conn.commit()
-    finally:
-        conn.close()
+    migrate(db_path)

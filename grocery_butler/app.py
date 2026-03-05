@@ -186,6 +186,7 @@ def _register_routes(app: Flask) -> None:
     Args:
         app: Flask application instance.
     """
+    _register_health_routes(app)
     _register_dashboard_routes(app)
     _register_inventory_routes(app)
     _register_recipe_routes(app)
@@ -193,6 +194,32 @@ def _register_routes(app: Flask) -> None:
     _register_pantry_routes(app)
     _register_brand_routes(app)
     _register_preferences_routes(app)
+
+
+def _register_health_routes(app: Flask) -> None:
+    """Register the health check endpoint.
+
+    Args:
+        app: Flask application instance.
+    """
+
+    @app.route("/health")
+    def health() -> tuple[Response, int]:
+        """Return application health status with database connectivity.
+
+        Returns:
+            JSON response with status and HTTP status code.
+        """
+        try:
+            db = _get_db()
+            db.execute("SELECT 1")
+            return jsonify({"status": "healthy", "database": "connected"}), 200
+        except Exception:
+            logger.exception("Health check failed")
+            return (
+                jsonify({"status": "unhealthy", "database": "disconnected"}),
+                503,
+            )
 
 
 def _register_dashboard_routes(app: Flask) -> None:

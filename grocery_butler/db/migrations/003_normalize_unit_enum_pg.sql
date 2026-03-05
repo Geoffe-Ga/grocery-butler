@@ -1,0 +1,3 @@
+-- Migration 003: normalize unit enum values (PostgreSQL).
+-- This is handled by Python code in migrate_unit_enum.py.
+-- No-op SQL marker; the migration runner records it as applied.

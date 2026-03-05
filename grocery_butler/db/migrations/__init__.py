@@ -1,0 +1,1 @@
+"""SQL migration files for grocery-butler database schema evolution."""
