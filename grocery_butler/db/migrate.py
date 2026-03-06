@@ -47,29 +47,22 @@ def _is_postgres(db_path: str) -> bool:
     return db_path.startswith(("postgresql://", "postgres://"))
 
 
-def _ensure_schema_migrations_table(conn: DatabaseConnection, is_pg: bool) -> None:
+def _ensure_schema_migrations_table(conn: DatabaseConnection) -> None:
     """Create the schema_migrations tracking table if it does not exist.
+
+    The DDL is compatible with both SQLite and PostgreSQL (INTEGER
+    PRIMARY KEY works on both backends).
 
     Args:
         conn: Active database connection.
-        is_pg: Whether the backend is PostgreSQL.
     """
-    if is_pg:
-        sql = (
-            "CREATE TABLE IF NOT EXISTS schema_migrations ("
-            "version INTEGER PRIMARY KEY, "
-            "name TEXT NOT NULL, "
-            "applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-    else:
-        sql = (
-            "CREATE TABLE IF NOT EXISTS schema_migrations ("
-            "version INTEGER PRIMARY KEY, "
-            "name TEXT NOT NULL, "
-            "applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
+    sql = (
+        "CREATE TABLE IF NOT EXISTS schema_migrations ("
+        "version INTEGER PRIMARY KEY, "
+        "name TEXT NOT NULL, "
+        "applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+    )
     conn.executescript(sql)
-    conn.commit()
 
 
 def _get_applied_versions(conn: DatabaseConnection) -> set[int]:
@@ -123,6 +116,9 @@ def _discover_migrations(is_pg: bool) -> list[tuple[int, str, Path]]:
 def _record_migration(conn: DatabaseConnection, version: int, name: str) -> None:
     """Record a migration as applied in the tracking table.
 
+    Uses ``?`` placeholders which the adapter layer translates to
+    ``%s`` for PostgreSQL (see :meth:`PostgresConnection.execute`).
+
     Args:
         conn: Active database connection.
         version: Migration version number.
@@ -151,7 +147,7 @@ def migrate(db_path: str) -> int:
     is_pg = _is_postgres(db_path)
     conn = get_connection(db_path)
     try:
-        _ensure_schema_migrations_table(conn, is_pg)
+        _ensure_schema_migrations_table(conn)
         applied = _get_applied_versions(conn)
         migrations = _discover_migrations(is_pg)
 
@@ -168,7 +164,6 @@ def migrate(db_path: str) -> int:
             logger.info("Applying migration %03d_%s ...", version, name)
             sql = path.read_text()
             conn.executescript(sql)
-            conn.commit()
             _record_migration(conn, version, name)
             count += 1
 

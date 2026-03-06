@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -43,7 +43,7 @@ class TestEnsureSchemaMigrationsTable:
         """Test that the schema_migrations table is created."""
         conn = get_connection(db_path)
         try:
-            _ensure_schema_migrations_table(conn, is_pg=False)
+            _ensure_schema_migrations_table(conn)
             cursor = conn.execute(
                 "SELECT name FROM sqlite_master "
                 "WHERE type='table' AND name='schema_migrations'"
@@ -58,8 +58,8 @@ class TestEnsureSchemaMigrationsTable:
         """Test calling twice does not raise."""
         conn = get_connection(db_path)
         try:
-            _ensure_schema_migrations_table(conn, is_pg=False)
-            _ensure_schema_migrations_table(conn, is_pg=False)
+            _ensure_schema_migrations_table(conn)
+            _ensure_schema_migrations_table(conn)
             cursor = conn.execute(
                 "SELECT COUNT(*) as cnt FROM sqlite_master "
                 "WHERE type='table' AND name='schema_migrations'"
@@ -81,7 +81,7 @@ class TestGetAppliedVersions:
         """Test returns empty set on fresh database."""
         conn = get_connection(db_path)
         try:
-            _ensure_schema_migrations_table(conn, is_pg=False)
+            _ensure_schema_migrations_table(conn)
             result = _get_applied_versions(conn)
             assert result == set()
         finally:
@@ -91,7 +91,7 @@ class TestGetAppliedVersions:
         """Test returns set of applied version numbers."""
         conn = get_connection(db_path)
         try:
-            _ensure_schema_migrations_table(conn, is_pg=False)
+            _ensure_schema_migrations_table(conn)
             conn.execute(
                 "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
                 (1, "initial_schema"),
@@ -164,7 +164,7 @@ class TestRecordMigration:
         """Test that a version is recorded in schema_migrations."""
         conn = get_connection(db_path)
         try:
-            _ensure_schema_migrations_table(conn, is_pg=False)
+            _ensure_schema_migrations_table(conn)
             _record_migration(conn, 1, "initial_schema")
             applied = _get_applied_versions(conn)
             assert 1 in applied
@@ -175,7 +175,7 @@ class TestRecordMigration:
         """Test that the migration name is stored."""
         conn = get_connection(db_path)
         try:
-            _ensure_schema_migrations_table(conn, is_pg=False)
+            _ensure_schema_migrations_table(conn)
             _record_migration(conn, 42, "my_migration")
             cursor = conn.execute(
                 "SELECT name FROM schema_migrations WHERE version = ?",
@@ -186,6 +186,20 @@ class TestRecordMigration:
             assert row["name"] == "my_migration"
         finally:
             conn.close()
+
+    def test_uses_placeholder_compatible_with_adapter(self) -> None:
+        """Test _record_migration passes ? placeholders to conn.execute.
+
+        The adapter layer translates ? to %s for PostgreSQL, so the
+        migration runner must use ? placeholders consistently.
+        """
+        mock_conn = MagicMock()
+        _record_migration(mock_conn, 5, "test_mig")
+        mock_conn.execute.assert_called_once_with(
+            "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
+            (5, "test_mig"),
+        )
+        mock_conn.commit.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +255,27 @@ class TestMigrate:
         """Test returns 0 when no pending migrations."""
         migrate(db_path)
         assert migrate(db_path) == 0
+
+    def test_bad_sql_raises(self, tmp_path: Path) -> None:
+        """Test that invalid SQL in a migration file raises an error."""
+        from grocery_butler.db.migrate import MIGRATIONS_DIR
+
+        # Create a temp migrations dir with a broken migration
+        fake_dir = tmp_path / "migrations"
+        fake_dir.mkdir()
+        (fake_dir / "__init__.py").write_text("")
+        (fake_dir / "001_bad.sql").write_text("CREATE TABL broken_syntax;")
+
+        db_path = str(tmp_path / "bad.db")
+        with (
+            patch.object(
+                type(MIGRATIONS_DIR),
+                "iterdir",
+                return_value=iter(sorted(fake_dir.iterdir())),
+            ),
+            pytest.raises(Exception),  # noqa: B017
+        ):
+            migrate(db_path)
 
 
 # ---------------------------------------------------------------------------

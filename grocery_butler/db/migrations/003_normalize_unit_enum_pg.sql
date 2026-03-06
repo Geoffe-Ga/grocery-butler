@@ -1,3 +1,4 @@
 -- Migration 003: normalize unit enum values (PostgreSQL).
--- This is handled by Python code in migrate_unit_enum.py.
--- No-op SQL marker; the migration runner records it as applied.
+-- Actual logic lives in grocery_butler/db/migrate_unit_enum.py
+-- which is run independently.  This no-op marker records version
+-- 003 as applied so the runner does not re-process the schema.
