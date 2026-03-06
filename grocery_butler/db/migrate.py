@@ -92,7 +92,7 @@ def _discover_migrations(is_pg: bool) -> list[tuple[int, str, Path]]:
     """
     results: list[tuple[int, str, Path]] = []
 
-    for path in sorted(MIGRATIONS_DIR.iterdir()):
+    for path in MIGRATIONS_DIR.iterdir():
         if not path.is_file():
             continue
         # Skip files of the wrong dialect
@@ -131,6 +131,34 @@ def _record_migration(conn: DatabaseConnection, version: int, name: str) -> None
     conn.commit()
 
 
+_PYTHON_HOOKS: dict[int, str] = {
+    3: "grocery_butler.db.migrate_unit_enum",
+}
+
+
+def _run_python_hook(version: int, name: str, db_path: str) -> None:
+    """Run a Python migration hook if one is registered for this version.
+
+    Some migrations require Python logic (e.g. data transforms) that
+    cannot be expressed in SQL alone.  Hooks are registered in
+    ``_PYTHON_HOOKS`` mapping version numbers to module paths.
+
+    Args:
+        version: Migration version number.
+        name: Migration name (for logging).
+        db_path: Database file path or PostgreSQL URL.
+    """
+    module_path = _PYTHON_HOOKS.get(version)
+    if module_path is None:
+        return
+
+    import importlib
+
+    logger.info("Running Python hook for %03d_%s ...", version, name)
+    mod = importlib.import_module(module_path)
+    mod.migrate(db_path)
+
+
 def migrate(db_path: str) -> int:
     """Apply all pending migrations to the database.
 
@@ -164,6 +192,7 @@ def migrate(db_path: str) -> int:
             logger.info("Applying migration %03d_%s ...", version, name)
             sql = path.read_text()
             conn.executescript(sql)
+            _run_python_hook(version, name, db_path)
             _record_migration(conn, version, name)
             count += 1
 
@@ -214,8 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         format="%(levelname)s: %(message)s",
     )
     db_path = args.db_path or os.environ.get("DATABASE_URL", "mealbot.db")
-    count = migrate(db_path)
-    logger.info("Done. %d migration(s) applied.", count)
+    migrate(db_path)
     return 0
 
 

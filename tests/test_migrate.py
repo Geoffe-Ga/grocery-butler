@@ -273,7 +273,7 @@ class TestMigrate:
                 "iterdir",
                 return_value=iter(sorted(fake_dir.iterdir())),
             ),
-            pytest.raises(Exception),  # noqa: B017
+            pytest.raises(Exception, match=r".+"),
         ):
             migrate(db_path)
 

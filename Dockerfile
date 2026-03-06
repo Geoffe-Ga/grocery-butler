@@ -31,4 +31,4 @@ EXPOSE $PORT
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT}/health')"
 
-CMD ["gunicorn", "grocery_butler.app:create_app()", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "120"]
+CMD gunicorn 'grocery_butler.app:create_app()' --bind "0.0.0.0:${PORT}" --workers 2 --timeout 120
