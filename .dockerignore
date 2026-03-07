@@ -1,0 +1,17 @@
+.git
+__pycache__
+*.pyc
+.venv
+.env
+*.db
+tests/
+htmlcov/
+scripts/
+plans/
+.claude/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info
+coverage.xml
+satan-butler.png

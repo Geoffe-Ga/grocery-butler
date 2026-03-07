@@ -203,6 +203,24 @@ class TestInitDb:
         # Should still have the same number (INSERT OR IGNORE)
         assert count == len(DEFAULT_PANTRY)
 
+    def test_creates_schema_migrations_table(self, tmp_path: Path) -> None:
+        """Test init_db creates the schema_migrations tracking table."""
+        db_path = str(tmp_path / "test.db")
+        init_db(db_path)
+
+        conn = get_connection(db_path)
+        try:
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='schema_migrations'"
+            )
+            row = cursor.fetchone()
+        finally:
+            conn.close()
+
+        assert row is not None
+        assert row["name"] == "schema_migrations"
+
     def test_creates_indexes(self, tmp_path: Path) -> None:
         """Test init_db creates expected indexes."""
         db_path = str(tmp_path / "test.db")
