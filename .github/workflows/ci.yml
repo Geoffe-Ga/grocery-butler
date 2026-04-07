@@ -64,13 +64,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip setuptools wheel
-          pip install pytest pytest-cov pytest-xdist pytest-timeout
-          pip install ruff mypy types-psycopg2
-          pip install bandit pip-audit
-          pip install interrogate
-          pip install radon xenon mccabe
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          pip install pytest-cov pytest-xdist pytest-timeout
+          pip install ruff mypy
+          pip install bandit pip-audit
+          pip install radon xenon mccabe
           if [ -f pyproject.toml ]; then pip install -e .; fi
 
       - name: Make scripts executable
