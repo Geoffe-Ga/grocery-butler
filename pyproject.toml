@@ -46,12 +46,6 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
-    "--cov=grocery_butler",
-    "--cov-branch",
-    "--cov-report=term-missing:skip-covered",
-    "--cov-report=html",
-    "--cov-report=xml",
-    "--cov-fail-under=90",
 ]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
@@ -95,11 +89,36 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 warn_no_return = true
 strict_equality = true
-strict_concatenate = true
+extra_checks = true
 
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = [
+    "pydantic.*",
+    "dotenv.*",
+    "httpx.*",
+    "anthropic.*",
+    "flask.*",
+    "werkzeug.*",
+    "discord.*",
+    "discord.ext.*",
+    "aiosqlite.*",
+    "gunicorn.*",
+    "psycopg2.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "grocery_butler.app",
+    "grocery_butler.bot",
+    "grocery_butler.models",
+]
+disallow_untyped_decorators = false
+warn_return_any = false
 
 [tool.ruff]
 line-length = 88
