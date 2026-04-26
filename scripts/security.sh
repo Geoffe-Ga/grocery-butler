@@ -77,7 +77,19 @@ fi
 
 # PYSEC-2022-42969: py<=1.11.0 ReDoS in py.path.svnwc – dev-only dep of
 # interrogate, not shipped to production. No upstream fix available.
-PIP_AUDIT_ARGS=(--ignore-vuln PYSEC-2022-42969)
+#
+# CVE-2026-3219: vulnerability in pip itself with no fixed version published
+# upstream as of 2026-04-26. Pip is a build/install tool and is not part of
+# the runtime application surface. The vendored copies of pip used by users
+# are out of our control. Alternatives considered:
+#   - Pinning pip: every released pip version is flagged; downgrading offers
+#     no security benefit and breaks setuptools/wheel compatibility.
+#   - Auditing only requirements files: would silently miss transitive deps.
+# Review on 2026-07-25; if a fixed pip is released, drop this suppression.
+PIP_AUDIT_ARGS=(
+    --ignore-vuln PYSEC-2022-42969
+    --ignore-vuln CVE-2026-3219
+)
 
 VENV_PYTHON="${VIRTUAL_ENV:-$PROJECT_ROOT/.venv}/bin/python"
 if [ -x "$VENV_PYTHON" ]; then
