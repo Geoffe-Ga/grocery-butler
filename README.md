@@ -1,18 +1,246 @@
 # grocery-butler
 
-Grocery Butler - A quality-controlled Python project.
+> A grocery ERP for the household — built to protect invisible labor.
 
-## Description
+## Mission
 
-This project follows maximum quality standards from day one, including:
+Households run on a quiet, unrecognized layer of work: someone notices the
+peanut butter is low, mentally cross-references it against tomorrow's lunches,
+remembers that one kid won't eat the crunchy kind, checks last week's receipt
+to avoid double-buying, and threads it all into a coherent shopping trip. That
+labor is largely **invisible** — it doesn't show up on a calendar, doesn't get
+billed, and doesn't get thanked. When the person doing it is unavailable, sick,
+or finally tired of doing it, the household feels the absence immediately.
 
-- Comprehensive testing infrastructure (pytest with 90%+ coverage requirement)
-- Code quality tools (ruff, mypy)
-- Security scanning (bandit, pip-audit)
-- Complexity analysis (radon, xenon)
-- Pre-commit hooks
-- CI/CD pipeline (GitHub Actions)
-- AI-assisted development (Claude Code skills and subagents)
+**Grocery Butler** treats household provisioning as a first-class business
+process. Inventory, recipes, brand preferences, pantry staples, and ordering
+are stored in a real database, exposed through real interfaces (web, chat, and
+CLI), and orchestrated like an ERP system would orchestrate a supply chain.
+
+The goal is not to "add an app" to someone's life. The goal is to make the
+invisible work **visible, sharable, and partially automatable**, so that:
+
+- The mental load can be **handed off** without losing context.
+- Multiple household members can **contribute** ("we're out of milk") via the
+  channels they already use (Discord, web, terminal).
+- Decisions made once (preferred brands, default servings, dietary
+  restrictions) **persist** instead of being rediscovered every week.
+- The boring parts (consolidating ingredients across meals, mapping a recipe
+  to a Safeway cart, picking sane substitutions) are handled by **the
+  software**, not by a human's evening.
+
+This is a small system with a serious intention: give back the hours that
+"just keeping the house running" silently consumes.
+
+## Table of Contents
+
+- [What It Does](#what-it-does)
+- [Architecture](#architecture)
+- [Code Choices](#code-choices)
+- [Installation](#installation)
+- [Running the System](#running-the-system)
+- [API Documentation](#api-documentation)
+  - [HTTP / Web API](#http--web-api)
+  - [Discord Bot Commands](#discord-bot-commands)
+  - [Command-Line Interface](#command-line-interface)
+  - [Python Module API](#python-module-api)
+- [Data Model](#data-model)
+- [Development](#development)
+- [Deploying to Railway](#deploying-to-railway)
+- [License](#license)
+
+## What It Does
+
+Grocery Butler implements the full provisioning loop for a household:
+
+1. **Capture recipes** — describe a meal in natural language; Claude parses it
+   into structured ingredients with quantities, units, and categories.
+2. **Track real inventory** — the household marks items as `on_hand`, `low`,
+   or `out` from any channel. Items go onto the **restock queue** automatically.
+3. **Plan a week** — given a list of meal names, the system pulls saved recipes
+   (or parses new ones), scales them to your default servings, and emits a
+   consolidated shopping list grouped by store aisle.
+4. **Respect what's already true** — pantry staples are excluded by default,
+   restock items are added unconditionally, and brand preferences and dietary
+   rules are applied at consolidation time.
+5. **Order through Safeway** — the optional Safeway pipeline maps shopping
+   list items to real products, suggests substitutions for out-of-stock items
+   via Claude, builds a cart, and submits the order for pickup or delivery.
+
+## Architecture
+
+Grocery Butler is intentionally a **small monolith with three front doors**.
+A single shared database, a single domain layer, and three thin adapters that
+serve the channels people actually use.
+
+```
+                        +-----------------------+
+                        |     Anthropic API     |
+                        |   (Claude — parsing,  |
+                        |    consolidation,     |
+                        |    substitutions)     |
+                        +-----------+-----------+
+                                    |
+                                    v
++---------+     +---------+     +---------+     +-----------------+
+| Flask   |     | Discord |     |   CLI   |     |  Safeway HTTP   |
+|  web    |     |   bot   |     |  argp.  |     |  client (httpx) |
+| (app.py)|     | (bot.py)|     |(cli.py) |     |(safeway_client) |
++----+----+     +----+----+     +----+----+     +--------+--------+
+     |               |               |                   ^
+     +-------+-------+---------------+                   |
+             |                                           |
+             v                                           |
+     +-------------------+   +----------------+          |
+     |  Domain services  |-->|  SafewayPipeline|---------+
+     |                   |   +----------------+
+     |  - MealParser     |
+     |  - Consolidator   |
+     |  - PantryManager  |
+     |  - RecipeStore    |
+     +---------+---------+
+               |
+               v
+        +-------------+
+        |  db/adapter |   SQLite (dev) / Postgres (prod)
+        +-------------+
+```
+
+### Layers
+
+**Adapters (channels)** — `app.py` (Flask), `bot.py` (Discord), `cli.py`
+(argparse). These are intentionally thin: they parse channel-specific input,
+call into the domain services, and format output for the channel. No business
+rules live here.
+
+**Domain services** — the heart of the system:
+
+| Module | Responsibility |
+|--------|---------------|
+| `meal_parser.py` | Turn a meal name (or saved recipe) into a `ParsedMeal` of structured ingredients via Claude. |
+| `recipe_store.py` | Persistence for recipes, pantry staples, brand preferences, and user preferences. |
+| `pantry_manager.py` | Household inventory CRUD, restock queue, and natural-language inventory updates. |
+| `consolidator.py` | Merge ingredients across multiple meals into a single deduplicated shopping list, applying pantry staples and restock overrides. |
+
+**Safeway pipeline** — `safeway_pipeline.py` wires together
+`safeway_client.py`, `product_search.py`, `product_selector.py`,
+`substitution_service.py`, `cart_builder.py`, and `order_service.py` into a
+two-step `build_cart` -> `submit_order` flow. The pipeline is optional; the
+core meal-planning system runs without any Safeway credentials.
+
+**Persistence** — `db/adapter.py` provides a thin abstraction over `sqlite3`
+and `psycopg2` so the same code runs locally on SQLite (with WAL mode for
+concurrent reader/writer between Flask and the Discord bot) and in production
+on Railway Postgres. Schema is defined declaratively in `db/schema.sql` and
+`db/schema_pg.sql`, with one-shot data migrations in `db/migrate.py`.
+
+### Process Topology
+
+In production (Railway), the system runs as **two long-lived processes** plus
+a one-shot release step:
+
+| Process | Command | Role |
+|---------|---------|------|
+| `release` | `python -m grocery_butler.db.migrate` | Run schema migrations on every deploy. |
+| `web` | `gunicorn 'grocery_butler.app:create_app()'` | Flask dashboard + JSON endpoints. |
+| `worker` | `python -m grocery_butler.bot` | Discord bot, listens to slash commands and DMs. |
+
+Both processes share the same database. The CLI is invoked ad-hoc as a
+single-shot process (no daemon).
+
+### Key Design Rules
+
+1. **Inventory status overrides pantry staples.** Salt is normally excluded as
+   a pantry staple, but if the household marks salt as `out`, it goes onto
+   the order. This rule is enforced inside `Consolidator`, not at the call site.
+2. **Claude is a parser, not a planner.** The LLM extracts structure from
+   natural language (recipes, inventory updates, substitution choices). It
+   does not own state. State lives in the database.
+3. **Channels are interchangeable.** Anything you can do in the web UI you can
+   do from the CLI or from Discord. No channel is privileged.
+4. **The Safeway integration is optional.** Removing it leaves a fully usable
+   meal-planning + inventory tracking system.
+
+## Code Choices
+
+Each technology choice is deliberate. The shared theme: **boring, well-typed,
+and easy to operate alone.**
+
+### Language and runtime
+
+- **Python 3.11+** — `StrEnum`, structural pattern matching, exception groups,
+  and excellent type-checker support. Tested against 3.11, 3.12, and 3.13.
+- **Strict typing everywhere.** `mypy --strict` runs in CI. Function
+  signatures are required to have type hints, and `# type: ignore` requires a
+  linked issue.
+
+### Web
+
+- **Flask 3** — small, explicit, and fits on a single Railway dyno without
+  ceremony. The app is constructed by an `create_app(db_path)` factory so
+  tests can spin up isolated instances against a tmpfile database.
+- **Jinja2 templates + Pico CSS** — server-rendered HTML, no SPA, no build
+  step. The dashboard is meant to be operated from a phone in the kitchen,
+  not from a workstation.
+- **Gunicorn** — production WSGI server, configured in the `Procfile`.
+
+### Chat
+
+- **discord.py 2.x** — slash commands via `app_commands.CommandTree`, grouped
+  by feature (`/stock`, `/pantry`, `/brands`, `/recipes`, `/preferences`,
+  `/order`). Permission is delegated to Discord's native `manage_guild` so
+  server admins control access through the Integrations UI.
+
+### LLM
+
+- **Anthropic Claude (Sonnet)** via the official `anthropic` SDK.
+  - Recipe parsing: structured extraction with JSON schemas.
+  - Inventory natural language: "we ran out of milk and the bread is going
+    stale" -> a list of `InventoryUpdate` records.
+  - Substitution selection: rank Safeway alternatives for an out-of-stock item.
+  - Prompt templates live in `grocery_butler/prompts/` and are loaded by
+    `prompt_loader.py` so they can be edited without code changes.
+
+### Data
+
+- **Pydantic v2** — all domain objects (`Ingredient`, `ParsedMeal`,
+  `ShoppingListItem`, `InventoryItem`, `BrandPreference`, `SafewayProduct`,
+  `CartSummary`, ...) are Pydantic models. Field validators normalize messy
+  inputs (e.g. `"lbs"` -> `Unit.LB`) at the edge so the rest of the system
+  works with clean enums.
+- **`StrEnum` for vocabularies** — `IngredientCategory`, `InventoryStatus`,
+  `Unit`, `BrandPreferenceType`, `BrandMatchType`, `FulfillmentType`,
+  `PriceSensitivity`, `OrganicPreference`, `SubstitutionSuitability`. The
+  string value matches the database value, so enum members can be compared
+  directly with stored strings.
+- **SQLite (dev) + Postgres (prod)** — same schema, same code, swapped via
+  the `db/adapter.py` shim. SQLite uses WAL mode so the Flask process and the
+  Discord worker can read/write concurrently.
+
+### HTTP
+
+- **httpx** for the Safeway client — async-capable and gives precise control
+  over cookies, headers, and timeouts. Required because Safeway's web API is
+  cookie-session-based and not officially documented.
+
+### Quality tooling
+
+The project enforces **maximum quality** as a baseline:
+
+| Tool | Purpose | Threshold |
+|------|---------|-----------|
+| `pytest` + `pytest-cov` | Tests + coverage | >= 90% branch coverage |
+| `ruff` | Lint + format (replaces black, isort, flake8) | 0 violations |
+| `mypy --strict` | Static typing | 0 errors |
+| `bandit` | Security lint | 0 findings |
+| `pip-audit` | Dependency CVEs | 0 vulnerabilities |
+| `radon` / `xenon` | Cyclomatic complexity | <= 10 per function |
+| `interrogate` | Docstring coverage | >= 95% |
+| `mutmut` | Mutation testing | High-value-test verification |
+| `pre-commit` | Hook runner | All of the above on every commit |
+
+All tools are invoked through `./scripts/*.sh` so local dev and CI run the
+exact same commands.
 
 ## Installation
 
@@ -21,135 +249,457 @@ This project follows maximum quality standards from day one, including:
 git clone <repository-url>
 cd grocery-butler
 
-# Install dependencies
+# Install dependencies (runtime + dev)
 pip install -r requirements-dev.txt
 
 # Install pre-commit hooks
 pre-commit install
+
+# Copy and fill in environment variables
+cp .env.example .env
+$EDITOR .env
 ```
 
-## Usage
+### Required environment variables
 
-Run the Hello World application:
+| Variable | When required | Purpose |
+|----------|---------------|---------|
+| `ANTHROPIC_API_KEY` | Always | Claude API access for parsing and consolidation. |
+| `DISCORD_BOT_TOKEN` | Discord worker only | Authenticates the bot. |
+| `FLASK_SECRET_KEY` | Web (production) | Stable session signing key. |
+| `DATABASE_PATH` | SQLite (dev) | Path to the local SQLite file. Defaults to `mealbot.db`. |
+| `DATABASE_URL` | Postgres (prod) | Connection URL injected by Railway Postgres. |
+| `SAFEWAY_USERNAME` | Ordering only | Safeway account email. |
+| `SAFEWAY_PASSWORD` | Ordering only | Safeway account password. |
+| `SAFEWAY_STORE_ID` | Ordering only | Safeway store ID for product searches. |
+| `DEFAULT_SERVINGS` | Optional | Default recipe scaling target (default `4`). |
+| `DEFAULT_UNITS` | Optional | `imperial` or `metric` (default `imperial`). |
+
+## Running the System
+
+### Web dashboard (local)
 
 ```bash
-python -m grocery_butler.main
+gunicorn 'grocery_butler.app:create_app()' --bind 0.0.0.0:5000
+# or for hot reload during development:
+FLASK_APP='grocery_butler.app:create_app()' flask run --debug
 ```
 
-Expected output:
+Open <http://localhost:5000>.
+
+### Discord bot
+
+```bash
+python -m grocery_butler.bot
 ```
-Hello from grocery-butler!
+
+The bot connects with `DISCORD_BOT_TOKEN` and registers slash commands on
+startup.
+
+### CLI
+
+```bash
+python -m grocery_butler --help
+python -m grocery_butler plan "tacos" "stir fry" "pasta"
+python -m grocery_butler stock out milk
+python -m grocery_butler restock show
 ```
+
+## API Documentation
+
+Grocery Butler exposes the same domain through three distinct surface areas.
+
+### HTTP / Web API
+
+Constructed by `grocery_butler.app.create_app(db_path: str)`. All routes are
+server-rendered HTML except where noted.
+
+#### Health
+
+| Method | Path | Returns |
+|--------|------|---------|
+| `GET` | `/health` | `200 {"status":"healthy","database":"connected"}` or `503` if the DB is unreachable. JSON. |
+
+#### Dashboard
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Stats overview: restock queue, inventory count, recipe count. |
+
+#### Inventory
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/inventory` | List all tracked inventory items with editable status. |
+| `POST` | `/inventory/add` | Form: `ingredient`, `display_name`, `category`, `status`. |
+| `POST` | `/inventory/update` | **JSON**: `{ "ingredient": "milk", "status": "out" }` -> `{"success":true,"status":"out"}`. |
+
+#### Recipes
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/recipes` | List saved recipes with ingredient counts. |
+| `GET` | `/recipes/add` | Render the add-recipe form. |
+| `POST` | `/recipes/add` | Form: `name`, `servings`, repeated `ing_name_N`, `ing_qty_N`, `ing_unit_N`, `ing_category_N`, `ing_pantry_N`. |
+| `GET` | `/recipes/<id>` | Recipe detail page. |
+| `POST` | `/recipes/<id>/delete` | Delete recipe. |
+
+#### Shopping list
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/shopping-list` | Render the most recently generated shopping list (stored in the Flask session), grouped by category. |
+| `POST` | `/shopping-list/generate` | Form: `meals` (newline-delimited meal names). Runs `MealParser` + `Consolidator` and stores the result in the session. |
+
+#### Pantry staples
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/pantry` | List pantry staples (always-have items). |
+| `POST` | `/pantry/add` | Form: `ingredient`, `category`. |
+| `POST` | `/pantry/<staple_id>/remove` | Delete a staple. |
+
+#### Brand preferences
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/brands` | List preferred and avoided brands grouped by `preference_type`. |
+| `POST` | `/brands/add` | Form: `match_target`, `match_type` (`category`/`ingredient`), `brand`, `preference_type` (`preferred`/`avoid`), `notes`. |
+| `POST` | `/brands/<pref_id>/remove` | Delete a preference. |
+
+#### User preferences
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/preferences` | Render the preferences form. |
+| `POST` | `/preferences` | Form: `default_servings`, `default_units`, `dietary_restrictions`. |
+
+### Discord Bot Commands
+
+All commands are slash commands. Permission defaults to `manage_guild` and can
+be re-mapped per role via Server Settings -> Integrations.
+
+#### Top-level
+
+| Command | Description |
+|---------|-------------|
+| `/meals <names>` | Plan meals (comma- or newline-separated) and post a consolidated shopping list. |
+
+#### `/stock`
+
+| Command | Description |
+|---------|-------------|
+| `/stock show` | Show the full household inventory with status emoji. |
+| `/stock out <item>` | Mark an item as out of stock. |
+| `/stock low <item>` | Mark an item as running low. |
+| `/stock good <item>` | Mark an item as on hand. |
+| `/stock add <item> [category]` | Track a new inventory item. |
+
+#### `/pantry`
+
+| Command | Description |
+|---------|-------------|
+| `/pantry list` | Show all pantry staples. |
+| `/pantry add <ingredient> [category]` | Add a pantry staple. |
+| `/pantry remove <ingredient>` | Remove a pantry staple. |
+
+#### `/restock`
+
+| Command | Description |
+|---------|-------------|
+| `/restock show` | Show the current restock queue (low + out items). |
+| `/restock clear` | Mark all queued items as on hand. |
+
+#### `/brands`
+
+| Command | Description |
+|---------|-------------|
+| `/brands show` | List all brand preferences. |
+| `/brands set <target> <brand> [match_type] [notes]` | Add a preferred brand. |
+| `/brands avoid <target> <brand> [match_type] [notes]` | Add a brand to the avoid list. |
+| `/brands clear <target> <brand>` | Remove a brand preference. |
+
+#### `/recipes`
+
+| Command | Description |
+|---------|-------------|
+| `/recipes list` | List all saved recipes. |
+| `/recipes show <name>` | Show a recipe's details. |
+| `/recipes forget <name>` | Delete a saved recipe. |
+
+#### `/preferences`
+
+| Command | Description |
+|---------|-------------|
+| `/preferences show` | Show current user preferences. |
+| `/preferences set <key> <value>` | Update a preference (`default_servings`, `default_units`, `dietary_restrictions`). |
+
+#### `/order`
+
+| Command | Description |
+|---------|-------------|
+| `/order review <meals>` | Build a Safeway cart from the given meals and show the summary without submitting. |
+| `/order submit <meals>` | Build and submit a Safeway order. |
+
+In addition, sending free-text DMs to the bot triggers natural-language
+inventory parsing (e.g. "we ran out of milk and eggs" -> two `InventoryUpdate`
+records applied to `household_inventory`).
+
+### Command-Line Interface
+
+Invoked via `python -m grocery_butler <subcommand>`. All subcommands share the
+same database path and config (`load_config()` reads `.env`).
+
+#### `plan`
+
+```
+python -m grocery_butler plan <meal> [<meal> ...] [--servings N]
+```
+
+Parse and consolidate a list of meals into a printed shopping list grouped by
+store aisle, applying pantry staples and the restock queue.
+
+#### `stock`
+
+```
+python -m grocery_butler stock show
+python -m grocery_butler stock out <item>
+python -m grocery_butler stock low <item>
+python -m grocery_butler stock good <item>
+python -m grocery_butler stock add <item> [--category <cat>]
+```
+
+#### `restock`
+
+```
+python -m grocery_butler restock show
+python -m grocery_butler restock clear
+```
+
+#### `recipes`
+
+```
+python -m grocery_butler recipes list
+python -m grocery_butler recipes show <name>
+python -m grocery_butler recipes forget <name>
+```
+
+#### `pantry`
+
+```
+python -m grocery_butler pantry list
+python -m grocery_butler pantry add <ingredient> [--category <cat>]
+python -m grocery_butler pantry remove <ingredient>
+```
+
+#### `order`
+
+```
+python -m grocery_butler order review --meals "tacos,pasta"
+python -m grocery_butler order review --items "milk:1:gal,eggs:12:each"
+python -m grocery_butler order submit --meals "..."
+```
+
+Builds (and optionally submits) a Safeway cart. Requires
+`SAFEWAY_USERNAME`/`SAFEWAY_PASSWORD`/`SAFEWAY_STORE_ID` in the environment.
+
+#### `bot`
+
+```
+python -m grocery_butler bot
+```
+
+Starts the Discord worker (equivalent to `python -m grocery_butler.bot`).
+
+### Python Module API
+
+For embedding or scripting, the domain services are importable directly.
+
+```python
+from grocery_butler.config import load_config
+from grocery_butler.recipe_store import RecipeStore
+from grocery_butler.pantry_manager import PantryManager
+from grocery_butler.meal_parser import MealParser
+from grocery_butler.consolidator import Consolidator
+from grocery_butler.safeway_pipeline import SafewayPipeline
+
+cfg = load_config()
+store = RecipeStore(cfg.database_path)
+pantry = PantryManager(cfg.database_path)
+parser = MealParser(store)
+
+meals = parser.parse_meals(["tacos", "stir fry"])
+shopping_list = Consolidator().consolidate_simple(
+    parsed_meals=meals,
+    restock_queue=pantry.get_restock_queue(),
+    pantry_staples=store.get_pantry_staple_names(),
+)
+
+# Optional: build and submit a Safeway order
+pipeline = SafewayPipeline(cfg, cfg.database_path)
+cart = pipeline.build_cart(shopping_list)
+result = pipeline.submit_order(cart)
+```
+
+#### Key classes
+
+| Class | Module | Purpose |
+|-------|--------|---------|
+| `RecipeStore` | `recipe_store` | CRUD for recipes, pantry staples, brand preferences, user preferences. |
+| `PantryManager` | `pantry_manager` | Inventory CRUD, restock queue, NL inventory updates via Claude. |
+| `MealParser` | `meal_parser` | Resolve meal names to `ParsedMeal` (saved recipe or LLM-parsed). |
+| `Consolidator` | `consolidator` | Merge meal ingredients into a deduplicated `ShoppingListItem` list. |
+| `SafewayPipeline` | `safeway_pipeline` | End-to-end Safeway ordering: cart build + order submit. |
+| `SafewayClient` | `safeway_client` | Low-level httpx client for Safeway's API. |
+| `ProductSearchService` | `product_search` | Search Safeway products for a shopping list item. |
+| `ProductSelector` | `product_selector` | Pick the best Safeway product given brand prefs and price sensitivity. |
+| `SubstitutionService` | `substitution_service` | Claude-driven substitution suggestions for out-of-stock items. |
+| `CartBuilder` | `cart_builder` | Assemble a `CartSummary` from selected products. |
+| `OrderService` | `order_service` | Submit an assembled cart to Safeway. |
+
+## Data Model
+
+All domain types live in `grocery_butler/models.py` as Pydantic models. The
+public ones:
+
+| Model | Description |
+|-------|-------------|
+| `Ingredient` | One ingredient with `quantity`, `unit`, `category`, `is_pantry_item`. |
+| `ParsedMeal` | A meal split into `purchase_items` and `pantry_items`. |
+| `ShoppingListItem` | A consolidated item across one or more meals. |
+| `InventoryItem` | A tracked household item with `status` (`on_hand`/`low`/`out`). |
+| `InventoryUpdate` | NL-parsed status change with confidence. |
+| `BrandPreference` | A `preferred`/`avoid` rule scoped to category or ingredient. |
+| `SafewayProduct` | A real Safeway catalog product. |
+| `SubstitutionOption` / `SubstitutionResult` | Substitution candidates and outcomes. |
+| `CartItem` / `CartSummary` | A populated Safeway cart ready for submission. |
+| `FulfillmentOption` | Pickup or delivery window with fee. |
+
+Vocabulary enums (`StrEnum`): `IngredientCategory`, `InventoryStatus`, `Unit`,
+`BrandPreferenceType`, `BrandMatchType`, `PriceSensitivity`,
+`OrganicPreference`, `FulfillmentType`, `SubstitutionSuitability`.
+
+The full schema is in `grocery_butler/db/schema.sql` (SQLite) and
+`grocery_butler/db/schema_pg.sql` (Postgres). The most important rule is
+encoded in the schema's comments:
+
+> Inventory status OVERRIDES pantry staple exclusion.
+> If salt is a pantry staple AND inventory says `out`, it gets INCLUDED in
+> the order. If an item is a pantry staple AND NOT tracked in inventory,
+> assume `on_hand`.
 
 ## Development
 
-### Running Quality Checks
+### Running quality checks
 
 ```bash
 # Run all quality checks (recommended before commit)
-pre-commit run --all-files
+./scripts/check-all.sh
 
 # Or run individual checks:
 ./scripts/test.sh          # Run tests with coverage
 ./scripts/lint.sh          # Run linting
 ./scripts/format.sh --fix  # Auto-format code
 ./scripts/typecheck.sh     # Run type checking
-./scripts/check-all.sh     # Run all checks
+./scripts/security.sh      # Run bandit + pip-audit
+./scripts/complexity.sh    # Run radon/xenon
+./scripts/coverage.sh      # Coverage report (--html for browser view)
+./scripts/mutation.sh      # Mutation testing via mutmut
 ```
 
-### Quality Tools
+Always invoke through `./scripts/*.sh` rather than the underlying tools — the
+scripts pin flags so local and CI behavior match.
 
-This project includes:
-
-- **pytest**: Testing framework with 90%+ coverage requirement
-- **ruff**: Fast Python linter and formatter (replaces flake8, black, isort)
-- **mypy**: Static type checker
-- **bandit**: Security linter
-- **pip-audit**: Dependency vulnerability scanner
-- **radon/xenon**: Code complexity analysis (≤10 cyclomatic complexity)
-- **pre-commit**: Git hooks framework
-
-### Project Structure
+### Project structure
 
 ```
 grocery-butler/
-├── grocery_butler/     # Main package
+├── grocery_butler/
 │   ├── __init__.py
-│   └── main.py
-├── tests/                # Test suite
-│   ├── __init__.py
-│   └── test_main.py
-├── scripts/              # Quality control scripts
-│   ├── check-all.sh
-│   ├── test.sh
-│   ├── lint.sh
-│   ├── format.sh
-│   ├── typecheck.sh
-│   ├── coverage.sh
-│   ├── security.sh
-│   ├── complexity.sh
-│   └── mutation.sh
-├── .github/workflows/    # CI/CD pipelines
-├── .claude/              # AI subagents and skills
-├── requirements.txt      # Runtime dependencies
-├── requirements-dev.txt  # Development dependencies
-├── pyproject.toml        # Tool configurations
-└── .pre-commit-config.yaml  # Pre-commit hooks
+│   ├── __main__.py             # `python -m grocery_butler` entry point
+│   ├── app.py                  # Flask web application
+│   ├── bot.py                  # Discord bot
+│   ├── cli.py                  # argparse CLI
+│   ├── config.py               # .env loader + Config dataclass
+│   ├── claude_utils.py         # Anthropic SDK wrapper
+│   ├── prompt_loader.py        # Prompt template loader
+│   ├── prompts/                # Claude prompt templates
+│   ├── models.py               # Pydantic models + enums
+│   ├── meal_parser.py          # Recipe / meal name -> ParsedMeal
+│   ├── recipe_store.py         # Recipes + staples + brand prefs
+│   ├── pantry_manager.py       # Inventory CRUD + NL parsing
+│   ├── consolidator.py         # Multi-meal -> shopping list
+│   ├── safeway_client.py       # Safeway HTTP client (httpx)
+│   ├── product_search.py       # Search Safeway products
+│   ├── product_selector.py     # Brand/price-aware product picking
+│   ├── substitution_service.py # Claude-driven substitutions
+│   ├── cart_builder.py         # Assemble CartSummary
+│   ├── order_service.py        # Submit Safeway orders
+│   ├── safeway_pipeline.py     # End-to-end ordering pipeline
+│   ├── db/
+│   │   ├── adapter.py          # SQLite/Postgres adapter
+│   │   ├── migrate.py          # Schema migrations
+│   │   ├── schema.sql          # SQLite schema
+│   │   ├── schema_pg.sql       # Postgres schema
+│   │   └── migrations/         # Versioned migration files
+│   ├── templates/              # Jinja2 templates
+│   └── static/                 # Pico CSS + assets
+├── tests/                      # pytest suite (>=90% coverage)
+├── scripts/                    # Quality control scripts
+├── .github/workflows/          # CI/CD pipelines
+├── .claude/                    # AI subagents and skills
+├── pyproject.toml              # Tool configuration
+├── Procfile                    # Railway process definitions
+├── requirements.txt            # Runtime dependencies
+└── requirements-dev.txt        # Development dependencies
 ```
 
-### Testing
+### Quality standards
 
-```bash
-# Run tests
-./scripts/test.sh
+| Standard | Threshold |
+|----------|-----------|
+| Test coverage (branch) | >= 90% |
+| Docstring coverage | >= 95% |
+| Cyclomatic complexity | <= 10 per function |
+| Lint violations | 0 |
+| Type errors (`mypy --strict`) | 0 |
+| Security findings (bandit, pip-audit) | 0 |
 
-# Run tests with coverage report
-./scripts/coverage.sh
-
-# Run tests with HTML coverage report
-./scripts/coverage.sh --html
-# View htmlcov/index.html in browser
-```
-
-### Code Quality
-
-This project maintains MAXIMUM QUALITY standards:
-
-- **Test Coverage**: ≥90% required
-- **Cyclomatic Complexity**: ≤10 per function
-- **All Linters**: Must pass with zero violations
-- **Type Coverage**: 100% type hints
+See `CLAUDE.md` for the full engineering culture document.
 
 ## Deploying to Railway
 
-The project includes a `Procfile` for [Railway](https://railway.app/) deployment with two processes:
+The project includes a `Procfile` for [Railway](https://railway.app/) deployment
+with three processes:
 
 | Process | Command | Description |
 |---------|---------|-------------|
-| `web` | `gunicorn grocery_butler.app:create_app()` | Flask web app |
-| `worker` | `python -m grocery_butler.bot` | Discord bot |
+| `release` | `python -m grocery_butler.db.migrate` | Schema migrations on every deploy. |
+| `web` | `gunicorn 'grocery_butler.app:create_app()'` | Flask web app. |
+| `worker` | `python -m grocery_butler.bot` | Discord bot. |
 
-### Required Environment Variables
+### Required environment variables
 
 Set these in your Railway project settings:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `DATABASE_URL` | Yes | PostgreSQL connection URL (auto-injected by Railway Postgres plugin) |
-| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude-powered features |
-| `DISCORD_BOT_TOKEN` | Yes (worker) | Discord bot token for the worker process |
-| `FLASK_SECRET_KEY` | Yes (web) | Stable secret key for Flask sessions (generate once, reuse) |
-| `SAFEWAY_USERNAME` | Yes | Safeway account username |
-| `SAFEWAY_PASSWORD` | Yes | Safeway account password |
-| `SAFEWAY_STORE_ID` | Yes | Safeway store ID for product searches |
-| `PORT` | Auto | Injected by Railway for the web process |
+| `DATABASE_URL` | Yes | PostgreSQL connection URL (auto-injected by Railway Postgres plugin). |
+| `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude-powered features. |
+| `DISCORD_BOT_TOKEN` | Yes (worker) | Discord bot token for the worker process. |
+| `FLASK_SECRET_KEY` | Yes (web) | Stable secret key for Flask sessions (generate once, reuse). |
+| `SAFEWAY_USERNAME` | Yes (ordering) | Safeway account username. |
+| `SAFEWAY_PASSWORD` | Yes (ordering) | Safeway account password. |
+| `SAFEWAY_STORE_ID` | Yes (ordering) | Safeway store ID for product searches. |
+| `PORT` | Auto | Injected by Railway for the web process. |
 
-### Quick Start
+### Quick start
 
-1. Connect your Railway project to this GitHub repo
-2. Add a PostgreSQL plugin (provides `DATABASE_URL` automatically)
-3. Set the required environment variables above
-4. Railway auto-deploys on push to `main`
+1. Connect your Railway project to this GitHub repo.
+2. Add a PostgreSQL plugin (provides `DATABASE_URL` automatically).
+3. Set the required environment variables above.
+4. Railway auto-deploys on push to `main`; the `release` step runs migrations
+   before `web` and `worker` start.
 
 ## License
 
