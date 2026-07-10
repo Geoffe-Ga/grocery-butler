@@ -119,15 +119,20 @@ def _record_migration(conn: DatabaseConnection, version: int, name: str) -> None
     Uses ``?`` placeholders which the adapter layer translates to
     ``%s`` for PostgreSQL (see :meth:`PostgresConnection.execute`).
 
+    The explicit ``RETURNING version`` prevents the PostgreSQL adapter
+    from injecting ``RETURNING id`` (schema_migrations has no ``id``
+    column; its primary key is ``version``).
+
     Args:
         conn: Active database connection.
         version: Migration version number.
         name: Migration name.
     """
-    conn.execute(
-        "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
+    result = conn.execute(
+        "INSERT INTO schema_migrations (version, name) VALUES (?, ?) RETURNING version",
         (version, name),
     )
+    result.fetchall()  # drain RETURNING so commit sees no open cursor
     conn.commit()
 
 
