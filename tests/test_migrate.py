@@ -196,9 +196,11 @@ class TestRecordMigration:
         mock_conn = MagicMock()
         _record_migration(mock_conn, 5, "test_mig")
         mock_conn.execute.assert_called_once_with(
-            "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
+            "INSERT INTO schema_migrations (version, name) VALUES (?, ?) "
+            "RETURNING version",
             (5, "test_mig"),
         )
+        mock_conn.execute.return_value.fetchall.assert_called_once()
         mock_conn.commit.assert_called_once()
 
 

@@ -6,6 +6,7 @@ including future Safeway models that aren't used yet.
 
 from __future__ import annotations
 
+import datetime as dt
 from enum import StrEnum
 from typing import Any
 
@@ -400,3 +401,49 @@ class CartSummary(BaseModel):
     fulfillment_options: list[FulfillmentOption]
     recommended_fulfillment: FulfillmentType
     estimated_total: float
+
+
+class PendingActionStatus(StrEnum):
+    """Lifecycle status of a staged pending action."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+    EXPIRED = "expired"
+
+
+class PendingAction(BaseModel):
+    """A destructive action staged for confirmation (audit-log row).
+
+    Rows live in the ``pending_actions`` table and record every staged
+    Safeway submission or preference change, whether it was ultimately
+    approved, denied, or expired.
+    """
+
+    action_id: str
+    kind: str
+    payload: dict[str, Any]
+    status: PendingActionStatus = PendingActionStatus.PENDING
+    requester: str = "rubotpaul"
+    expires_at: dt.datetime
+    created_at: dt.datetime | None = None
+    resolved_at: dt.datetime | None = None
+
+    def is_expired(self, now: dt.datetime | None = None) -> bool:
+        """Check whether the confirmation deadline has passed.
+
+        Naive datetimes (as stored by SQLite) are interpreted as UTC.
+
+        Args:
+            now: Reference time; defaults to the current UTC time.
+
+        Returns:
+            True if ``expires_at`` is earlier than ``now``.
+        """
+        reference = now if now is not None else dt.datetime.now(dt.UTC)
+        expires = self.expires_at
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=dt.UTC)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=dt.UTC)
+        return reference > expires
