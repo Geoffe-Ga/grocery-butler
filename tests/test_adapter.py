@@ -16,7 +16,9 @@ from grocery_butler.db.adapter import (
     CursorResult,
     DatabaseConnection,
     IntegrityError,
+    PostgresConnection,
     SQLiteConnection,
+    _has_executable_sql,
     _inject_returning,
     _translate_placeholders,
     create_connection,
@@ -358,6 +360,62 @@ class TestInjectReturning:
         result, injected = _inject_returning(sql)
         assert result == "insert into t (name) values (%s) RETURNING id"
         assert injected is True
+
+
+class TestHasExecutableSql:
+    """Tests for the _has_executable_sql helper."""
+
+    def test_true_for_plain_statement(self) -> None:
+        """Test a real statement is detected as executable."""
+        assert _has_executable_sql("CREATE TABLE t (id INTEGER)") is True
+
+    def test_false_for_empty_string(self) -> None:
+        """Test an empty script has nothing to execute."""
+        assert _has_executable_sql("") is False
+
+    def test_false_for_whitespace_only(self) -> None:
+        """Test a whitespace-only script has nothing to execute."""
+        assert _has_executable_sql("   \n\t\n") is False
+
+    def test_false_for_line_comments_only(self) -> None:
+        """Test a script of only -- comments has nothing to execute."""
+        sql = "-- Migration 003: no-op marker.\n-- Logic lives elsewhere.\n"
+        assert _has_executable_sql(sql) is False
+
+    def test_false_for_block_comments_only(self) -> None:
+        """Test a script of only /* */ comments has nothing to execute."""
+        assert _has_executable_sql("/* nothing\n to run */") is False
+
+    def test_true_for_statement_after_comments(self) -> None:
+        """Test comments followed by a statement is executable."""
+        sql = "-- header comment\nCREATE INDEX idx ON t(c);\n"
+        assert _has_executable_sql(sql) is True
+
+
+class TestPostgresExecutescriptSkipsNoOps:
+    """PostgresConnection.executescript skips comment-only scripts."""
+
+    def test_comment_only_script_is_skipped(self) -> None:
+        """Test no cursor is opened for a comment-only script."""
+        from unittest.mock import MagicMock
+
+        raw = MagicMock()
+        conn = PostgresConnection(raw)
+        conn.executescript("-- no-op migration marker\n")
+        raw.cursor.assert_not_called()
+        raw.commit.assert_not_called()
+
+    def test_real_script_still_executes(self) -> None:
+        """Test scripts with statements execute and commit."""
+        from unittest.mock import MagicMock
+
+        raw = MagicMock()
+        conn = PostgresConnection(raw)
+        conn.executescript("CREATE TABLE t (id INTEGER);")
+        raw.cursor.return_value.execute.assert_called_once_with(
+            "CREATE TABLE t (id INTEGER);"
+        )
+        raw.commit.assert_called_once()
 
 
 # ------------------------------------------------------------------

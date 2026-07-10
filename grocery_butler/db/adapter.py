@@ -385,6 +385,30 @@ def _inject_returning(sql: str) -> tuple[str, bool]:
     return sql, False
 
 
+_LINE_COMMENT_RE: re.Pattern[str] = re.compile(r"--[^\n]*")
+_BLOCK_COMMENT_RE: re.Pattern[str] = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _has_executable_sql(sql: str) -> bool:
+    """Check whether a SQL script contains any executable statements.
+
+    Strips ``--`` line comments and ``/* ... */`` block comments; if
+    nothing but whitespace remains, the script is a no-op. Comment
+    markers inside string literals are not special-cased — migration
+    scripts don't embed them, and a false negative would only skip a
+    script that also contains no other statements.
+
+    Args:
+        sql: Multi-statement SQL string.
+
+    Returns:
+        True if at least one non-comment token remains.
+    """
+    without_blocks = _BLOCK_COMMENT_RE.sub("", sql)
+    without_comments = _LINE_COMMENT_RE.sub("", without_blocks)
+    return bool(without_comments.strip())
+
+
 class PostgresCursorResult:
     """Wraps a ``psycopg2`` cursor to satisfy :class:`CursorResult`.
 
@@ -512,9 +536,15 @@ class PostgresConnection:
         Unlike SQLite's ``executescript()``, psycopg2 handles
         multi-statement strings in a single ``execute()`` call.
 
+        Comment-only scripts (e.g. no-op migration markers) are
+        skipped: sqlite3 tolerates them, but psycopg2 raises
+        ``can't execute an empty query``.
+
         Args:
             sql: Multi-statement SQL string.
         """
+        if not _has_executable_sql(sql):
+            return
         cursor = self._conn.cursor()
         cursor.execute(sql)
         self._conn.commit()
