@@ -60,8 +60,20 @@ def create_app(db_path: str = "mealbot.db") -> Flask:
     _register_error_handlers(app)
     _register_context_processors(app)
     _register_routes(app)
+    _register_api(app)
 
     return app
+
+
+def _register_api(app: Flask) -> None:
+    """Register the RubotPaul-facing /api/v1 JSON blueprint.
+
+    Args:
+        app: Flask application instance.
+    """
+    from grocery_butler.api import api_v1
+
+    app.register_blueprint(api_v1)
 
 
 def _get_db() -> DatabaseConnection:
@@ -220,6 +232,15 @@ def _register_health_routes(app: Flask) -> None:
                 jsonify({"status": "unhealthy", "database": "disconnected"}),
                 503,
             )
+
+    @app.route("/healthz")
+    def healthz() -> tuple[Response, int]:
+        """Return a minimal liveness probe for RubotPaul.
+
+        Returns:
+            JSON response with ok flag and HTTP status code.
+        """
+        return jsonify({"ok": True}), 200
 
 
 def _register_dashboard_routes(app: Flask) -> None:
