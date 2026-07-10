@@ -41,6 +41,7 @@ This is a small system with a serious intention: give back the hours that
 - [Running the System](#running-the-system)
 - [API Documentation](#api-documentation)
   - [HTTP / Web API](#http--web-api)
+  - [RubotPaul Integration (/api/v1)](#rubotpaul-integration-apiv1)
   - [Discord Bot Commands](#discord-bot-commands)
   - [Command-Line Interface](#command-line-interface)
   - [Python Module API](#python-module-api)
@@ -136,17 +137,20 @@ on Railway Postgres. Schema is defined declaratively in `db/schema.sql` and
 
 ### Process Topology
 
-In production (Railway), the system runs as **two long-lived processes** plus
+In production (Railway), the system runs as **one long-lived web process** plus
 a one-shot release step:
 
 | Process | Command | Role |
 |---------|---------|------|
 | `release` | `python -m grocery_butler.db.migrate` | Run schema migrations on every deploy. |
-| `web` | `gunicorn 'grocery_butler.app:create_app()'` | Flask dashboard + JSON endpoints. |
-| `worker` | `python -m grocery_butler.bot` | Discord bot, listens to slash commands and DMs. |
+| `web` | `gunicorn 'grocery_butler.app:create_app()'` | Flask dashboard + the `/api/v1` JSON API for RubotPaul. |
 
-Both processes share the same database. The CLI is invoked ad-hoc as a
-single-shot process (no daemon).
+The single web process serves both the kitchen-phone HTML UI and the
+HMAC-authenticated `/api/v1` blueprint. The former `worker` process
+(`python -m grocery_butler.bot`) is retired from deployment: RubotPaul is the
+household's Discord interface and drives grocery-butler through `/api/v1`. The
+bot module stays in the codebase and can still be run locally. The CLI is
+invoked ad-hoc as a single-shot process (no daemon).
 
 ### Key Design Rules
 
@@ -265,7 +269,8 @@ $EDITOR .env
 | Variable | When required | Purpose |
 |----------|---------------|---------|
 | `ANTHROPIC_API_KEY` | Always | Claude API access for parsing and consolidation. |
-| `DISCORD_BOT_TOKEN` | Discord worker only | Authenticates the bot. |
+| `RUBOTPAUL_SHARED_SECRET` | RubotPaul API | HMAC secret for `/api/v1` bearer tokens (shared with RubotPaul). |
+| `DISCORD_BOT_TOKEN` | Local bot runs only | Authenticates the (retired-from-production) Discord bot. |
 | `FLASK_SECRET_KEY` | Web (production) | Stable session signing key. |
 | `DATABASE_PATH` | SQLite (dev) | Path to the local SQLite file. Defaults to `mealbot.db`. |
 | `DATABASE_URL` | Postgres (prod) | Connection URL injected by Railway Postgres. |
@@ -287,14 +292,16 @@ FLASK_APP='grocery_butler.app:create_app()' flask run --debug
 
 Open <http://localhost:5000>.
 
-### Discord bot
+### Discord bot (local only — retired from production)
 
 ```bash
 python -m grocery_butler.bot
 ```
 
 The bot connects with `DISCORD_BOT_TOKEN` and registers slash commands on
-startup.
+startup. In production this process no longer runs: RubotPaul owns the
+Discord side and talks to grocery-butler through the
+[RubotPaul integration API](#rubotpaul-integration-apiv1).
 
 ### CLI
 
@@ -374,7 +381,37 @@ server-rendered HTML except where noted.
 | `GET` | `/preferences` | Render the preferences form. |
 | `POST` | `/preferences` | Form: `default_servings`, `default_units`, `dietary_restrictions`. |
 
+### RubotPaul Integration (/api/v1)
+
+RubotPaul (the household's OpenClaw assistant) drives grocery-butler through a
+JSON API served by the same web process as the HTML UI — the web UI is
+unchanged. The blueprint lives in `grocery_butler/api.py` and is registered by
+`create_app()`.
+
+- **Base URL:** `https://grocery-butler.tailnet.ts.net/api/v1` — reached over
+  the Tailscale tailnet; the API is not meant to be exposed on the public
+  Railway domain.
+- **Auth:** every `/api/v1` route requires a bearer token in the
+  `<caller_id>.<timestamp>.<hmac_hex>` format, signed with
+  `RUBOTPAUL_SHARED_SECRET` (HMAC-SHA256, 5-minute TTL). Mint with
+  `grocery_butler.auth_middleware.mint_token`. An unauthenticated
+  `GET /healthz` liveness probe is exempt.
+- **Surface:** read endpoints (`/inventory`, `/pantry`, `/recipes`, `/brands`,
+  `/preferences`, `/restock`), compute previews (`/meals/parse`,
+  `/shopping-list/preview`, `/order/preview`), low-stakes writes
+  (`/stock/update`, `/stock/add`, `/restock/clear`, `/recipes/save`,
+  `DELETE /recipes/<id>`), and staged destructive actions (`/order/submit`,
+  `/brands/set`, `/preferences/set` → `/actions/confirm` / `/actions/deny`
+  against the `pending_actions` audit table).
+- **Safety:** destructive actions follow draft → confirm → execute. Staging
+  returns a `pending_confirmation` action id with a 5-minute expiry; nothing
+  executes until RubotPaul confirms after Geoff replies "confirm" in chat.
+
 ### Discord Bot Commands
+
+> **Retired from production.** RubotPaul replaces the standalone bot as the
+> Discord interface; these commands remain available when running the bot
+> locally.
 
 All commands are slash commands. Permission defaults to `manage_guild` and can
 be re-mapped per role via Server Settings -> Integrations.
@@ -670,13 +707,16 @@ See `CLAUDE.md` for the full engineering culture document.
 ## Deploying to Railway
 
 The project includes a `Procfile` for [Railway](https://railway.app/) deployment
-with three processes:
+with two processes:
 
 | Process | Command | Description |
 |---------|---------|-------------|
 | `release` | `python -m grocery_butler.db.migrate` | Schema migrations on every deploy. |
-| `web` | `gunicorn 'grocery_butler.app:create_app()'` | Flask web app. |
-| `worker` | `python -m grocery_butler.bot` | Discord bot. |
+| `web` | `gunicorn 'grocery_butler.app:create_app()'` | Flask web app + `/api/v1` RubotPaul API. |
+
+The former `worker` process (Discord bot) is retired; RubotPaul reaches the
+`/api/v1` blueprint over Tailscale at
+`https://grocery-butler.tailnet.ts.net/api/v1`.
 
 ### Required environment variables
 
@@ -686,7 +726,7 @@ Set these in your Railway project settings:
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL connection URL (auto-injected by Railway Postgres plugin). |
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude-powered features. |
-| `DISCORD_BOT_TOKEN` | Yes (worker) | Discord bot token for the worker process. |
+| `RUBOTPAUL_SHARED_SECRET` | Yes (RubotPaul API) | HMAC secret for `/api/v1` bearer tokens; must match RubotPaul's copy. |
 | `FLASK_SECRET_KEY` | Yes (web) | Stable secret key for Flask sessions (generate once, reuse). |
 | `SAFEWAY_USERNAME` | Yes (ordering) | Safeway account username. |
 | `SAFEWAY_PASSWORD` | Yes (ordering) | Safeway account password. |
@@ -699,7 +739,9 @@ Set these in your Railway project settings:
 2. Add a PostgreSQL plugin (provides `DATABASE_URL` automatically).
 3. Set the required environment variables above.
 4. Railway auto-deploys on push to `main`; the `release` step runs migrations
-   before `web` and `worker` start.
+   before `web` starts.
+5. Attach the Railway service to your Tailscale tailnet so RubotPaul can reach
+   `/api/v1` privately.
 
 ## License
 
