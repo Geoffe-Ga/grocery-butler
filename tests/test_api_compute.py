@@ -1,0 +1,479 @@
+"""Tests for the /api/v1 compute endpoints (grocery_butler.api blueprint).
+
+Covers POST /api/v1/meals/parse, /api/v1/shopping-list/preview, and
+/api/v1/order/preview. The Claude / Safeway pipelines are mocked — no
+live API calls happen here.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from flask import Flask
+    from flask.testing import FlaskClient
+
+from grocery_butler.app import create_app
+from grocery_butler.auth_middleware import SECRET_ENV_VAR, mint_token
+from grocery_butler.models import (
+    CartItem,
+    CartSummary,
+    FulfillmentType,
+    Ingredient,
+    IngredientCategory,
+    InventoryItem,
+    InventoryStatus,
+    ParsedMeal,
+    SafewayProduct,
+    ShoppingListItem,
+    Unit,
+)
+from grocery_butler.pantry_manager import PantryManager
+from grocery_butler.recipe_store import RecipeStore
+from grocery_butler.safeway_pipeline import SafewayPipelineError
+
+TEST_SECRET = "test-shared-secret"
+SECRET_ENV = {SECRET_ENV_VAR: TEST_SECRET}
+
+COMPUTE_ENDPOINTS = [
+    "/api/v1/meals/parse",
+    "/api/v1/shopping-list/preview",
+    "/api/v1/order/preview",
+]
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def db_path(tmp_path: Path) -> str:
+    """Return a temporary database path for test isolation."""
+    return str(tmp_path / "test_api_compute.db")
+
+
+@pytest.fixture()
+def app(db_path: str) -> Flask:
+    """Create a Flask test app with a temporary database."""
+    application = create_app(db_path=db_path)
+    application.config["TESTING"] = True
+    return application
+
+
+@pytest.fixture()
+def client(app: Flask) -> FlaskClient:
+    """Return a Flask test client."""
+    return app.test_client()
+
+
+@pytest.fixture()
+def pantry_mgr(db_path: str) -> PantryManager:
+    """Return a PantryManager bound to the test database."""
+    return PantryManager(db_path)
+
+
+@pytest.fixture()
+def recipe_store(db_path: str) -> RecipeStore:
+    """Return a RecipeStore bound to the test database."""
+    return RecipeStore(db_path)
+
+
+@pytest.fixture()
+def auth_headers() -> dict[str, str]:
+    """Return a valid Authorization header minted with the test secret."""
+    with patch.dict(os.environ, SECRET_ENV):
+        token = mint_token("rubotpaul")
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _make_meal(name: str = "test pasta") -> ParsedMeal:
+    """Return a ParsedMeal with one purchase item."""
+    return ParsedMeal(
+        name=name,
+        servings=4,
+        known_recipe=True,
+        needs_confirmation=False,
+        purchase_items=[
+            Ingredient(
+                ingredient="pasta",
+                quantity=1.0,
+                unit="lb",
+                category=IngredientCategory.PANTRY_DRY,
+            ),
+        ],
+        pantry_items=[],
+    )
+
+
+def _make_shopping_item(ingredient: str = "pasta") -> ShoppingListItem:
+    """Return a ShoppingListItem for order previews."""
+    return ShoppingListItem(
+        ingredient=ingredient,
+        quantity=1.0,
+        unit=Unit.LB,
+        category=IngredientCategory.PANTRY_DRY,
+        search_term=ingredient,
+        from_meals=["test pasta"],
+    )
+
+
+def _make_cart_item(ingredient: str, cost: float) -> CartItem:
+    """Return a CartItem with the given estimated cost."""
+    return CartItem(
+        shopping_list_item=_make_shopping_item(ingredient),
+        safeway_product=SafewayProduct(
+            product_id=f"prod-{ingredient}",
+            name=f"Brand {ingredient}",
+            price=cost,
+            size="1 lb",
+        ),
+        quantity_to_order=1,
+        estimated_cost=cost,
+    )
+
+
+def _make_cart(costs: dict[str, float]) -> CartSummary:
+    """Return a CartSummary with one item per (ingredient, cost) pair."""
+    items = [_make_cart_item(name, cost) for name, cost in costs.items()]
+    return CartSummary(
+        items=items,
+        failed_items=[],
+        substituted_items=[],
+        restock_items=[],
+        subtotal=sum(costs.values()),
+        fulfillment_options=[],
+        recommended_fulfillment=FulfillmentType.PICKUP,
+        estimated_total=sum(costs.values()),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Auth: every compute endpoint rejects unauthenticated requests, with JSON
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestAuthRequired:
+    """All compute endpoints must reject requests without a valid bearer."""
+
+    @pytest.mark.parametrize("path", COMPUTE_ENDPOINTS)
+    def test_missing_bearer_returns_401(self, client: FlaskClient, path: str) -> None:
+        """Requests without an Authorization header get 401."""
+        response = client.post(path, json={})
+        assert response.status_code == 401
+
+    @pytest.mark.parametrize("path", COMPUTE_ENDPOINTS)
+    def test_garbage_bearer_returns_401(self, client: FlaskClient, path: str) -> None:
+        """Requests with an invalid token get 401."""
+        response = client.post(
+            path, json={}, headers={"Authorization": "Bearer not-a-real-token"}
+        )
+        assert response.status_code == 401
+
+    @pytest.mark.parametrize("path", COMPUTE_ENDPOINTS)
+    def test_401_body_is_json(self, client: FlaskClient, path: str) -> None:
+        """API auth failures return a JSON error body, not HTML."""
+        response = client.post(path, json={})
+        assert response.content_type.startswith("application/json")
+        assert "error" in response.get_json()
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/meals/parse
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestMealsParse:
+    """POST /api/v1/meals/parse."""
+
+    @pytest.mark.parametrize("body", [{}, {"text": ""}, {"text": "   "}])
+    def test_empty_text_returns_400(
+        self, client: FlaskClient, auth_headers: dict[str, str], body: dict[str, str]
+    ) -> None:
+        """Missing or blank text is a 400 with a JSON error."""
+        response = client.post("/api/v1/meals/parse", json=body, headers=auth_headers)
+        assert response.status_code == 400
+        assert "error" in response.get_json()
+
+    def test_non_object_body_returns_400(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """A non-object JSON body is a 400."""
+        response = client.post(
+            "/api/v1/meals/parse", json=["tacos"], headers=auth_headers
+        )
+        assert response.status_code == 400
+
+    def test_parses_comma_and_newline_separated_meals(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Meal names split on commas and newlines reach parse_meals."""
+        parser = MagicMock()
+        parser.parse_meals.return_value = [_make_meal("tacos"), _make_meal("pasta")]
+        with patch("grocery_butler.api._meal_parser", return_value=parser):
+            response = client.post(
+                "/api/v1/meals/parse",
+                json={"text": "tacos, pasta\nchili"},
+                headers=auth_headers,
+            )
+        assert response.status_code == 200
+        parser.parse_meals.assert_called_once_with(["tacos", "pasta", "chili"])
+
+    def test_serializes_parsed_meals(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """The parsed meals come back JSON-serialized."""
+        parser = MagicMock()
+        parser.parse_meals.return_value = [_make_meal("tacos")]
+        with patch("grocery_butler.api._meal_parser", return_value=parser):
+            response = client.post(
+                "/api/v1/meals/parse", json={"text": "tacos"}, headers=auth_headers
+            )
+        assert response.status_code == 200
+        meals = response.get_json()["meals"]
+        assert len(meals) == 1
+        assert meals[0]["name"] == "tacos"
+        assert meals[0]["purchase_items"][0]["ingredient"] == "pasta"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/shopping-list/preview
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestShoppingListPreview:
+    """POST /api/v1/shopping-list/preview."""
+
+    def test_invalid_meals_returns_400(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Meals that fail ParsedMeal validation are a 400."""
+        response = client.post(
+            "/api/v1/shopping-list/preview",
+            json={"meals": [{"name": "incomplete"}]},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+        assert "error" in response.get_json()
+
+    def test_meals_must_be_a_list(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """A non-list meals field is a 400."""
+        response = client.post(
+            "/api/v1/shopping-list/preview",
+            json={"meals": "tacos"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+
+    def test_consolidates_with_restock_and_staples(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pantry_mgr: PantryManager,
+        recipe_store: RecipeStore,
+    ) -> None:
+        """The consolidator gets parsed meals, restock queue, and staples."""
+        pantry_mgr.add_item(
+            InventoryItem(
+                ingredient="milk",
+                display_name="Milk",
+                category=IngredientCategory.DAIRY,
+                status=InventoryStatus.ON_HAND,
+            )
+        )
+        pantry_mgr.update_status("milk", InventoryStatus.OUT)
+        recipe_store.add_pantry_staple("saffron", IngredientCategory.PANTRY_DRY.value)
+
+        consolidator = MagicMock()
+        consolidator.consolidate.return_value = [_make_shopping_item()]
+        meal = _make_meal("tacos")
+        with patch("grocery_butler.api._consolidator", return_value=consolidator):
+            response = client.post(
+                "/api/v1/shopping-list/preview",
+                json={"meals": [meal.model_dump(mode="json")]},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        kwargs = consolidator.consolidate.call_args.kwargs
+        assert kwargs["meals"] == [meal]
+        assert [i.ingredient for i in kwargs["restock_queue"]] == ["milk"]
+        assert "saffron" in kwargs["pantry_staples"]
+        items = response.get_json()["items"]
+        assert len(items) == 1
+        assert items[0]["ingredient"] == "pasta"
+
+    def test_include_restock_false_skips_restock_queue(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pantry_mgr: PantryManager,
+    ) -> None:
+        """include_restock=false keeps the restock queue out of the call."""
+        pantry_mgr.add_item(
+            InventoryItem(
+                ingredient="milk",
+                display_name="Milk",
+                category=IngredientCategory.DAIRY,
+                status=InventoryStatus.ON_HAND,
+            )
+        )
+        pantry_mgr.update_status("milk", InventoryStatus.OUT)
+
+        consolidator = MagicMock()
+        consolidator.consolidate.return_value = []
+        with patch("grocery_butler.api._consolidator", return_value=consolidator):
+            response = client.post(
+                "/api/v1/shopping-list/preview",
+                json={
+                    "meals": [_make_meal().model_dump(mode="json")],
+                    "include_restock": False,
+                },
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        assert consolidator.consolidate.call_args.kwargs["restock_queue"] == []
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/order/preview
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestOrderPreview:
+    """POST /api/v1/order/preview."""
+
+    @pytest.mark.parametrize("body", [{}, {"shopping_list": []}])
+    def test_empty_shopping_list_returns_400(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        body: dict[str, object],
+    ) -> None:
+        """A missing or empty shopping_list is a 400."""
+        response = client.post("/api/v1/order/preview", json=body, headers=auth_headers)
+        assert response.status_code == 400
+        assert "error" in response.get_json()
+
+    def test_invalid_shopping_list_item_returns_400(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Items that fail ShoppingListItem validation are a 400."""
+        response = client.post(
+            "/api/v1/order/preview",
+            json={"shopping_list": [{"ingredient": "pasta"}]},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+
+    def test_builds_cart_and_returns_decimal_safe_total(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """0.1 + 0.2 comes back as exactly "0.3", not a float artifact."""
+        pipeline = MagicMock()
+        pipeline.build_cart_only.return_value = _make_cart({"pasta": 0.1, "beans": 0.2})
+        item = _make_shopping_item()
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/order/preview",
+                json={"shopping_list": [item.model_dump(mode="json")]},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        pipeline.build_cart_only.assert_called_once_with([item])
+        pipeline.close.assert_called_once_with()
+        body = response.get_json()
+        assert body["total"] == "0.3"
+        assert len(body["cart"]["items"]) == 2
+
+    def test_restock_items_count_toward_total(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Restock cart items are part of the Decimal-safe total."""
+        cart = _make_cart({"pasta": 1.25})
+        cart = cart.model_copy(
+            update={"restock_items": [_make_cart_item("milk", 2.50)]}
+        )
+        pipeline = MagicMock()
+        pipeline.build_cart_only.return_value = cart
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/order/preview",
+                json={"shopping_list": [_make_shopping_item().model_dump(mode="json")]},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        assert response.get_json()["total"] == "3.75"
+
+    def test_pipeline_error_returns_503(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Safeway pipeline failures surface as a JSON 503."""
+        with patch(
+            "grocery_butler.api._safeway_pipeline",
+            side_effect=SafewayPipelineError("no credentials"),
+        ):
+            response = client.post(
+                "/api/v1/order/preview",
+                json={"shopping_list": [_make_shopping_item().model_dump(mode="json")]},
+                headers=auth_headers,
+            )
+        assert response.status_code == 503
+        assert "error" in response.get_json()
+
+    def test_pipeline_closed_even_when_build_fails(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """The Safeway client is cleaned up when cart building raises."""
+        pipeline = MagicMock()
+        pipeline.build_cart_only.side_effect = SafewayPipelineError("auth failed")
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/order/preview",
+                json={"shopping_list": [_make_shopping_item().model_dump(mode="json")]},
+                headers=auth_headers,
+            )
+        assert response.status_code == 503
+        pipeline.close.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# Anthropic client helper
+# ---------------------------------------------------------------------------
+
+
+class TestAnthropicClientHelper:
+    """grocery_butler.api._anthropic_client."""
+
+    def test_returns_none_without_api_key(self) -> None:
+        """No ANTHROPIC_API_KEY means no client (pure-Python fallbacks)."""
+        from grocery_butler.api import _anthropic_client
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+            assert _anthropic_client() is None
+
+    def test_builds_client_from_env_key(self) -> None:
+        """A configured key is passed through to make_anthropic_client."""
+        from grocery_butler import api
+
+        with (
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}),
+            patch.object(api, "make_anthropic_client") as factory,
+        ):
+            factory.return_value = object()
+            assert api._anthropic_client() is factory.return_value
+        factory.assert_called_once_with("sk-test")
