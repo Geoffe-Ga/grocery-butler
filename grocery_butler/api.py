@@ -8,20 +8,38 @@ ships in the same Railway web process.
 
 from __future__ import annotations
 
+import os
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from flask import Blueprint, current_app, jsonify
+from flask import Blueprint, abort, current_app, jsonify, request
+from pydantic import ValidationError
 
 from grocery_butler.auth_middleware import require_bearer
+from grocery_butler.claude_utils import make_anthropic_client
+from grocery_butler.config import ConfigError, load_config
+from grocery_butler.consolidator import Consolidator
+from grocery_butler.meal_parser import MealParser
+from grocery_butler.models import ParsedMeal, ShoppingListItem
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
+from grocery_butler.safeway_pipeline import SafewayPipeline, SafewayPipelineError
 
 if TYPE_CHECKING:
     from flask import Response
+    from werkzeug.exceptions import HTTPException
 
-    from grocery_butler.models import BrandPreference, InventoryItem
+    from grocery_butler.models import BrandPreference, CartSummary, InventoryItem
 
 api_v1 = Blueprint("api_v1", __name__, url_prefix="/api/v1")
+
+
+@api_v1.errorhandler(400)
+@api_v1.errorhandler(401)
+@api_v1.errorhandler(404)
+def _json_http_error(exc: HTTPException) -> tuple[Response, int]:
+    """Render blueprint HTTP errors as JSON instead of Flask's HTML."""
+    return jsonify(error=exc.description), exc.code or 500
 
 
 def _pantry_manager() -> PantryManager:
@@ -32,6 +50,49 @@ def _pantry_manager() -> PantryManager:
 def _recipe_store() -> RecipeStore:
     """Return a RecipeStore bound to the app's database."""
     return RecipeStore(current_app.config["DATABASE_PATH"])
+
+
+def _anthropic_client() -> Any | None:
+    """Return an Anthropic client from the environment, or None.
+
+    Without a key the Claude-backed pipelines fall back to their
+    pure-Python paths (stored recipes, simple consolidation).
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None
+    return make_anthropic_client(api_key)
+
+
+def _meal_parser() -> MealParser:
+    """Return a MealParser wired to the app's database and Claude."""
+    return MealParser(_recipe_store(), _anthropic_client())
+
+
+def _consolidator() -> Consolidator:
+    """Return a Consolidator wired to Claude when available."""
+    return Consolidator(anthropic_client=_anthropic_client())
+
+
+def _safeway_pipeline() -> SafewayPipeline:
+    """Return a SafewayPipeline for the app's database.
+
+    Raises:
+        ConfigError: If required environment configuration is missing.
+        SafewayPipelineError: If Safeway credentials are missing.
+    """
+    config = load_config()
+    return SafewayPipeline(
+        config, current_app.config["DATABASE_PATH"], _anthropic_client()
+    )
+
+
+def _json_body() -> dict[str, Any]:
+    """Return the request's JSON object body, or abort 400."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        abort(400, description="request body must be a JSON object")
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -107,3 +168,97 @@ def get_restock() -> Response:
     require_bearer()
     items = _pantry_manager().get_restock_queue()
     return jsonify(items=[_item(i) for i in items])
+
+
+# ---------------------------------------------------------------------------
+# Compute endpoints (read-only, no writes)
+# ---------------------------------------------------------------------------
+
+
+def _split_meal_names(text: str) -> list[str]:
+    """Split free text into meal names on newlines and commas."""
+    return [
+        name.strip()
+        for line in text.split("\n")
+        for name in line.split(",")
+        if name.strip()
+    ]
+
+
+def _parse_meal_payloads(raw_meals: Any) -> list[ParsedMeal]:
+    """Validate raw meal payloads into ParsedMeal models, or abort 400."""
+    if not isinstance(raw_meals, list):
+        abort(400, description="meals must be a list of meal objects")
+    try:
+        return [ParsedMeal.model_validate(meal) for meal in raw_meals]
+    except ValidationError as exc:
+        abort(400, description=f"invalid meal payload: {exc.error_count()} error(s)")
+
+
+def _parse_shopping_list_payloads(raw_items: Any) -> list[ShoppingListItem]:
+    """Validate raw shopping list payloads, or abort 400."""
+    if not isinstance(raw_items, list) or not raw_items:
+        abort(400, description="shopping_list required")
+    try:
+        return [ShoppingListItem.model_validate(item) for item in raw_items]
+    except ValidationError as exc:
+        abort(
+            400,
+            description=f"invalid shopping list item: {exc.error_count()} error(s)",
+        )
+
+
+def _cart_total(cart: CartSummary) -> Decimal:
+    """Sum item and restock costs without float artifacts."""
+    return sum(
+        (
+            Decimal(str(cart_item.estimated_cost))
+            for cart_item in [*cart.items, *cart.restock_items]
+        ),
+        Decimal("0"),
+    )
+
+
+@api_v1.post("/meals/parse")
+def post_meals_parse() -> Response:
+    """Parse free-text meal names into structured ingredient lists."""
+    require_bearer()
+    text = str(_json_body().get("text", "")).strip()
+    if not text:
+        abort(400, description="text required")
+    meals = _meal_parser().parse_meals(_split_meal_names(text))
+    return jsonify(meals=[meal.model_dump(mode="json") for meal in meals])
+
+
+@api_v1.post("/shopping-list/preview")
+def post_shopping_list_preview() -> Response:
+    """Consolidate meals into a shopping list without persisting anything."""
+    require_bearer()
+    body = _json_body()
+    meals = _parse_meal_payloads(body.get("meals", []))
+    include_restock = bool(body.get("include_restock", True))
+    restock_queue = _pantry_manager().get_restock_queue() if include_restock else []
+    items = _consolidator().consolidate(
+        meals=meals,
+        restock_queue=restock_queue,
+        pantry_staples=_recipe_store().get_pantry_staple_names(),
+    )
+    return jsonify(items=[item.model_dump(mode="json") for item in items])
+
+
+@api_v1.post("/order/preview")
+def post_order_preview() -> Response | tuple[Response, int]:
+    """Build a Safeway cart for review without submitting an order."""
+    require_bearer()
+    shopping_list = _parse_shopping_list_payloads(_json_body().get("shopping_list"))
+    try:
+        pipeline = _safeway_pipeline()
+    except (ConfigError, SafewayPipelineError) as exc:
+        return jsonify(error=f"safeway pipeline unavailable: {exc}"), 503
+    try:
+        cart = pipeline.build_cart_only(shopping_list)
+    except SafewayPipelineError as exc:
+        return jsonify(error=f"cart build failed: {exc}"), 503
+    finally:
+        pipeline.close()
+    return jsonify(cart=cart.model_dump(mode="json"), total=str(_cart_total(cart)))
