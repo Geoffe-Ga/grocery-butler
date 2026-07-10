@@ -97,6 +97,7 @@ disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
 module = [
+    "aiohttp.*",
     "pydantic.*",
     "dotenv.*",
     "httpx.*",
