@@ -8,7 +8,10 @@ ships in the same Railway web process.
 
 from __future__ import annotations
 
+import dataclasses
+import datetime as dt
 import os
+import uuid
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -22,29 +25,40 @@ from grocery_butler.consolidator import Consolidator
 from grocery_butler.db.adapter import IntegrityError
 from grocery_butler.meal_parser import MealParser
 from grocery_butler.models import (
+    BrandPreference,
+    CartSummary,
     Ingredient,
     IngredientCategory,
     InventoryItem,
     InventoryStatus,
     ParsedMeal,
+    PendingActionStatus,
     ShoppingListItem,
 )
 from grocery_butler.pantry_manager import PantryManager
+from grocery_butler.pending_actions import PendingActionsStore
 from grocery_butler.recipe_store import RecipeStore
 from grocery_butler.safeway_pipeline import SafewayPipeline, SafewayPipelineError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from flask import Response
     from werkzeug.exceptions import HTTPException
 
-    from grocery_butler.models import BrandPreference, CartSummary
+    from grocery_butler.models import PendingAction
 
 api_v1 = Blueprint("api_v1", __name__, url_prefix="/api/v1")
+
+#: How long a staged destructive action stays confirmable.
+CONFIRMATION_TTL = dt.timedelta(minutes=5)
 
 
 @api_v1.errorhandler(400)
 @api_v1.errorhandler(401)
 @api_v1.errorhandler(404)
+@api_v1.errorhandler(409)
+@api_v1.errorhandler(410)
 def _json_http_error(exc: HTTPException) -> tuple[Response, int]:
     """Render blueprint HTTP errors as JSON instead of Flask's HTML."""
     return jsonify(error=exc.description), exc.code or 500
@@ -394,3 +408,232 @@ def delete_recipe(recipe_id: int) -> tuple[str, int]:
         abort(404, description="recipe not found")
     store.delete_recipe(recipe_id)
     return "", 204
+
+
+# ---------------------------------------------------------------------------
+# Destructive endpoints (staged confirmation: draft -> confirm -> execute)
+#
+# The chat-reply confirmation pattern from PIVOT.md: these endpoints stage
+# a pending_actions row (the audit log) and return an action_id. RubotPaul
+# posts the draft to chat and calls /actions/confirm only after the user
+# replies "confirm". Nothing destructive happens at staging time.
+# ---------------------------------------------------------------------------
+
+
+def _pending_store() -> PendingActionsStore:
+    """Return a PendingActionsStore bound to the app's database."""
+    return PendingActionsStore(current_app.config["DATABASE_PATH"])
+
+
+def _stage_pending(kind: str, payload: dict[str, Any]) -> str:
+    """Stage a pending action with the standard TTL; return its action_id."""
+    action = _pending_store().insert_pending_action(
+        action_id=str(uuid.uuid4()),
+        kind=kind,
+        payload=payload,
+        expires_at=dt.datetime.now(dt.UTC) + CONFIRMATION_TTL,
+    )
+    return action.action_id
+
+
+def _parse_cart_payload(body: dict[str, Any]) -> CartSummary:
+    """Validate the request's cart into a CartSummary, or abort 400."""
+    raw_cart = body.get("cart")
+    if raw_cart is None:
+        abort(400, description="cart required")
+    try:
+        cart = CartSummary.model_validate(raw_cart)
+    except ValidationError as exc:
+        abort(400, description=f"invalid cart: {exc.error_count()} error(s)")
+    if not cart.items and not cart.restock_items:
+        abort(400, description="cart is empty — nothing to order")
+    return cart
+
+
+@api_v1.post("/order/submit")
+def post_order_submit() -> Response:
+    """Stage a Safeway order for confirmation. Never submits directly."""
+    require_bearer()
+    body = _json_body()
+    cart = _parse_cart_payload(body)
+    total = str(body.get("total") or _cart_total(cart))
+    action_id = _stage_pending(
+        "safeway_order_submit",
+        {"cart": cart.model_dump(mode="json"), "total": total},
+    )
+    item_count = len(cart.items) + len(cart.restock_items)
+    return jsonify(
+        status="pending_confirmation",
+        action_id=action_id,
+        message=(
+            f"Staged Safeway order ({item_count} items, ${total}). "
+            "Reply 'confirm' to submit."
+        ),
+    )
+
+
+@api_v1.post("/brands/set")
+def post_brands_set() -> Response:
+    """Stage a brand preference rule for confirmation."""
+    require_bearer()
+    body = _json_body()
+    try:
+        pref = BrandPreference.model_validate(body)
+    except ValidationError as exc:
+        abort(400, description=f"invalid brand rule: {exc.error_count()} error(s)")
+    action_id = _stage_pending("brands_set", pref.model_dump(mode="json"))
+    return jsonify(
+        status="pending_confirmation",
+        action_id=action_id,
+        message=(
+            f"Staged brand rule: {pref.preference_type.value} '{pref.brand}' "
+            f"for {pref.match_target}. Reply 'confirm' to apply."
+        ),
+    )
+
+
+def _parse_preferences_payload(body: dict[str, Any]) -> dict[str, str]:
+    """Validate a non-empty string-to-string preferences map, or abort 400."""
+    preferences = body.get("preferences")
+    if not isinstance(preferences, dict) or not preferences:
+        abort(400, description="preferences must be a non-empty object")
+    # JSON object keys are always strings; only values need checking.
+    if not all(isinstance(value, str) for value in preferences.values()):
+        abort(400, description="preference values must be strings")
+    return preferences
+
+
+@api_v1.post("/preferences/set")
+def post_preferences_set() -> Response:
+    """Stage app-level preference changes for confirmation."""
+    require_bearer()
+    preferences = _parse_preferences_payload(_json_body())
+    action_id = _stage_pending("preferences_set", {"preferences": preferences})
+    keys = ", ".join(sorted(preferences))
+    return jsonify(
+        status="pending_confirmation",
+        action_id=action_id,
+        message=f"Staged preference change ({keys}). Reply 'confirm' to apply.",
+    )
+
+
+def _load_pending_action(body: dict[str, Any]) -> PendingAction:
+    """Fetch the pending action named by the request body, or abort 400/404."""
+    action_id = body.get("action_id")
+    if not isinstance(action_id, str) or not action_id.strip():
+        abort(400, description="action_id required")
+    action = _pending_store().get_pending_action(action_id.strip())
+    if action is None:
+        abort(404, description="unknown action_id")
+    return action
+
+
+def _claim_pending(store: PendingActionsStore, action_id: str) -> None:
+    """Atomically claim a pending action as approved, or abort 409.
+
+    The guarded UPDATE in the store is the exactly-once gate: only one
+    caller can transition the row out of ``pending``, so a raced double
+    confirm cannot execute twice.
+    """
+    if not store.mark_pending_approved(action_id):
+        abort(409, description="action already resolved")
+
+
+def _approved(action: PendingAction, result: dict[str, Any]) -> Response:
+    """Serialize a successful confirmation response."""
+    return jsonify(
+        status="approved",
+        action_id=action.action_id,
+        kind=action.kind,
+        result=result,
+    )
+
+
+def _confirm_order_submit(
+    action: PendingAction, store: PendingActionsStore
+) -> Response | tuple[Response, int]:
+    """Submit the exact staged cart to Safeway (real money)."""
+    cart = CartSummary.model_validate(action.payload["cart"])
+    try:
+        pipeline = _safeway_pipeline()
+    except (ConfigError, SafewayPipelineError) as exc:
+        # Not claimed yet: the action stays pending so it can be retried
+        # (until it expires) once configuration is fixed.
+        return jsonify(error=f"safeway pipeline unavailable: {exc}"), 503
+    _claim_pending(store, action.action_id)
+    try:
+        result = pipeline.submit_cart(cart)
+    except SafewayPipelineError as exc:
+        return jsonify(error=f"order submission failed: {exc}"), 502
+    finally:
+        pipeline.close()
+    if not result.success:
+        return jsonify(error=result.error_message), 502
+    confirmation = (
+        dataclasses.asdict(result.confirmation) if result.confirmation else {}
+    )
+    return _approved(
+        action, {**confirmation, "items_restocked": result.items_restocked}
+    )
+
+
+def _confirm_brands_set(action: PendingAction, store: PendingActionsStore) -> Response:
+    """Apply the staged brand preference rule."""
+    pref = BrandPreference.model_validate(action.payload)
+    _claim_pending(store, action.action_id)
+    pref_id = _recipe_store().add_brand_preference(pref)
+    return _approved(action, {"id": pref_id, **pref.model_dump(mode="json")})
+
+
+def _confirm_preferences_set(
+    action: PendingAction, store: PendingActionsStore
+) -> Response:
+    """Apply the staged app-level preference changes."""
+    preferences: dict[str, str] = action.payload["preferences"]
+    _claim_pending(store, action.action_id)
+    store_ = _recipe_store()
+    for key, value in preferences.items():
+        store_.set_preference(key, value)
+    return _approved(action, {"updated": len(preferences)})
+
+
+_CONFIRM_EXECUTORS: dict[
+    str,
+    Callable[[PendingAction, PendingActionsStore], Response | tuple[Response, int]],
+] = {
+    "safeway_order_submit": _confirm_order_submit,
+    "brands_set": _confirm_brands_set,
+    "preferences_set": _confirm_preferences_set,
+}
+
+
+@api_v1.post("/actions/confirm")
+def post_actions_confirm() -> Response | tuple[Response, int]:
+    """Execute a staged action exactly once after chat confirmation."""
+    require_bearer()
+    action = _load_pending_action(_json_body())
+    store = _pending_store()
+    if action.status is not PendingActionStatus.PENDING:
+        abort(409, description="action already resolved")
+    if action.is_expired():
+        store.mark_pending_expired(action.action_id)
+        abort(410, description="action expired — stage it again")
+    executor = _CONFIRM_EXECUTORS.get(action.kind)
+    if executor is None:
+        abort(400, description=f"unknown action kind: {action.kind}")
+    return executor(action, store)
+
+
+@api_v1.post("/actions/deny")
+def post_actions_deny() -> Response:
+    """Mark a staged action as denied (audit trail; nothing executes).
+
+    Denial is safe regardless of expiry, so unlike confirm this does not
+    check the TTL — a denied-after-expiry action records the user's
+    explicit "no" rather than a timeout.
+    """
+    require_bearer()
+    action = _load_pending_action(_json_body())
+    if not _pending_store().mark_pending_denied(action.action_id):
+        abort(409, description="action already resolved")
+    return jsonify(status="denied", action_id=action.action_id, kind=action.kind)
