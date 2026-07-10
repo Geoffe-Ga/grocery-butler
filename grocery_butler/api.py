@@ -19,8 +19,16 @@ from grocery_butler.auth_middleware import require_bearer
 from grocery_butler.claude_utils import make_anthropic_client
 from grocery_butler.config import ConfigError, load_config
 from grocery_butler.consolidator import Consolidator
+from grocery_butler.db.adapter import IntegrityError
 from grocery_butler.meal_parser import MealParser
-from grocery_butler.models import ParsedMeal, ShoppingListItem
+from grocery_butler.models import (
+    Ingredient,
+    IngredientCategory,
+    InventoryItem,
+    InventoryStatus,
+    ParsedMeal,
+    ShoppingListItem,
+)
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
 from grocery_butler.safeway_pipeline import SafewayPipeline, SafewayPipelineError
@@ -29,7 +37,7 @@ if TYPE_CHECKING:
     from flask import Response
     from werkzeug.exceptions import HTTPException
 
-    from grocery_butler.models import BrandPreference, CartSummary, InventoryItem
+    from grocery_butler.models import BrandPreference, CartSummary
 
 api_v1 = Blueprint("api_v1", __name__, url_prefix="/api/v1")
 
@@ -262,3 +270,127 @@ def post_order_preview() -> Response | tuple[Response, int]:
     finally:
         pipeline.close()
     return jsonify(cart=cart.model_dump(mode="json"), total=str(_cart_total(cart)))
+
+
+# ---------------------------------------------------------------------------
+# Low-stakes write endpoints (immediate execution, no confirmation staging)
+# ---------------------------------------------------------------------------
+
+# RubotPaul speaks in/out/low/good; the store models on_hand/low/out.
+_STATUS_TOKENS: dict[str, InventoryStatus] = {
+    "in": InventoryStatus.ON_HAND,
+    "good": InventoryStatus.ON_HAND,
+    "low": InventoryStatus.LOW,
+    "out": InventoryStatus.OUT,
+}
+
+
+def _required_text(body: dict[str, Any], key: str, message: str) -> str:
+    """Return a non-empty stripped string field from the body, or abort 400."""
+    value = body.get(key)
+    if not isinstance(value, str) or not value.strip():
+        abort(400, description=message)
+    return value.strip()
+
+
+def _parse_ingredient_payloads(raw_ingredients: Any) -> list[Ingredient]:
+    """Validate raw ingredient payloads into Ingredient models, or abort 400."""
+    if not isinstance(raw_ingredients, list) or not raw_ingredients:
+        abort(400, description="name and ingredients required")
+    try:
+        return [Ingredient.model_validate(item) for item in raw_ingredients]
+    except ValidationError as exc:
+        abort(400, description=f"invalid ingredient: {exc.error_count()} error(s)")
+
+
+def _parse_servings(body: dict[str, Any]) -> int:
+    """Return the optional servings override (default 4), or abort 400."""
+    servings = body.get("servings", 4)
+    if isinstance(servings, bool) or not isinstance(servings, int) or servings < 1:
+        abort(400, description="servings must be a positive integer")
+    return servings
+
+
+@api_v1.post("/stock/update")
+def post_stock_update() -> Response:
+    """Set a tracked item's stock status; writes immediately."""
+    require_bearer()
+    body = _json_body()
+    status = body.get("status")
+    if not isinstance(status, str) or status not in _STATUS_TOKENS:
+        abort(400, description="status must be one of in/out/low/good")
+    item = _required_text(body, "item", "item required")
+    manager = _pantry_manager()
+    if manager.get_item(item) is None:
+        abort(404, description="item not tracked")
+    manager.update_status(item, _STATUS_TOKENS[status])
+    updated = manager.get_item(item)
+    if updated is None:  # pragma: no cover - item removed mid-request
+        abort(404, description="item not tracked")
+    return jsonify(_item(updated))
+
+
+@api_v1.post("/stock/add")
+def post_stock_add() -> tuple[Response, int]:
+    """Start tracking a new inventory item; writes immediately."""
+    require_bearer()
+    body = _json_body()
+    name = _required_text(body, "item", "item and category required")
+    raw_category = _required_text(body, "category", "item and category required")
+    try:
+        category = IngredientCategory(raw_category)
+    except ValueError:
+        abort(400, description="unknown category")
+    manager = _pantry_manager()
+    try:
+        manager.add_item(
+            InventoryItem(ingredient=name, display_name=name, category=category)
+        )
+    except IntegrityError:
+        abort(409, description="item already tracked")
+    created = manager.get_item(name)
+    if created is None:  # pragma: no cover - item removed mid-request
+        abort(404, description="item not tracked")
+    return jsonify(_item(created)), 201
+
+
+@api_v1.post("/restock/clear")
+def post_restock_clear() -> Response:
+    """Move every low/out item back to on_hand; writes immediately."""
+    require_bearer()
+    cleared = _pantry_manager().clear_restock_queue()
+    return jsonify(ok=True, cleared=cleared)
+
+
+@api_v1.post("/recipes/save")
+def post_recipes_save() -> tuple[Response, int]:
+    """Save a new recipe; 409 if the name is already taken."""
+    require_bearer()
+    body = _json_body()
+    name = _required_text(body, "name", "name and ingredients required")
+    ingredients = _parse_ingredient_payloads(body.get("ingredients"))
+    servings = _parse_servings(body)
+    store = _recipe_store()
+    if store.get_recipe(name) is not None:
+        abort(409, description="recipe with that name exists")
+    meal = ParsedMeal(
+        name=name,
+        servings=servings,
+        known_recipe=True,
+        needs_confirmation=False,
+        purchase_items=[i for i in ingredients if not i.is_pantry_item],
+        pantry_items=[i for i in ingredients if i.is_pantry_item],
+    )
+    recipe_id = store.save_recipe(meal)
+    return jsonify(id=recipe_id, **meal.model_dump(mode="json")), 201
+
+
+@api_v1.delete("/recipes/<int:recipe_id>")
+def delete_recipe(recipe_id: int) -> tuple[str, int]:
+    """Delete a recipe by id; 404 if unknown."""
+    require_bearer()
+    store = _recipe_store()
+    if store.get_recipe_by_id(recipe_id) is None:
+        abort(404, description="recipe not found")
+    store.delete_recipe(recipe_id)
+    return "", 204
