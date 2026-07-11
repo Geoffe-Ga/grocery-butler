@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, sentinel
 
 import pytest
 
@@ -1607,6 +1607,78 @@ class TestHandleOrder:
         parser = _build_parser()
         args = parser.parse_args(["order", "--meals", "tacos, pasta"])
         assert args.meals == "tacos, pasta"
+
+    def test_meals_parses_consolidates_and_restocks(self):
+        """Test --meals wires MealParser, PantryManager, and Consolidator.
+
+        Verifies the full ``_items_from_meals`` dependency chain: parsed
+        meal names reach ``MealParser.parse_meals``, the restock queue and
+        pantry staple names reach ``Consolidator.consolidate`` in the
+        correct argument order, and the exact consolidated result is what
+        gets passed to ``pipeline.build_cart_only``. Distinct sentinel
+        objects are used throughout so that any crossed wiring (e.g.
+        swapping the restock queue and staple names arguments) causes the
+        identity-based assertions to fail.
+        """
+        from grocery_butler.models import CartSummary, FulfillmentType
+
+        parsed_meals = sentinel.parsed_meals
+        restock_queue = sentinel.restock_queue
+        staple_names = sentinel.staple_names
+        consolidated_items = sentinel.consolidated_items
+
+        cart = CartSummary(
+            items=[],
+            failed_items=[],
+            substituted_items=[],
+            skipped_items=[],
+            restock_items=[],
+            subtotal=0.0,
+            fulfillment_options=[],
+            recommended_fulfillment=FulfillmentType.PICKUP,
+            estimated_total=0.0,
+        )
+
+        cfg = MagicMock()
+        cfg.anthropic_api_key = "sk-test"
+        cfg.safeway_username = "user"
+        cfg.safeway_password = "pass"
+        cfg.safeway_store_id = "1234"
+        cfg.database_path = ":memory:"
+
+        mock_store = MagicMock()
+        mock_store.get_pantry_staple_names.return_value = staple_names
+        mock_parser = MagicMock()
+        mock_parser.parse_meals.return_value = parsed_meals
+        mock_pantry = MagicMock()
+        mock_pantry.get_restock_queue.return_value = restock_queue
+        mock_consolidator = MagicMock()
+        mock_consolidator.consolidate.return_value = consolidated_items
+
+        with (
+            patch("grocery_butler.cli._load_config_safe", return_value=cfg),
+            patch("grocery_butler.cli._make_anthropic_client", return_value=None),
+            patch("grocery_butler.cli.RecipeStore", return_value=mock_store),
+            patch("grocery_butler.cli.MealParser", return_value=mock_parser),
+            patch("grocery_butler.cli.PantryManager", return_value=mock_pantry),
+            patch("grocery_butler.cli.Consolidator", return_value=mock_consolidator),
+            patch("grocery_butler.cli.SafewayPipeline") as mock_pipeline_cls,
+        ):
+            mock_pipeline = MagicMock()
+            mock_pipeline.build_cart_only.return_value = cart
+            mock_pipeline_cls.return_value = mock_pipeline
+
+            parser = _build_parser()
+            args = parser.parse_args(["order", "--dry-run", "--meals", "pasta, salad"])
+            code = _handle_order(args)
+
+        assert code == 0
+        mock_parser.parse_meals.assert_called_once_with(["pasta", "salad"])
+        mock_pantry.get_restock_queue.assert_called_once()
+        mock_consolidator.consolidate.assert_called_once_with(
+            parsed_meals, restock_queue, staple_names
+        )
+        mock_pipeline.build_cart_only.assert_called_once_with(consolidated_items)
 
 
 class TestFormatCartSummary:

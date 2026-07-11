@@ -29,6 +29,9 @@ from grocery_butler.models import (
     BrandMatchType,
     BrandPreference,
     BrandPreferenceType,
+    CartItem,
+    CartSummary,
+    FulfillmentType,
     Ingredient,
     IngredientCategory,
     InventoryItem,
@@ -41,6 +44,7 @@ from grocery_butler.models import (
     SubstitutionResult,
     SubstitutionSuitability,
 )
+from grocery_butler.order_service import OrderConfirmation, OrderResult
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -187,6 +191,76 @@ def _make_guild_message(
     message.channel.permissions_for.return_value = perms
 
     return message
+
+
+def _make_cart_summary(
+    *, product_name: str = "Milk", subtotal: float = 4.99
+) -> CartSummary:
+    """Build a minimal populated CartSummary for /order bot command tests.
+
+    Args:
+        product_name: Display name for the single Safeway product line item.
+        subtotal: Subtotal (and estimated total, since there is one item and
+            no fees) for the built cart.
+
+    Returns:
+        A CartSummary containing exactly one CartItem, suitable for
+        exercising `_format_cart_summary` and the order review/submit flows.
+    """
+    product = SafewayProduct(
+        product_id="P1", name=product_name, price=subtotal, size="1 ea"
+    )
+    cart_item = CartItem(
+        shopping_list_item=ShoppingListItem(
+            ingredient=product_name.lower(),
+            quantity=1.0,
+            unit="each",
+            category=IngredientCategory.OTHER,
+            search_term=product_name.lower(),
+            from_meals=["manual"],
+        ),
+        safeway_product=product,
+        quantity_to_order=1,
+        estimated_cost=subtotal,
+    )
+    return CartSummary(
+        items=[cart_item],
+        failed_items=[],
+        substituted_items=[],
+        skipped_items=[],
+        restock_items=[],
+        subtotal=subtotal,
+        fulfillment_options=[],
+        recommended_fulfillment=FulfillmentType.PICKUP,
+        estimated_total=subtotal,
+    )
+
+
+def _make_order_result(*, success: bool = True, order_id: str = "ORD-1") -> OrderResult:
+    """Build an OrderResult for /order submit confirmation-flow tests.
+
+    Args:
+        success: Whether the simulated order submission succeeded.
+        order_id: Confirmation order id to embed when ``success`` is True.
+
+    Returns:
+        A failed OrderResult with a generic error message when
+        ``success`` is False, otherwise a successful OrderResult with a
+        populated OrderConfirmation.
+    """
+    if not success:
+        return OrderResult(success=False, error_message="submission failed")
+    return OrderResult(
+        success=True,
+        confirmation=OrderConfirmation(
+            order_id=order_id,
+            status="confirmed",
+            estimated_time="1 hour",
+            total=4.99,
+            fulfillment_type=FulfillmentType.PICKUP,
+            item_count=1,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1891,3 +1965,300 @@ class TestOrderConfirmViewTimeout:
             mock_pipeline.close.assert_called_once()
 
         asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# TestOrderReviewCommand
+# ---------------------------------------------------------------------------
+
+
+class TestOrderReviewCommand:
+    """Behavioral tests for the /order review slash command."""
+
+    @pytest.fixture()
+    def bot(self, config):
+        """Create a bot instance for testing."""
+        return create_bot(config)
+
+    def _get_order_subcommand(self, bot, name):
+        """Get an /order subcommand by name.
+
+        Args:
+            bot: The Discord bot client.
+            name: Subcommand name ("review" or "submit").
+
+        Returns:
+            The subcommand, or None if not found.
+        """
+        tree = bot.tree  # type: ignore[attr-defined]
+        for cmd in tree.get_commands():
+            if cmd.name == "order":
+                for sub in cmd.commands:
+                    if sub.name == name:
+                        return sub
+        return None  # pragma: no cover
+
+    @pytest.mark.asyncio()
+    async def test_review_empty_items_prompts_for_names(self, bot, mock_interaction):
+        """Test /order review with only separators prompts for item names."""
+        cmd = self._get_order_subcommand(bot, "review")
+        assert cmd is not None
+        await cmd.callback(mock_interaction, items=" , , ")
+        mock_interaction.followup.send.assert_called_once()
+        call_args = str(mock_interaction.followup.send.call_args)
+        assert "provide item names" in call_args.lower()
+
+    @pytest.mark.asyncio()
+    async def test_review_happy_path_shows_cart_preview(self, bot, mock_interaction):
+        """Test /order review builds a cart and shows a priced preview."""
+        cart = _make_cart_summary(product_name="Milk", subtotal=4.99)
+        mock_pipeline = MagicMock()
+        mock_pipeline.build_cart_only.return_value = cart
+
+        with (
+            patch(
+                "grocery_butler.safeway_pipeline.SafewayPipeline",
+                return_value=mock_pipeline,
+            ),
+            patch("grocery_butler.bot._make_bot_anthropic_client", return_value=None),
+        ):
+            cmd = self._get_order_subcommand(bot, "review")
+            assert cmd is not None
+            await cmd.callback(mock_interaction, items="milk, eggs")
+
+        mock_interaction.followup.send.assert_called_once()
+        call_args = str(mock_interaction.followup.send.call_args)
+        assert "Milk" in call_args
+        assert "4.99" in call_args
+        mock_pipeline.build_cart_only.assert_called_once()
+        (built_items,) = mock_pipeline.build_cart_only.call_args.args
+        assert [i.ingredient for i in built_items] == ["milk", "eggs"]
+        mock_pipeline.close.assert_called_once()
+
+    @pytest.mark.asyncio()
+    async def test_review_pipeline_error_reports_message(self, bot, mock_interaction):
+        """Test /order review reports a SafewayPipelineError's message."""
+        from grocery_butler.safeway_pipeline import SafewayPipelineError
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.build_cart_only.side_effect = SafewayPipelineError("boom")
+
+        with (
+            patch(
+                "grocery_butler.safeway_pipeline.SafewayPipeline",
+                return_value=mock_pipeline,
+            ),
+            patch("grocery_butler.bot._make_bot_anthropic_client", return_value=None),
+        ):
+            cmd = self._get_order_subcommand(bot, "review")
+            assert cmd is not None
+            await cmd.callback(mock_interaction, items="milk")
+
+        call_args = str(mock_interaction.followup.send.call_args)
+        assert "Pipeline error: boom" in call_args
+        mock_pipeline.close.assert_called_once()
+
+    @pytest.mark.asyncio()
+    async def test_review_unexpected_error_reports_generic(self, bot, mock_interaction):
+        """Test /order review reports a generic error and still closes."""
+        mock_pipeline = MagicMock()
+        mock_pipeline.build_cart_only.side_effect = RuntimeError("kaboom")
+
+        with (
+            patch(
+                "grocery_butler.safeway_pipeline.SafewayPipeline",
+                return_value=mock_pipeline,
+            ),
+            patch("grocery_butler.bot._make_bot_anthropic_client", return_value=None),
+        ):
+            cmd = self._get_order_subcommand(bot, "review")
+            assert cmd is not None
+            await cmd.callback(mock_interaction, items="milk")
+
+        call_args = str(mock_interaction.followup.send.call_args)
+        assert "went wrong" in call_args
+        mock_pipeline.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestOrderSubmitCommand
+# ---------------------------------------------------------------------------
+
+
+class TestOrderSubmitCommand:
+    """Behavioral tests for the /order submit slash command."""
+
+    @pytest.fixture()
+    def bot(self, config):
+        """Create a bot instance for testing."""
+        return create_bot(config)
+
+    def _get_order_subcommand(self, bot, name):
+        """Get an /order subcommand by name.
+
+        Args:
+            bot: The Discord bot client.
+            name: Subcommand name ("review" or "submit").
+
+        Returns:
+            The subcommand, or None if not found.
+        """
+        tree = bot.tree  # type: ignore[attr-defined]
+        for cmd in tree.get_commands():
+            if cmd.name == "order":
+                for sub in cmd.commands:
+                    if sub.name == name:
+                        return sub
+        return None  # pragma: no cover
+
+    @pytest.mark.asyncio()
+    async def test_submit_empty_items_prompts_for_names(self, bot, mock_interaction):
+        """Test /order submit with only separators prompts for item names."""
+        cmd = self._get_order_subcommand(bot, "submit")
+        assert cmd is not None
+        await cmd.callback(mock_interaction, items=" , , ")
+        mock_interaction.followup.send.assert_called_once()
+        call_args = str(mock_interaction.followup.send.call_args)
+        assert "provide item names" in call_args.lower()
+
+    @pytest.mark.asyncio()
+    async def test_submit_happy_path_sends_preview_with_confirm_view(
+        self, bot, mock_interaction
+    ):
+        """Test /order submit sends a preview with an attached confirm view."""
+        cart = _make_cart_summary(product_name="Eggs", subtotal=3.49)
+        mock_pipeline = MagicMock()
+        mock_pipeline.build_cart_only.return_value = cart
+
+        with (
+            patch(
+                "grocery_butler.safeway_pipeline.SafewayPipeline",
+                return_value=mock_pipeline,
+            ),
+            patch("grocery_butler.bot._make_bot_anthropic_client", return_value=None),
+        ):
+            cmd = self._get_order_subcommand(bot, "submit")
+            assert cmd is not None
+            await cmd.callback(mock_interaction, items="eggs")
+
+        mock_interaction.followup.send.assert_called_once()
+        (built_items,) = mock_pipeline.build_cart_only.call_args.args
+        assert [i.ingredient for i in built_items] == ["eggs"]
+        _, kwargs = mock_interaction.followup.send.call_args
+        view = kwargs["view"]
+        assert isinstance(view, _OrderConfirmView)
+        assert view._cart is cart
+        assert view._pipeline is mock_pipeline
+
+    @pytest.mark.asyncio()
+    async def test_submit_build_failure_closes_pipeline(self, bot, mock_interaction):
+        """Test /order submit closes the pipeline and reports a generic error."""
+        mock_pipeline = MagicMock()
+        mock_pipeline.build_cart_only.side_effect = RuntimeError("boom")
+
+        with (
+            patch(
+                "grocery_butler.safeway_pipeline.SafewayPipeline",
+                return_value=mock_pipeline,
+            ),
+            patch("grocery_butler.bot._make_bot_anthropic_client", return_value=None),
+        ):
+            cmd = self._get_order_subcommand(bot, "submit")
+            assert cmd is not None
+            await cmd.callback(mock_interaction, items="milk")
+
+        call_args = str(mock_interaction.followup.send.call_args)
+        assert "went wrong" in call_args
+        mock_pipeline.close.assert_called_once()
+
+    @pytest.mark.asyncio()
+    async def test_submit_pipeline_error_reports_message(self, bot, mock_interaction):
+        """Test /order submit reports a SafewayPipelineError's message."""
+        from grocery_butler.safeway_pipeline import SafewayPipelineError
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.build_cart_only.side_effect = SafewayPipelineError("nope")
+
+        with (
+            patch(
+                "grocery_butler.safeway_pipeline.SafewayPipeline",
+                return_value=mock_pipeline,
+            ),
+            patch("grocery_butler.bot._make_bot_anthropic_client", return_value=None),
+        ):
+            cmd = self._get_order_subcommand(bot, "submit")
+            assert cmd is not None
+            await cmd.callback(mock_interaction, items="milk")
+
+        call_args = str(mock_interaction.followup.send.call_args)
+        assert "Pipeline error: nope" in call_args
+        mock_pipeline.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# TestOrderConfirmView - behavioral confirm/cancel button coverage
+# ---------------------------------------------------------------------------
+
+
+class TestOrderConfirmView:
+    """Behavioral tests for _OrderConfirmView confirm/cancel buttons.
+
+    ``discord.ui.View.__init__`` replaces each ``@discord.ui.button``
+    decorated method with a per-instance ``discord.ui.Button`` object
+    (shadowing the plain coroutine function), so ``view.confirm`` is not
+    directly callable. The original callback is still reachable as a
+    plain unbound coroutine function on the class, so tests invoke it via
+    ``type(view).confirm(view, interaction, button)`` -- exactly how
+    discord.py's own dispatch machinery calls it internally.
+    """
+
+    @pytest.mark.asyncio()
+    async def test_confirm_submits_and_reports_result(self, mock_interaction):
+        """Test confirm submits the cart and reports the confirmation."""
+        cart = _make_cart_summary()
+        order_result = _make_order_result(success=True, order_id="ORD-99")
+        mock_pipeline = MagicMock()
+        mock_pipeline.submit_cart.return_value = order_result
+
+        view = _OrderConfirmView(mock_pipeline, cart)
+        await type(view).confirm(view, mock_interaction, MagicMock())
+
+        mock_interaction.response.defer.assert_called_once()
+        mock_interaction.followup.send.assert_called_once()
+        call_args = str(mock_interaction.followup.send.call_args)
+        assert "ORD-99" in call_args
+        mock_pipeline.submit_cart.assert_called_once_with(cart)
+        mock_pipeline.close.assert_called_once()
+        assert view.is_finished() is True
+
+    @pytest.mark.asyncio()
+    async def test_confirm_submission_failure_reports_and_closes(
+        self, mock_interaction
+    ):
+        """Test confirm reports a failure message when submission raises."""
+        cart = _make_cart_summary()
+        mock_pipeline = MagicMock()
+        mock_pipeline.submit_cart.side_effect = RuntimeError("network down")
+
+        view = _OrderConfirmView(mock_pipeline, cart)
+        await type(view).confirm(view, mock_interaction, MagicMock())
+
+        call_args = str(mock_interaction.followup.send.call_args)
+        assert "Order submission failed." in call_args
+        mock_pipeline.close.assert_called_once()
+        assert view.is_finished() is True
+
+    @pytest.mark.asyncio()
+    async def test_cancel_closes_pipeline_and_notifies(self, mock_interaction):
+        """Test cancel closes the pipeline and notifies the user."""
+        cart = _make_cart_summary()
+        mock_pipeline = MagicMock()
+
+        view = _OrderConfirmView(mock_pipeline, cart)
+        await type(view).cancel(view, mock_interaction, MagicMock())
+
+        mock_interaction.response.send_message.assert_called_once()
+        call_args = str(mock_interaction.response.send_message.call_args)
+        assert "Order cancelled." in call_args
+        mock_pipeline.close.assert_called_once()
+        assert view.is_finished() is True
