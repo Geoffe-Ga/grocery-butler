@@ -7,6 +7,7 @@ is the Discord interface after cutover).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,7 @@ from grocery_butler.auth_middleware import SECRET_ENV_VAR, mint_token
 TEST_SECRET = "test-shared-secret"
 
 PROCFILE = Path(__file__).resolve().parent.parent / "Procfile"
+DOCKERFILE = Path(__file__).resolve().parent.parent / "Dockerfile"
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -117,3 +119,52 @@ def _procfile_processes() -> dict[str, str]:
         name, _, command = stripped.partition(":")
         processes[name.strip()] = command.strip()
     return processes
+
+
+# ---------------------------------------------------------------------------
+# Dockerfile topology
+# ---------------------------------------------------------------------------
+
+
+class TestDockerfileTopology:
+    """The container image runs gunicorn directly; it never reads Procfile."""
+
+    def test_dockerfile_cmd_uses_web_concurrency_env(self) -> None:
+        """Worker count is configurable via WEB_CONCURRENCY at runtime."""
+        cmd = _dockerfile_cmd()
+        assert "--workers ${WEB_CONCURRENCY:-2}" in cmd
+
+    def test_dockerfile_cmd_has_no_hardcoded_worker_count(self) -> None:
+        """The CMD must not pin a literal worker count like `--workers 2`."""
+        cmd = _dockerfile_cmd()
+        assert re.search(r"--workers\s+\d+", cmd) is None
+
+    def test_dockerfile_does_not_copy_procfile(self) -> None:
+        """The image is Heroku-agnostic; it must not COPY the Procfile in."""
+        lines = DOCKERFILE.read_text().splitlines()
+        assert not any("COPY Procfile" in line for line in lines)
+
+    def test_dockerfile_still_runs_gunicorn_app_factory(self) -> None:
+        """The container still boots the Flask app via the gunicorn factory."""
+        cmd = _dockerfile_cmd()
+        assert "gunicorn 'grocery_butler.app:create_app()'" in cmd
+
+
+def _dockerfile_cmd() -> str:
+    """Return the command string of the Dockerfile's container-entrypoint CMD.
+
+    The HEALTHCHECK instruction's continuation line also starts with
+    `CMD ` (it is itself a `CMD <command>` clause), so this returns the
+    *last* matching line in the file, which is the real `CMD` instruction
+    that becomes the container's entrypoint.
+
+    Returns:
+        The command text following the `CMD ` prefix on the last line of
+        the Dockerfile that starts with `CMD `.
+    """
+    command = ""
+    for line in DOCKERFILE.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("CMD "):
+            command = stripped.removeprefix("CMD ")
+    return command

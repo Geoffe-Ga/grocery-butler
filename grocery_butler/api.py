@@ -322,7 +322,7 @@ def _parse_servings(body: dict[str, Any]) -> int:
     servings = body.get("servings", 4)
     if isinstance(servings, bool) or not isinstance(servings, int) or servings < 1:
         abort(400, description="servings must be a positive integer")
-    return servings
+    return int(servings)
 
 
 @api_v1.post("/stock/update")
