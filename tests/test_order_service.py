@@ -79,6 +79,8 @@ def _make_cart_item(
     ingredient: str = "chicken thighs",
     product_id: str = "P001",
     price: float = 8.99,
+    needs_review: bool = False,
+    review_reason: str = "",
 ) -> CartItem:
     """Create a test CartItem.
 
@@ -86,6 +88,10 @@ def _make_cart_item(
         ingredient: Ingredient name.
         product_id: Product ID.
         price: Product price.
+        needs_review: Whether this item should be flagged for human
+            review (issue #59 review-gate enforcement).
+        review_reason: Machine-readable reason code when ``needs_review``
+            is ``True``.
 
     Returns:
         CartItem for testing.
@@ -95,6 +101,8 @@ def _make_cart_item(
         safeway_product=_make_product(product_id=product_id, price=price),
         quantity_to_order=1,
         estimated_cost=price,
+        needs_review=needs_review,
+        review_reason=review_reason,
     )
 
 
@@ -433,6 +441,154 @@ class TestSubmitOrder:
 
         assert result.success is True
         assert result.confirmation is not None
+
+
+# ------------------------------------------------------------------
+# Tests: OrderService.submit_order review-gate enforcement (issue #59)
+# ------------------------------------------------------------------
+#
+# Gate 2.5 blocker: needs_review was computed by the cart builder but
+# never enforced before real money was spent. These tests pin the
+# required behavior: any flagged item (regular or restock) blocks
+# submission before the Safeway client is ever called, unless the
+# caller explicitly opts in via allow_review_items=True.
+
+
+class TestSubmitOrderReviewGate:
+    """Tests for OrderService.submit_order blocking flagged cart items."""
+
+    def _make_service(
+        self,
+        api_response: dict[str, Any] | None = None,
+    ) -> OrderService:
+        """Create an OrderService with mock dependencies.
+
+        Args:
+            api_response: Response the mocked client should return if
+                the order submission is allowed to proceed.
+
+        Returns:
+            OrderService with mocked client and pantry.
+        """
+        mock_client = MagicMock()
+        mock_client.post.return_value = api_response or {}
+
+        mock_pantry = MagicMock()
+        mock_pantry.mark_restocked.return_value = 0
+
+        return OrderService(mock_client, mock_pantry)
+
+    def test_blocks_cart_with_flagged_regular_item(self) -> None:
+        """Test a flagged regular item blocks submission before any spend.
+
+        No HTTP post should occur, the result must fail, and the error
+        message must name the flagged ingredient and its reason code.
+        """
+        service = self._make_service()
+        flagged = _make_cart_item(
+            ingredient="flour",
+            product_id="P002",
+            needs_review=True,
+            review_reason="incomparable_units",
+        )
+        cart = _make_cart(items=[flagged])
+
+        result = service.submit_order(cart)
+
+        assert result.success is False
+        assert "flour (incomparable_units)" in result.error_message
+        assert "review" in result.error_message.lower()
+        service._client.post.assert_not_called()
+
+    def test_blocks_cart_with_flagged_restock_item(self) -> None:
+        """Test a flagged restock item also blocks submission.
+
+        Restock items carry real money too, so a flag on a restock item
+        must block the order exactly like a flag on a regular item.
+        """
+        service = self._make_service()
+        flagged_restock = _make_cart_item(
+            ingredient="milk",
+            product_id="R1",
+            needs_review=True,
+            review_reason="quantity_capped",
+        )
+        cart = _make_cart(restock_items=[flagged_restock])
+
+        result = service.submit_order(cart)
+
+        assert result.success is False
+        assert "milk (quantity_capped)" in result.error_message
+        service._client.post.assert_not_called()
+
+    def test_blocks_multiple_flagged_items_names_each(self) -> None:
+        """Test the error message names every flagged item, not just one."""
+        service = self._make_service()
+        flagged_a = _make_cart_item(
+            ingredient="flour",
+            product_id="P002",
+            needs_review=True,
+            review_reason="incomparable_units",
+        )
+        flagged_b = _make_cart_item(
+            ingredient="sugar",
+            product_id="P003",
+            needs_review=True,
+            review_reason="unparseable_size",
+        )
+        cart = _make_cart(items=[flagged_a, flagged_b])
+
+        result = service.submit_order(cart)
+
+        assert result.success is False
+        assert "flour (incomparable_units)" in result.error_message
+        assert "sugar (unparseable_size)" in result.error_message
+        service._client.post.assert_not_called()
+
+    def test_allow_review_items_true_submits_flagged_cart_normally(self) -> None:
+        """Test allow_review_items=True is an explicit human override.
+
+        With the override set, submission must proceed exactly like the
+        unflagged happy path: the client is called and success is True.
+        """
+        service = self._make_service(
+            api_response={
+                "orderId": "ORD-123",
+                "status": "confirmed",
+                "total": 8.99,
+            }
+        )
+        flagged = _make_cart_item(
+            ingredient="flour",
+            needs_review=True,
+            review_reason="incomparable_units",
+        )
+        cart = _make_cart(items=[flagged])
+
+        result = service.submit_order(cart, allow_review_items=True)
+
+        assert result.success is True
+        assert result.confirmation is not None
+        service._client.post.assert_called_once()
+
+    def test_unflagged_cart_unaffected_by_default_kwarg(self) -> None:
+        """Test a cart with no flagged items submits normally by default.
+
+        Pins that the new ``allow_review_items`` keyword argument
+        defaults to False without changing behavior for carts that have
+        nothing to flag.
+        """
+        service = self._make_service(
+            api_response={
+                "orderId": "ORD-456",
+                "status": "confirmed",
+                "total": 8.99,
+            }
+        )
+        result = service.submit_order(_make_cart())
+
+        assert result.success is True
+        service._client.post.assert_called_once()
 
 
 # ------------------------------------------------------------------

@@ -371,12 +371,27 @@ class SubstitutionResult(BaseModel):
 
 
 class CartItem(BaseModel):
-    """A shopping list item mapped to a Safeway product."""
+    """A shopping list item mapped to a Safeway product.
+
+    Attributes:
+        shopping_list_item: The originating shopping list item.
+        safeway_product: The matched Safeway product.
+        quantity_to_order: Number of product units to order.
+        estimated_cost: Estimated cost for ``quantity_to_order`` units.
+        needs_review: Whether the quantity calculation needs human review
+            (e.g. an unparseable product size, incomparable units, or a
+            quantity capped by the per-item maximum).
+        review_reason: Machine-readable reason code for ``needs_review``
+            (``"unparseable_size"``, ``"incomparable_units"``, or
+            ``"quantity_capped"``), or ``""`` when no review is needed.
+    """
 
     shopping_list_item: ShoppingListItem
     safeway_product: SafewayProduct
     quantity_to_order: int
     estimated_cost: float
+    needs_review: bool = False
+    review_reason: str = ""
 
 
 class FulfillmentOption(BaseModel):

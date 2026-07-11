@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from flask import Blueprint, abort, current_app, jsonify, request
 from pydantic import ValidationError
 
+from grocery_butler import order_service
 from grocery_butler.auth_middleware import require_bearer
 from grocery_butler.claude_utils import make_anthropic_client
 from grocery_butler.config import ConfigError, load_config
@@ -450,6 +451,33 @@ def _parse_cart_payload(body: dict[str, Any]) -> CartSummary:
     return cart
 
 
+def _render_review_section(cart: CartSummary) -> str:
+    """Render a staged-message clause naming flagged items and reasons.
+
+    Delegates flagged-item collection to
+    :func:`grocery_butler.order_service._collect_review_items` (single
+    source of truth for what counts as flagged) so the human sees every
+    item and its review reason before ever replying "confirm" — per the
+    chief-architect's ruling, that visibility is what makes a later
+    confirm count as an explicit override of the review gate.
+
+    Args:
+        cart: The cart being staged for confirmation.
+
+    Returns:
+        Empty string for a cart with no flagged items, otherwise a
+        sentence naming each flagged ingredient and its reason code.
+    """
+    flagged = order_service._collect_review_items(cart)
+    if not flagged:
+        return ""
+    named = ", ".join(
+        f"{item.shopping_list_item.ingredient} ({item.review_reason})"
+        for item in flagged
+    )
+    return f" Needs review: {named}."
+
+
 @api_v1.post("/order/submit")
 def post_order_submit() -> Response:
     """Stage a Safeway order for confirmation. Never submits directly."""
@@ -462,12 +490,13 @@ def post_order_submit() -> Response:
         {"cart": cart.model_dump(mode="json"), "total": total},
     )
     item_count = len(cart.items) + len(cart.restock_items)
+    review_section = _render_review_section(cart)
     return jsonify(
         status="pending_confirmation",
         action_id=action_id,
         message=(
-            f"Staged Safeway order ({item_count} items, ${total}). "
-            "Reply 'confirm' to submit."
+            f"Staged Safeway order ({item_count} items, ${total})."
+            f"{review_section} Reply 'confirm' to submit."
         ),
     )
 
@@ -562,7 +591,11 @@ def _confirm_order_submit(
         return jsonify(error=f"safeway pipeline unavailable: {exc}"), 503
     _claim_pending(store, action.action_id)
     try:
-        result = pipeline.submit_cart(cart)
+        # The staged message (post_order_submit) already named every
+        # flagged item and its reason code, so replying "confirm" IS the
+        # human's explicit override of the review gate (chief-architect
+        # ruling, issue #59 round 3).
+        result = pipeline.submit_cart(cart, allow_review_items=True)
     except SafewayPipelineError as exc:
         return jsonify(error=f"order submission failed: {exc}"), 502
     finally:

@@ -128,7 +128,12 @@ class SafewayPipeline:
         self._authenticate()
         return self._cart_builder.build_cart(items, restock_items)
 
-    def submit_cart(self, cart: CartSummary) -> OrderResult:
+    def submit_cart(
+        self,
+        cart: CartSummary,
+        *,
+        allow_review_items: bool = False,
+    ) -> OrderResult:
         """Submit a pre-built cart to Safeway.
 
         Use this when the cart has already been built via
@@ -136,6 +141,9 @@ class SafewayPipeline:
 
         Args:
             cart: Pre-built cart summary to submit.
+            allow_review_items: If True, bypass the review gate for
+                items flagged as ``needs_review`` (explicit human
+                override). Defaults to False (safe/blocking).
 
         Returns:
             OrderResult with confirmation or error details.
@@ -144,7 +152,9 @@ class SafewayPipeline:
             SafewayPipelineError: If authentication fails.
         """
         self._authenticate()
-        return self._order_service.submit_order(cart)
+        return self._order_service.submit_order(
+            cart, allow_review_items=allow_review_items
+        )
 
     def close(self) -> None:
         """Clean up SafewayClient HTTP resources."""

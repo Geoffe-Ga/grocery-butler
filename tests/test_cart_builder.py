@@ -6,13 +6,14 @@ from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 from grocery_butler.cart_builder import (
+    MAX_QUANTITY_PER_ITEM,
     CartBuilder,
+    QuantityDecision,
     _calculate_quantity,
     _calculate_subtotal,
     _default_fulfillment_options,
     _get_fulfillment_fee,
     _parse_fulfillment_response,
-    _parse_product_size,
     _recommend_fulfillment,
 )
 from grocery_butler.models import (
@@ -118,71 +119,188 @@ class _MockSelectionResult:
 
 
 # ------------------------------------------------------------------
-# Tests: _parse_product_size
-# ------------------------------------------------------------------
-
-
-class TestParseProductSize:
-    """Tests for _parse_product_size."""
-
-    def test_simple_size(self) -> None:
-        """Test parsing '2 lb'."""
-        assert _parse_product_size("2 lb") == 2.0
-
-    def test_decimal_size(self) -> None:
-        """Test parsing '1.5 gal'."""
-        assert _parse_product_size("1.5 gal") == 1.5
-
-    def test_no_number(self) -> None:
-        """Test unparseable size returns 0."""
-        assert _parse_product_size("each") == 0.0
-
-    def test_empty_string(self) -> None:
-        """Test empty string returns 0."""
-        assert _parse_product_size("") == 0.0
-
-    def test_leading_whitespace(self) -> None:
-        """Test size with leading whitespace."""
-        assert _parse_product_size("  16 oz") == 16.0
-
-
-# ------------------------------------------------------------------
 # Tests: _calculate_quantity
 # ------------------------------------------------------------------
+#
+# NOTE: The old float-returning ``_parse_product_size`` helper (and its
+# ``TestParseProductSize`` test class) was removed as part of issue #59.
+# Its numeric-parsing behavior now lives in ``grocery_butler.units.
+# parse_size`` and is covered by ``tests/test_units.py``.
 
 
 class TestCalculateQuantity:
-    """Tests for _calculate_quantity."""
+    """Tests for _calculate_quantity returning a QuantityDecision."""
 
-    def test_exact_match(self) -> None:
+    def test_exact_match_returns_quantity_one_no_review(self) -> None:
         """Test quantity matches product size exactly."""
         item = _make_item(quantity=2.0)
         product = _make_product(size="2 lb")
-        assert _calculate_quantity(item, product) == 1
+        decision = _calculate_quantity(item, product)
+        assert decision == QuantityDecision(
+            quantity=1, needs_review=False, review_reason=""
+        )
 
-    def test_needs_two(self) -> None:
+    def test_needs_two_products_no_review(self) -> None:
         """Test needing two products."""
         item = _make_item(quantity=3.0)
         product = _make_product(size="2 lb")
-        assert _calculate_quantity(item, product) == 2
-
-    def test_unparseable_size(self) -> None:
-        """Test unparseable product size returns 1."""
-        item = _make_item(quantity=2.0)
-        product = _make_product(size="each")
-        assert _calculate_quantity(item, product) == 1
+        decision = _calculate_quantity(item, product)
+        assert decision.quantity == 2
+        assert decision.needs_review is False
+        assert decision.review_reason == ""
 
     def test_fractional_rounds_up(self) -> None:
         """Test fractional quantity rounds up."""
         item = _make_item(quantity=2.5)
         product = _make_product(size="2 lb")
-        assert _calculate_quantity(item, product) == 2
+        decision = _calculate_quantity(item, product)
+        assert decision.quantity == 2
 
     def test_minimum_one(self) -> None:
         """Test minimum quantity is 1."""
         item = _make_item(quantity=0.5)
         product = _make_product(size="2 lb")
-        assert _calculate_quantity(item, product) == 1
+        decision = _calculate_quantity(item, product)
+        assert decision.quantity == 1
+
+
+class TestCalculateQuantityUnparseableSize:
+    """Tests for _calculate_quantity when the product size can't be parsed."""
+
+    def test_size_each_flags_unparseable(self) -> None:
+        """Test a non-numeric size like 'each' flags unparseable_size."""
+        item = _make_item(quantity=2.0)
+        product = _make_product(size="each")
+        decision = _calculate_quantity(item, product)
+        assert decision == QuantityDecision(
+            quantity=1, needs_review=True, review_reason="unparseable_size"
+        )
+
+    def test_empty_size_flags_unparseable(self) -> None:
+        """Test an empty size string flags unparseable_size.
+
+        Regression guard for issue #59: previously an empty ``size``
+        silently produced a quantity of 1 with no indication that the
+        product's size was unknown.
+        """
+        item = _make_item(quantity=2.0)
+        product = _make_product(size="")
+        decision = _calculate_quantity(item, product)
+        assert decision.quantity == 1
+        assert decision.needs_review is True
+        assert decision.review_reason == "unparseable_size"
+
+
+class TestCalculateQuantityUnitConversion:
+    """Tests for _calculate_quantity unit-aware conversion (issue #59).
+
+    Reproduces the reported bugs: dividing raw numeric quantities without
+    regard to units caused massive over-orders (500 g item vs. a "5 lb"
+    product ordering 100 units) and under-orders (2 lb item vs. a "16 oz"
+    product ordering only 1 unit instead of 2).
+    """
+
+    def test_500g_item_vs_5lb_product_no_overorder(self) -> None:
+        """Test 500 g vs '5 lb' orders 1, not 100 (the reported bug)."""
+        item = _make_item(quantity=500.0, unit="g")
+        product = _make_product(size="5 lb")
+        decision = _calculate_quantity(item, product)
+        assert decision.quantity == 1
+        assert decision.needs_review is False
+
+    def test_2lb_item_vs_16oz_product_orders_two_exactly(self) -> None:
+        """Test 2 lb vs '16 oz' orders exactly 2, not 1 (the reported bug).
+
+        16 oz == 1 lb, so the exact ratio is 2.0. The epsilon applied
+        before ``ceil`` must prevent this from rounding up to 3.
+        """
+        item = _make_item(quantity=2.0, unit="lb")
+        product = _make_product(size="16 oz")
+        decision = _calculate_quantity(item, product)
+        assert decision.quantity == 2
+        assert decision.needs_review is False
+
+    def test_500g_item_vs_1lb_product_orders_two(self) -> None:
+        """Test 500 g vs '1 lb' (453.59237 g) needs 2 units."""
+        item = _make_item(quantity=500.0, unit="g")
+        product = _make_product(size="1 lb")
+        decision = _calculate_quantity(item, product)
+        assert decision.quantity == 2
+
+    def test_8oz_item_vs_1lb_product_orders_one(self) -> None:
+        """Test 8 oz vs '1 lb' is exactly half, so 1 unit suffices."""
+        item = _make_item(quantity=8.0, unit="oz")
+        product = _make_product(size="1 lb")
+        decision = _calculate_quantity(item, product)
+        assert decision.quantity == 1
+
+    def test_4cup_item_vs_1gal_product_orders_one(self) -> None:
+        """Test 4 cups vs '1 gal' (16 cups) needs only 1 unit."""
+        item = _make_item(quantity=4.0, unit="cup")
+        product = _make_product(size="1 gal")
+        decision = _calculate_quantity(item, product)
+        assert decision.quantity == 1
+
+    def test_20cup_item_vs_1gal_product_orders_two(self) -> None:
+        """Test 20 cups vs '1 gal' (16 cups) needs 2 units."""
+        item = _make_item(quantity=20.0, unit="cup")
+        product = _make_product(size="1 gal")
+        decision = _calculate_quantity(item, product)
+        assert decision.quantity == 2
+
+    def test_fractional_excess_still_rounds_up_past_epsilon(self) -> None:
+        """Test a genuine fractional excess still rounds up (regression).
+
+        Regression guard for the epsilon subtracted before ``math.ceil``
+        in ``_calculate_quantity`` (``needed - _QUANTITY_EPSILON``). 2.05
+        lb vs. a "1 lb" product needs 2.05 units, which must still ceil
+        to 3 — the tiny epsilon exists only to absorb floating-point
+        error on exact ratios, and must never mask a real fractional
+        need.
+        """
+        item = _make_item(quantity=2.05, unit="lb")
+        product = _make_product(size="1 lb")
+        decision = _calculate_quantity(item, product)
+        assert decision.quantity == 3
+        assert decision.needs_review is False
+
+
+class TestCalculateQuantityIncomparableUnits:
+    """Tests for _calculate_quantity when units differ in dimension."""
+
+    def test_each_item_vs_lb_product_flags_incomparable(self) -> None:
+        """Test 2 each vs '5 lb' can't be compared and flags for review."""
+        item = _make_item(quantity=2.0, unit="each")
+        product = _make_product(size="5 lb")
+        decision = _calculate_quantity(item, product)
+        assert decision == QuantityDecision(
+            quantity=1, needs_review=True, review_reason="incomparable_units"
+        )
+
+
+class TestCalculateQuantityCap:
+    """Tests for the per-item quantity cap (issue #59)."""
+
+    def test_large_quantity_capped_at_default_max(self) -> None:
+        """Test 100 lb vs '1 lb' is capped at MAX_QUANTITY_PER_ITEM."""
+        item = _make_item(quantity=100.0, unit="lb")
+        product = _make_product(size="1 lb")
+        decision = _calculate_quantity(item, product)
+        assert decision == QuantityDecision(
+            quantity=MAX_QUANTITY_PER_ITEM,
+            needs_review=True,
+            review_reason="quantity_capped",
+        )
+        assert decision.quantity == 10
+
+    def test_large_quantity_capped_at_injected_cap(self) -> None:
+        """Test the cap is injectable via the ``cap`` keyword argument."""
+        item = _make_item(quantity=100.0, unit="lb")
+        product = _make_product(size="1 lb")
+        decision = _calculate_quantity(item, product, cap=3)
+        assert decision == QuantityDecision(
+            quantity=3, needs_review=True, review_reason="quantity_capped"
+        )
 
 
 # ------------------------------------------------------------------
@@ -589,3 +707,76 @@ class TestBuildCart:
         assert result.items == []
         assert result.failed_items == []
         assert result.subtotal == 0.0
+
+    def test_unparseable_product_size_flags_cart_item_for_review(self) -> None:
+        """Test build_cart propagates needs_review/review_reason (issue #59).
+
+        A product with an unparseable size (e.g. "each") must produce a
+        CartItem carrying ``needs_review=True`` and
+        ``review_reason="unparseable_size"`` rather than silently
+        defaulting to a quantity of 1 with no signal to the user.
+        """
+        product = _make_product(price=8.99, size="each")
+        builder = self._make_builder(
+            search_results=[product],
+            selection_product=product,
+        )
+        result = builder.build_cart([_make_item()])
+
+        assert len(result.items) == 1
+        cart_item = result.items[0]
+        assert cart_item.quantity_to_order == 1
+        assert cart_item.needs_review is True
+        assert cart_item.review_reason == "unparseable_size"
+
+    def test_normal_product_size_leaves_cart_item_unflagged(self) -> None:
+        """Test a normal, parseable product size leaves review fields unset."""
+        product = _make_product(price=8.99, size="2 lb")
+        builder = self._make_builder(
+            search_results=[product],
+            selection_product=product,
+        )
+        result = builder.build_cart([_make_item(quantity=2.0)])
+
+        assert len(result.items) == 1
+        cart_item = result.items[0]
+        assert cart_item.needs_review is False
+        assert cart_item.review_reason == ""
+
+    def test_max_quantity_per_item_is_injectable_on_builder(self) -> None:
+        """Test CartBuilder accepts a max_quantity_per_item override.
+
+        With a low cap, a large order requirement must be capped and the
+        resulting CartItem flagged with review_reason="quantity_capped".
+        """
+        product = _make_product(price=1.0, size="1 lb")
+        mock_search = MagicMock()
+        mock_search.search_or_cached.return_value = [product]
+
+        item = _make_item(quantity=100.0, unit="lb")
+        mock_selector = MagicMock()
+        mock_selector.select_product.return_value = _MockSelectionResult(
+            item=item,
+            product=product,
+            reasoning="Test selection",
+        )
+
+        mock_substitution = MagicMock()
+        mock_client = MagicMock()
+        mock_client.store_id = "1234"
+        mock_client.get.return_value = {}
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+            max_quantity_per_item=3,
+        )
+        result = builder.build_cart([item])
+
+        assert len(result.items) == 1
+        cart_item = result.items[0]
+        assert cart_item.quantity_to_order == 3
+        assert cart_item.needs_review is True
+        assert cart_item.review_reason == "quantity_capped"

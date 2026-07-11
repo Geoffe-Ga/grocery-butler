@@ -1764,6 +1764,77 @@ class TestFormatCartSummaryBot:
         assert "$4.99" in result
         assert "```" in result
 
+    def test_format_flagged_item_shows_review_marker(self) -> None:
+        """Test needs_review items get a '(review: <reason>)' marker.
+
+        Regression guard for issue #59, round 3: per the chief-architect's
+        ruling, a human confirm only counts as review approval if the
+        flagged items AND their reason codes were rendered to that human
+        first. A bare "(review)" marker does not satisfy that -- the
+        Discord cart summary must include the machine-readable reason
+        code (e.g. "incomparable_units") on the flagged line so the user
+        actually sees what needs checking before confirming.
+        """
+        from grocery_butler.models import (
+            CartItem,
+            CartSummary,
+            FulfillmentType,
+            SafewayProduct,
+        )
+
+        flagged_product = SafewayProduct(
+            product_id="P1", name="Mystery Item", price=4.99, size=""
+        )
+        flagged_item = CartItem(
+            shopping_list_item=ShoppingListItem(
+                ingredient="mystery item",
+                quantity=1.0,
+                unit="each",
+                category=IngredientCategory.OTHER,
+                search_term="mystery item",
+                from_meals=["manual"],
+            ),
+            safeway_product=flagged_product,
+            quantity_to_order=1,
+            estimated_cost=4.99,
+            needs_review=True,
+            review_reason="unparseable_size",
+        )
+        unflagged_product = SafewayProduct(
+            product_id="P2", name="Milk", price=3.99, size="1 gal"
+        )
+        unflagged_item = CartItem(
+            shopping_list_item=ShoppingListItem(
+                ingredient="milk",
+                quantity=1.0,
+                unit="gal",
+                category=IngredientCategory.DAIRY,
+                search_term="milk",
+                from_meals=["manual"],
+            ),
+            safeway_product=unflagged_product,
+            quantity_to_order=1,
+            estimated_cost=3.99,
+        )
+        cart = CartSummary(
+            items=[flagged_item, unflagged_item],
+            failed_items=[],
+            substituted_items=[],
+            skipped_items=[],
+            restock_items=[],
+            subtotal=8.98,
+            fulfillment_options=[],
+            recommended_fulfillment=FulfillmentType.PICKUP,
+            estimated_total=8.98,
+        )
+
+        result = _format_cart_summary(cart)
+        lines = result.splitlines()
+        mystery_line = next(line for line in lines if "Mystery Item" in line)
+        milk_line = next(line for line in lines if "Milk" in line)
+        assert "(review: unparseable_size)" in mystery_line
+        assert "(review" not in milk_line
+
     def test_format_with_failed_items(self):
         """Test formatting cart with failed items."""
         from grocery_butler.models import CartSummary, FulfillmentType
@@ -2214,7 +2285,14 @@ class TestOrderConfirmView:
 
     @pytest.mark.asyncio()
     async def test_confirm_submits_and_reports_result(self, mock_interaction):
-        """Test confirm submits the cart and reports the confirmation."""
+        """Test confirm submits the cart and reports the confirmation.
+
+        Per the issue #59, round 3 ruling: the Discord confirm button
+        press is itself the human approval, so it must always forward
+        ``allow_review_items=True`` -- the user already saw the flagged
+        items and their reason codes in the preview rendered by
+        ``_format_cart_summary`` before pressing Confirm.
+        """
         cart = _make_cart_summary()
         order_result = _make_order_result(success=True, order_id="ORD-99")
         mock_pipeline = MagicMock()
@@ -2227,9 +2305,30 @@ class TestOrderConfirmView:
         mock_interaction.followup.send.assert_called_once()
         call_args = str(mock_interaction.followup.send.call_args)
         assert "ORD-99" in call_args
-        mock_pipeline.submit_cart.assert_called_once_with(cart)
+        mock_pipeline.submit_cart.assert_called_once_with(cart, allow_review_items=True)
         mock_pipeline.close.assert_called_once()
         assert view.is_finished() is True
+
+    @pytest.mark.asyncio()
+    async def test_confirm_forwards_allow_review_items_override(self, mock_interaction):
+        """Test confirm always passes allow_review_items=True to submit_cart.
+
+        Dedicated regression guard (separate from the result-reporting
+        test above) for the exact kwarg the confirm button must forward,
+        per the chief-architect's ruling: the human already reviewed the
+        flagged items and reasons in the rendered preview, so pressing
+        Confirm is the explicit override.
+        """
+        cart = _make_cart_summary()
+        mock_pipeline = MagicMock()
+        mock_pipeline.submit_cart.return_value = _make_order_result(success=True)
+
+        view = _OrderConfirmView(mock_pipeline, cart)
+        await type(view).confirm(view, mock_interaction, MagicMock())
+
+        mock_pipeline.submit_cart.assert_called_once()
+        _, kwargs = mock_pipeline.submit_cart.call_args
+        assert kwargs.get("allow_review_items") is True
 
     @pytest.mark.asyncio()
     async def test_confirm_submission_failure_reports_and_closes(

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
-import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from grocery_butler.models import (
@@ -21,6 +21,7 @@ from grocery_butler.models import (
     ShoppingListItem,
     SubstitutionResult,
 )
+from grocery_butler.units import convert, parse_size
 
 if TYPE_CHECKING:
     from grocery_butler.product_search import ProductSearchService
@@ -29,9 +30,32 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Default maximum number of product units ordered for a single shopping
+#: list item, absent an explicit override. Guards against runaway orders
+#: caused by unit-mismatch quantity calculations (issue #59).
+MAX_QUANTITY_PER_ITEM = 10
+
 
 class CartBuildError(Exception):
     """Raised when cart building encounters an unrecoverable error."""
+
+
+@dataclass(frozen=True)
+class QuantityDecision:
+    """The outcome of a per-item quantity calculation.
+
+    Attributes:
+        quantity: Number of product units to order.
+        needs_review: Whether the decision should be flagged for human
+            review.
+        review_reason: Machine-readable reason code for ``needs_review``
+            (``"unparseable_size"``, ``"incomparable_units"``, or
+            ``"quantity_capped"``), or ``""`` when no review is needed.
+    """
+
+    quantity: int
+    needs_review: bool
+    review_reason: str
 
 
 class CartBuilder:
@@ -45,6 +69,8 @@ class CartBuilder:
         product_selector: Claude-assisted product selector.
         substitution_service: Handles out-of-stock substitutions.
         safeway_client: Authenticated Safeway API client.
+        max_quantity_per_item: Maximum product units ordered for any single
+            shopping list item.
     """
 
     def __init__(
@@ -53,6 +79,7 @@ class CartBuilder:
         product_selector: ProductSelector,
         substitution_service: SubstitutionService,
         safeway_client: Any,
+        max_quantity_per_item: int = MAX_QUANTITY_PER_ITEM,
     ) -> None:
         """Initialize the cart builder.
 
@@ -61,11 +88,14 @@ class CartBuilder:
             product_selector: Product selector.
             substitution_service: Substitution service.
             safeway_client: Safeway API client.
+            max_quantity_per_item: Maximum product units ordered for any
+                single shopping list item.
         """
         self._search = search_service
         self._selector = product_selector
         self._substitution = substitution_service
         self._client = safeway_client
+        self._max_quantity_per_item = max_quantity_per_item
 
     def build_cart(
         self,
@@ -155,13 +185,15 @@ class CartBuilder:
         if not product.in_stock:
             return self._handle_out_of_stock(item, product)
 
-        qty = _calculate_quantity(item, product)
-        cost = round(product.price * qty, 2)
+        decision = _calculate_quantity(item, product, cap=self._max_quantity_per_item)
+        cost = round(product.price * decision.quantity, 2)
         return CartItem(
             shopping_list_item=item,
             safeway_product=product,
-            quantity_to_order=qty,
+            quantity_to_order=decision.quantity,
             estimated_cost=cost,
+            needs_review=decision.needs_review,
+            review_reason=decision.review_reason,
         )
 
     def _handle_out_of_stock(
@@ -205,47 +237,54 @@ class CartBuilder:
 # ------------------------------------------------------------------
 
 
+#: Epsilon subtracted before ``math.ceil`` so that quantities landing on
+#: (or fractionally above, due to floating-point noise) an exact multiple
+#: of the product size don't round up to one unit too many.
+_QUANTITY_EPSILON = 1e-9
+
+
 def _calculate_quantity(
     item: ShoppingListItem,
     product: SafewayProduct,
-) -> int:
+    cap: int = MAX_QUANTITY_PER_ITEM,
+) -> QuantityDecision:
     """Calculate how many units to order based on item needs.
 
-    Parses the product size to determine unit quantity, then
-    calculates how many products are needed to fulfill the
-    shopping list quantity.
+    Parses the product size, converts the shopping list item's quantity
+    into the product's unit, and determines how many products are needed
+    to fulfill the requested amount. Flags the decision for human review
+    when the product size can't be parsed, the units can't be compared
+    (different physical dimensions), or the computed quantity exceeds
+    ``cap``.
 
     Args:
-        item: Shopping list item with desired quantity.
+        item: Shopping list item with desired quantity and unit.
         product: The product with size information.
+        cap: Maximum quantity to order without flagging for review.
 
     Returns:
-        Number of units to order (minimum 1).
+        A ``QuantityDecision`` with the quantity to order and any review
+        flag/reason.
     """
-    product_qty = _parse_product_size(product.size)
+    parsed_size = parse_size(product.size)
+    if parsed_size is None:
+        return QuantityDecision(1, True, "unparseable_size")
+
+    product_qty, product_unit = parsed_size
     if product_qty <= 0:
-        return 1
+        return QuantityDecision(1, True, "unparseable_size")
 
-    needed = item.quantity / product_qty
-    return max(1, math.ceil(needed))
+    converted_qty = convert(item.quantity, item.unit, product_unit)
+    if converted_qty is None:
+        return QuantityDecision(1, True, "incomparable_units")
 
+    needed = converted_qty / product_qty
+    quantity = max(1, math.ceil(needed - _QUANTITY_EPSILON))
 
-def _parse_product_size(size: str) -> float:
-    """Extract numeric quantity from a product size string.
+    if quantity > cap:
+        return QuantityDecision(cap, True, "quantity_capped")
 
-    Args:
-        size: Product size string like '2 lb', '16 oz', '1 gal'.
-
-    Returns:
-        Numeric quantity or 0.0 if unparseable.
-    """
-    match = re.match(r"([\d.]+)", size.strip())
-    if match:
-        try:
-            return float(match.group(1))
-        except ValueError:
-            return 0.0
-    return 0.0
+    return QuantityDecision(quantity, False, "")
 
 
 def _calculate_subtotal(

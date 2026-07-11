@@ -81,15 +81,33 @@ class OrderService:
     def submit_order(
         self,
         cart: CartSummary,
+        *,
+        allow_review_items: bool = False,
     ) -> OrderResult:
         """Submit a cart to Safeway and update inventory.
 
+        Before any money is spent, the cart is checked for items flagged
+        by unit-aware quantity math (see :attr:`CartItem.needs_review`).
+        Flagged items block submission unless ``allow_review_items`` is
+        set, which represents an explicit human override after review.
+
         Args:
             cart: The built cart summary to submit.
+            allow_review_items: If True, bypass the review gate and
+                submit even if items are flagged as ``needs_review``.
+                Defaults to False (safe/blocking).
 
         Returns:
             OrderResult with confirmation or error details.
         """
+        if not allow_review_items:
+            flagged = _collect_review_items(cart)
+            if flagged:
+                return OrderResult(
+                    success=False,
+                    error_message=_format_review_block_message(flagged),
+                )
+
         if not cart.items and not cart.restock_items:
             return OrderResult(
                 success=False,
@@ -236,6 +254,40 @@ def _safe_float(value: Any, fallback: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _collect_review_items(cart: CartSummary) -> list[CartItem]:
+    """Collect cart items flagged as needing human review.
+
+    Args:
+        cart: Cart summary with regular and restock items.
+
+    Returns:
+        List of items (from ``items`` and ``restock_items``) whose
+        ``needs_review`` flag is True, in cart order.
+    """
+    return [item for item in cart.items + cart.restock_items if item.needs_review]
+
+
+def _format_review_block_message(flagged: list[CartItem]) -> str:
+    """Build the error message for an order blocked pending review.
+
+    Args:
+        flagged: Cart items flagged as ``needs_review``.
+
+    Returns:
+        Human-readable message naming each flagged ingredient and its
+        review reason, stating the order was blocked pending review.
+    """
+    named = ", ".join(
+        f"{item.shopping_list_item.ingredient} ({item.review_reason})"
+        for item in flagged
+    )
+    return (
+        "Order blocked pending review: the following items need "
+        f"manual review before ordering: {named}. Re-submit with "
+        "allow_review_items=True after confirming quantities."
+    )
 
 
 def _collect_restock_ingredients(cart: CartSummary) -> list[str]:
