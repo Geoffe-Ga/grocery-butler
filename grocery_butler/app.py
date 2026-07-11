@@ -37,11 +37,42 @@ from grocery_butler.recipe_store import RecipeStore
 logger = logging.getLogger(__name__)
 
 
-def create_app(db_path: str = "mealbot.db") -> Flask:
+def _resolve_database_target(db_path: str | None) -> str:
+    """Resolve the database path or connection URL to use for the app.
+
+    Resolution order: an explicit ``db_path`` argument always wins. When
+    ``db_path`` is ``None`` (as it is for the production gunicorn
+    invocation ``gunicorn 'grocery_butler.app:create_app()'``, which calls
+    the factory with no arguments), the ``DATABASE_URL`` environment
+    variable is used if set, then ``DATABASE_PATH``, then finally the
+    ``"mealbot.db"`` local SQLite default. An empty-string ``DATABASE_URL``
+    is treated as unset (hence the ``or`` fallback) so a blank env var
+    doesn't silently mask ``DATABASE_PATH`` or the default.
+
+    Args:
+        db_path: Explicit database path or connection URL, or ``None`` to
+            resolve from the environment.
+
+    Returns:
+        The resolved database path or connection URL string.
+    """
+    if db_path is not None:
+        return db_path
+    return os.environ.get("DATABASE_URL") or os.environ.get(
+        "DATABASE_PATH", "mealbot.db"
+    )
+
+
+def create_app(db_path: str | None = None) -> Flask:
     """Create and configure the Flask application.
 
     Args:
-        db_path: Path to the SQLite database file.
+        db_path: Explicit database path or connection URL. When ``None``
+            (the default), the target is resolved from the ``DATABASE_URL``
+            environment variable, then ``DATABASE_PATH``, then finally the
+            ``"mealbot.db"`` local SQLite default. This lets the production
+            gunicorn invocation, which calls ``create_app()`` with no
+            arguments, pick up the Railway-provisioned Postgres URL.
 
     Returns:
         Configured Flask application instance.
@@ -51,10 +82,11 @@ def create_app(db_path: str = "mealbot.db") -> Flask:
         template_folder="templates",
         static_folder="static",
     )
-    app.config["DATABASE_PATH"] = db_path
+    resolved = _resolve_database_target(db_path)
+    app.config["DATABASE_PATH"] = resolved
     app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", os.urandom(32).hex())
 
-    init_db(db_path)
+    init_db(resolved)
 
     _register_teardown(app)
     _register_error_handlers(app)
