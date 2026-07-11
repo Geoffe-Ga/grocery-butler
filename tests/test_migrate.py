@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -12,13 +13,17 @@ if TYPE_CHECKING:
 
 from grocery_butler.db import get_connection
 from grocery_butler.db.migrate import (
+    MIGRATIONS_DIR,
+    _discover_hook,
     _discover_migrations,
     _ensure_schema_migrations_table,
     _get_applied_versions,
     _record_migration,
+    _run_python_hook,
     main,
     migrate,
 )
+from grocery_butler.models import Unit
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -205,6 +210,81 @@ class TestRecordMigration:
 
 
 # ---------------------------------------------------------------------------
+# _discover_hook
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverHook:
+    """Tests for _discover_hook."""
+
+    def test_no_sibling_file_returns_none(self) -> None:
+        """Test versions without a matching migrations/*.py file return None."""
+        result = _discover_hook(1, "initial_schema")
+        assert result is None
+
+    def test_mismatched_name_returns_none(self) -> None:
+        """Test a version/name pair with no matching file returns None.
+
+        Version 3 has a hook file, but only under the "normalize_unit_enum"
+        name; an unrelated name for the same version must not resolve.
+        """
+        result = _discover_hook(3, "some_other_name")
+        assert result is None
+
+    def test_sibling_file_present_resolves_migrate_callable(self) -> None:
+        """Test _discover_hook resolves the module's migrate callable.
+
+        Version 3 has a sibling ``003_normalize_unit_enum.py`` file
+        alongside its SQL migration. _discover_hook must import that
+        module by convention and return its ``migrate`` attribute.
+        """
+        result = _discover_hook(3, "normalize_unit_enum")
+
+        assert callable(result)
+        module = importlib.import_module(
+            "grocery_butler.db.migrations.003_normalize_unit_enum"
+        )
+        assert result is module.migrate
+
+
+# ---------------------------------------------------------------------------
+# _run_python_hook
+# ---------------------------------------------------------------------------
+
+
+class TestRunPythonHook:
+    """Tests for _run_python_hook."""
+
+    def test_no_hook_is_noop(self, db_path: str) -> None:
+        """Test a version with no discovered hook does nothing and does not raise."""
+        with patch(
+            "grocery_butler.db.migrate._discover_hook", return_value=None
+        ) as mock_discover:
+            _run_python_hook(1, "initial_schema", db_path)
+
+        mock_discover.assert_called_once_with(1, "initial_schema")
+
+    def test_discovered_hook_invoked_once_with_db_path(self, db_path: str) -> None:
+        """Test a discovered hook is invoked exactly once with db_path."""
+        mock_hook = MagicMock()
+
+        with patch("grocery_butler.db.migrate._discover_hook", return_value=mock_hook):
+            _run_python_hook(3, "normalize_unit_enum", db_path)
+
+        mock_hook.assert_called_once_with(db_path)
+
+    def test_hook_error_propagates(self, db_path: str) -> None:
+        """Test exceptions raised by a discovered hook propagate to the caller."""
+        mock_hook = MagicMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch("grocery_butler.db.migrate._discover_hook", return_value=mock_hook),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            _run_python_hook(3, "normalize_unit_enum", db_path)
+
+
+# ---------------------------------------------------------------------------
 # migrate (integration)
 # ---------------------------------------------------------------------------
 
@@ -260,8 +340,6 @@ class TestMigrate:
 
     def test_bad_sql_raises(self, tmp_path: Path) -> None:
         """Test that invalid SQL in a migration file raises an error."""
-        from grocery_butler.db.migrate import MIGRATIONS_DIR
-
         # Create a temp migrations dir with a broken migration
         fake_dir = tmp_path / "migrations"
         fake_dir.mkdir()
@@ -278,6 +356,113 @@ class TestMigrate:
             pytest.raises(Exception, match=r".+"),
         ):
             migrate(db_path)
+
+    def test_python_hook_runs_after_sql_and_before_record(self, tmp_path: Path) -> None:
+        """Test the per-migration order is: executescript -> hook -> record.
+
+        Uses a temp migrations dir (same ``iterdir`` patch pattern as
+        ``test_bad_sql_raises``) with a single SQL migration that creates
+        a marker table. ``_run_python_hook`` and ``_record_migration`` are
+        replaced with recording fakes: the fake hook asserts the marker
+        table already exists (proving the SQL ran first) and the fake
+        record simply logs its call, so the final event order proves the
+        hook ran strictly between the SQL apply and the record step.
+        """
+        fake_dir = tmp_path / "migrations"
+        fake_dir.mkdir()
+        (fake_dir / "__init__.py").write_text("")
+        (fake_dir / "001_marker.sql").write_text(
+            "CREATE TABLE marker_table (id INTEGER);"
+        )
+
+        db_path = str(tmp_path / "order.db")
+        events: list[str] = []
+
+        def _fake_hook(version: int, name: str, path: str) -> None:
+            conn = get_connection(path)
+            try:
+                cursor = conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table' AND name='marker_table'"
+                )
+                assert cursor.fetchone() is not None, (
+                    "hook ran before the SQL migration was applied"
+                )
+            finally:
+                conn.close()
+            events.append("hook")
+
+        def _fake_record(conn: object, version: int, name: str) -> None:
+            events.append("record")
+
+        with (
+            patch.object(
+                type(MIGRATIONS_DIR),
+                "iterdir",
+                return_value=iter(sorted(fake_dir.iterdir())),
+            ),
+            patch("grocery_butler.db.migrate._run_python_hook", side_effect=_fake_hook),
+            patch(
+                "grocery_butler.db.migrate._record_migration",
+                side_effect=_fake_record,
+            ),
+        ):
+            migrate(db_path)
+
+        assert events == ["hook", "record"]
+
+    def test_convention_hook_normalizes_denormalized_unit_end_to_end(
+        self, db_path: str
+    ) -> None:
+        """Test the real 003 convention hook fires and normalizes data.
+
+        Runs the real (unmocked) migrate() end-to-end. All migrations
+        apply on a fresh database first. Version 3's schema_migrations
+        record is then deleted and a denormalized ``unit`` value ("cups")
+        is seeded into recipe_ingredients, simulating "003 pending, data
+        present." Re-running migrate() must rediscover and re-run the
+        003 hook (via _discover_hook's file-convention lookup, not a
+        mock), normalizing "cups" to the canonical Unit.CUP value.
+        """
+        migrate(db_path)
+
+        conn = get_connection(db_path)
+        try:
+            conn.execute("DELETE FROM schema_migrations WHERE version = ?", (3,))
+            conn.commit()
+
+            cursor = conn.execute(
+                "INSERT INTO recipes (name, display_name) VALUES (?, ?)",
+                ("hook_e2e_recipe", "Hook E2E Recipe"),
+            )
+            recipe_id = cursor.lastrowid
+            assert recipe_id is not None
+            conn.commit()
+
+            conn.execute(
+                "INSERT INTO recipe_ingredients "
+                "(recipe_id, ingredient, quantity, unit, category, "
+                "quantity_per_serving) VALUES (?, ?, ?, ?, ?, ?)",
+                (recipe_id, "flour", 2.0, "cups", "pantry_dry", 0.5),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        count = migrate(db_path)
+        assert count == 1
+
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT unit FROM recipe_ingredients WHERE recipe_id = ?",
+                (recipe_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert row is not None
+        assert row["unit"] == Unit.CUP.value
 
 
 # ---------------------------------------------------------------------------
