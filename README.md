@@ -702,7 +702,10 @@ grocery-butler/
 | Type errors (`mypy --strict`) | 0 |
 | Security findings (bandit, pip-audit) | 0 |
 
-See `CLAUDE.md` for the full engineering culture document.
+See `CLAUDE.md` for the full engineering culture document. Before shipping a
+build for real family use, walk through
+[`docs/MANUAL_E2E_CHECKLIST.md`](docs/MANUAL_E2E_CHECKLIST.md) — the manual
+pre-ship checklist covering CLI, web, and `/api/v1` surfaces.
 
 ## Deploying to Railway
 
