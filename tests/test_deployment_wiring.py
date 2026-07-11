@@ -168,3 +168,123 @@ def _dockerfile_cmd() -> str:
         if stripped.startswith("CMD "):
             command = stripped.removeprefix("CMD ")
     return command
+
+
+# ---------------------------------------------------------------------------
+# App factory database wiring (issue #57)
+# ---------------------------------------------------------------------------
+
+FAKE_POSTGRES_DSN = "postgresql://user:pass@db.example/testdb"
+
+
+def _noop_init_db(db_path: str) -> None:
+    """Stand in for ``grocery_butler.app.init_db`` without a live connection.
+
+    A ``postgresql://`` DSN passed to the real ``init_db`` would attempt to
+    open an actual network connection via psycopg2, which these tests must
+    not do since ``FAKE_POSTGRES_DSN`` points at a non-existent host.
+
+    Args:
+        db_path: Path or URL that would normally be initialized. Unused.
+    """
+
+
+class TestAppFactoryDatabaseWiring:
+    """create_app() must resolve DATABASE_URL/DATABASE_PATH env vars.
+
+    The production gunicorn invocation (``gunicorn
+    'grocery_butler.app:create_app()'``) calls ``create_app()`` with no
+    arguments, so the factory itself must read the Railway-provided
+    ``DATABASE_URL`` (or ``DATABASE_PATH``) environment variable. Without
+    this, every deploy silently falls back to the ``"mealbot.db"`` default,
+    writing to ephemeral SQLite instead of the persistent Postgres database
+    (issue #57).
+    """
+
+    def test_create_app_no_args_uses_database_url_when_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """create_app() with no args stores DATABASE_URL as the db target.
+
+        Args:
+            monkeypatch: Pytest fixture for patching env vars and attributes.
+        """
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DATABASE_PATH", raising=False)
+        monkeypatch.setenv("DATABASE_URL", FAKE_POSTGRES_DSN)
+        monkeypatch.setattr("grocery_butler.app.init_db", _noop_init_db)
+
+        application = create_app()
+
+        assert application.config["DATABASE_PATH"] == FAKE_POSTGRES_DSN
+
+    def test_create_app_no_args_uses_database_path_when_only_path_set(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """create_app() with no args falls back to DATABASE_PATH when set.
+
+        Args:
+            monkeypatch: Pytest fixture for patching env vars.
+            tmp_path: Pytest fixture providing an isolated temp directory.
+        """
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DATABASE_PATH", raising=False)
+        env_db_path = str(tmp_path / "env_configured.db")
+        monkeypatch.setenv("DATABASE_PATH", env_db_path)
+
+        application = create_app()
+
+        assert application.config["DATABASE_PATH"] == env_db_path
+
+    def test_create_app_prefers_database_url_over_database_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """DATABASE_URL takes precedence when both env vars are set.
+
+        Args:
+            monkeypatch: Pytest fixture for patching env vars and attributes.
+            tmp_path: Pytest fixture providing an isolated temp directory.
+        """
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DATABASE_PATH", raising=False)
+        monkeypatch.setenv("DATABASE_URL", FAKE_POSTGRES_DSN)
+        monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "should_be_ignored.db"))
+        monkeypatch.setattr("grocery_butler.app.init_db", _noop_init_db)
+
+        application = create_app()
+
+        assert application.config["DATABASE_PATH"] == FAKE_POSTGRES_DSN
+
+    def test_create_app_defaults_to_mealbot_db_when_env_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """create_app() falls back to "mealbot.db" when no env var is set.
+
+        Args:
+            monkeypatch: Pytest fixture for patching env vars and attributes.
+        """
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DATABASE_PATH", raising=False)
+        monkeypatch.setattr("grocery_butler.app.init_db", _noop_init_db)
+
+        application = create_app()
+
+        assert application.config["DATABASE_PATH"] == "mealbot.db"
+
+    def test_create_app_explicit_db_path_overrides_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An explicit db_path argument wins over any env var.
+
+        Args:
+            monkeypatch: Pytest fixture for patching env vars.
+            tmp_path: Pytest fixture providing an isolated temp directory.
+        """
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DATABASE_PATH", raising=False)
+        monkeypatch.setenv("DATABASE_URL", FAKE_POSTGRES_DSN)
+        explicit_path = str(tmp_path / "explicit.db")
+
+        application = create_app(db_path=explicit_path)
+
+        assert application.config["DATABASE_PATH"] == explicit_path
