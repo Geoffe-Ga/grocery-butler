@@ -16,6 +16,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import importlib
 import logging
 import os
 import re
@@ -26,6 +27,8 @@ from typing import TYPE_CHECKING
 from grocery_butler.db import get_connection
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from grocery_butler.db.adapter import DatabaseConnection
 
 logger = logging.getLogger(__name__)
@@ -136,32 +139,54 @@ def _record_migration(conn: DatabaseConnection, version: int, name: str) -> None
     conn.commit()
 
 
-_PYTHON_HOOKS: dict[int, str] = {
-    3: "grocery_butler.db.migrate_unit_enum",
-}
+def _discover_hook(version: int, name: str) -> Callable[[str], None] | None:
+    """Discover a Python migration hook by file-naming convention.
+
+    A migration may have an associated Python hook for logic that
+    cannot be expressed in SQL alone (e.g. data transforms). Convention:
+    a hook lives alongside its SQL file as ``NNN_name.py`` under
+    ``migrations/`` and must expose a ``migrate(db_path: str) -> None``
+    callable. If no such sibling file exists, there is no hook for this
+    version/name pair.
+
+    Args:
+        version: Migration version number.
+        name: Migration name, as parsed from its SQL filename.
+
+    Returns:
+        The hook module's ``migrate`` callable, or None if no matching
+        ``NNN_name.py`` file exists in ``migrations/``.
+    """
+    hook_path = MIGRATIONS_DIR / f"{version:03d}_{name}.py"
+    if not hook_path.is_file():
+        return None
+
+    module = importlib.import_module(
+        f"grocery_butler.db.migrations.{version:03d}_{name}"
+    )
+    hook: Callable[[str], None] = module.migrate
+    return hook
 
 
 def _run_python_hook(version: int, name: str, db_path: str) -> None:
-    """Run a Python migration hook if one is registered for this version.
+    """Run a Python migration hook if one is discovered for this version.
 
-    Some migrations require Python logic (e.g. data transforms) that
-    cannot be expressed in SQL alone.  Hooks are registered in
-    ``_PYTHON_HOOKS`` mapping version numbers to module paths.
+    Hooks are discovered by convention via :func:`_discover_hook`: a
+    version with a sibling ``NNN_name.py`` file in ``migrations/`` gets
+    its ``migrate`` callable invoked with ``db_path``; a version with no
+    such file is a no-op.
 
     Args:
         version: Migration version number.
         name: Migration name (for logging).
         db_path: Database file path or PostgreSQL URL.
     """
-    module_path = _PYTHON_HOOKS.get(version)
-    if module_path is None:
+    hook = _discover_hook(version, name)
+    if hook is None:
         return
 
-    import importlib
-
     logger.info("Running Python hook for %03d_%s ...", version, name)
-    mod = importlib.import_module(module_path)
-    mod.migrate(db_path)
+    hook(db_path)
 
 
 def migrate(db_path: str) -> int:
