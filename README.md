@@ -181,7 +181,7 @@ and easy to operate alone.**
 ### Web
 
 - **Flask 3** — small, explicit, and fits on a single Railway dyno without
-  ceremony. The app is constructed by an `create_app(db_path)` factory so
+  ceremony. The app is constructed by a `create_app(db_path=None)` factory so
   tests can spin up isolated instances against a tmpfile database.
 - **Jinja2 templates + Pico CSS** — server-rendered HTML, no SPA, no build
   step. The dashboard is meant to be operated from a phone in the kitchen,
@@ -318,8 +318,10 @@ Grocery Butler exposes the same domain through three distinct surface areas.
 
 ### HTTP / Web API
 
-Constructed by `grocery_butler.app.create_app(db_path: str)`. All routes are
-server-rendered HTML except where noted.
+Constructed by `grocery_butler.app.create_app(db_path: str | None = None)`.
+With no argument, it resolves `DATABASE_URL`, then `DATABASE_PATH`, then
+defaults to `mealbot.db` — this is how production gunicorn invokes it. All
+routes are server-rendered HTML except where noted.
 
 #### Health
 
