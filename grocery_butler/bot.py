@@ -922,12 +922,13 @@ def create_bot(config: Config) -> discord.Client:
         try:
             prefs = await asyncio.to_thread(recipe_store.get_brand_preferences)
             removed = 0
-            for idx, pref in enumerate(prefs):
-                if pref.match_target.lower() == target.lower():
-                    # Brand preference IDs start at 1 and are sequential
-                    # Re-fetch to get current IDs
+            for pref in prefs:
+                matches = pref.match_target.lower() == target.lower()
+                # pref.id is always populated by get_brand_preferences(); the
+                # None check only narrows the Optional type for mypy.
+                if matches and pref.id is not None:
                     await asyncio.to_thread(
-                        recipe_store.remove_brand_preference, idx + 1
+                        recipe_store.remove_brand_preference, pref.id
                     )
                     removed += 1
 

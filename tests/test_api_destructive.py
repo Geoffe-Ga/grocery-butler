@@ -768,6 +768,10 @@ class TestActionsConfirm:
         assert len(prefs) == 1
         assert prefs[0].brand == "Clover"
         assert prefs[0].match_target == "milk"
+        # The confirmation payload must carry the real inserted row id, not
+        # the BrandPreference model's None default (regression: issue #63).
+        assert prefs[0].id is not None
+        assert data["result"]["id"] == prefs[0].id
 
         action = pending_store.get_pending_action(action_id)
         assert action is not None

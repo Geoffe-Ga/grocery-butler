@@ -20,6 +20,7 @@ from grocery_butler.models import (
     InventoryItem,
     InventoryStatus,
     ParsedMeal,
+    ShoppingListItem,
     parse_unit,
 )
 from grocery_butler.pantry_manager import PantryManager
@@ -1028,81 +1029,140 @@ class TestShoppingListPage:
         assert b"meals" in response.data
 
     def test_shopping_list_has_disabled_order_button_when_items(
-        self, client: FlaskClient
+        self, client: FlaskClient, db_path: str
     ) -> None:
-        """Test shopping list shows disabled order button when items exist."""
-        with client.session_transaction() as sess:
-            sess["shopping_list_items"] = [
-                {
-                    "ingredient": "pasta",
-                    "quantity": 1.0,
-                    "unit": "lb",
-                    "category": "pantry_dry",
-                    "from_meals": ["Test"],
-                }
+        """Test shopping list shows disabled order button when items exist.
+
+        Issue #65: items are now persisted via ShoppingListStore instead of
+        the session cookie, so the page must render them from the DB.
+        """
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        ShoppingListStore(db_path).save_list(
+            [
+                ShoppingListItem(
+                    ingredient="pasta",
+                    quantity=1.0,
+                    unit="lb",
+                    category=IngredientCategory.PANTRY_DRY,
+                    search_term="pasta",
+                    from_meals=["Test"],
+                )
             ]
+        )
         response = client.get("/shopping-list")
         html = response.data.decode()
         assert "Order from Safeway" in html
         assert "Coming Soon" in html
 
-    def test_shopping_list_shows_items_from_session(self, client: FlaskClient) -> None:
-        """Test shopping list renders items from session."""
-        with client.session_transaction() as sess:
-            sess["shopping_list_items"] = [
-                {
-                    "ingredient": "chicken",
-                    "quantity": 2.0,
-                    "unit": "lbs",
-                    "category": "meat",
-                    "from_meals": ["Stir Fry"],
-                }
+    def test_shopping_list_shows_items_from_store(
+        self, client: FlaskClient, db_path: str
+    ) -> None:
+        """Test shopping list renders items persisted via ShoppingListStore.
+
+        Issue #65: previously read from the session; must now read from
+        the DB-backed store so the list is visible across browsers.
+        """
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        ShoppingListStore(db_path).save_list(
+            [
+                ShoppingListItem(
+                    ingredient="chicken",
+                    quantity=2.0,
+                    unit="lbs",
+                    category=IngredientCategory.MEAT,
+                    search_term="chicken",
+                    from_meals=["Stir Fry"],
+                )
             ]
+        )
         response = client.get("/shopping-list")
         assert b"chicken" in response.data
 
-    def test_shopping_list_groups_by_category(self, client: FlaskClient) -> None:
+    def test_shopping_list_groups_by_category(
+        self, client: FlaskClient, db_path: str
+    ) -> None:
         """Test shopping list groups items by category."""
-        with client.session_transaction() as sess:
-            sess["shopping_list_items"] = [
-                {
-                    "ingredient": "chicken",
-                    "quantity": 2.0,
-                    "unit": "lbs",
-                    "category": "meat",
-                    "from_meals": ["Stir Fry"],
-                },
-                {
-                    "ingredient": "broccoli",
-                    "quantity": 1.0,
-                    "unit": "head",
-                    "category": "produce",
-                    "from_meals": ["Stir Fry"],
-                },
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        ShoppingListStore(db_path).save_list(
+            [
+                ShoppingListItem(
+                    ingredient="chicken",
+                    quantity=2.0,
+                    unit="lbs",
+                    category=IngredientCategory.MEAT,
+                    search_term="chicken",
+                    from_meals=["Stir Fry"],
+                ),
+                ShoppingListItem(
+                    ingredient="broccoli",
+                    quantity=1.0,
+                    unit="head",
+                    category=IngredientCategory.PRODUCE,
+                    search_term="broccoli",
+                    from_meals=["Stir Fry"],
+                ),
             ]
+        )
         response = client.get("/shopping-list")
         html = response.data.decode()
         assert "meat" in html
         assert "produce" in html
 
     def test_shopping_list_restock_items_distinguished(
-        self, client: FlaskClient
+        self, client: FlaskClient, db_path: str
     ) -> None:
         """Test restock items are visually distinguished."""
-        with client.session_transaction() as sess:
-            sess["shopping_list_items"] = [
-                {
-                    "ingredient": "milk",
-                    "quantity": 1.0,
-                    "unit": "gallon",
-                    "category": "dairy",
-                    "from_meals": ["restock"],
-                }
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        ShoppingListStore(db_path).save_list(
+            [
+                ShoppingListItem(
+                    ingredient="milk",
+                    quantity=1.0,
+                    unit="gallon",
+                    category=IngredientCategory.DAIRY,
+                    search_term="milk",
+                    from_meals=["restock"],
+                )
             ]
+        )
         response = client.get("/shopping-list")
         html = response.data.decode()
         assert "restock" in html
         assert "shopping-item-restock" in html
+
+    def test_shopping_list_renders_large_persisted_list_completely(
+        self, app: Flask, db_path: str
+    ) -> None:
+        """Test the page renders every item of a 40+ item persisted list.
+
+        Issue #65: a list this size (well past the ~4KB cookie cap) would
+        silently truncate under the old session-based storage. Persisting
+        through ShoppingListStore must render every item regardless of
+        list size.
+        """
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        items = [
+            ShoppingListItem(
+                ingredient=f"ingredient-{i}",
+                quantity=1.0,
+                unit="each",
+                category=IngredientCategory.OTHER,
+                search_term=f"ingredient-{i}",
+                from_meals=["Big Meal"],
+            )
+            for i in range(45)
+        ]
+        ShoppingListStore(db_path).save_list(items)
+
+        response = app.test_client().get("/shopping-list")
+        html = response.data.decode()
+        for i in range(45):
+            assert f"ingredient-{i}" in html
 
 
 # ---------------------------------------------------------------------------
@@ -1249,18 +1309,48 @@ class TestShoppingListGenerate:
         )
         assert b"flash-warning" in response.data
 
-    def test_generate_stores_items_in_session(self, client: FlaskClient) -> None:
-        """Test POST stores shopping list in session."""
+    def test_generate_persists_items_to_store(
+        self,
+        client: FlaskClient,
+        recipe_store: RecipeStore,
+        sample_meal: ParsedMeal,
+        db_path: str,
+    ) -> None:
+        """Test POST persists the generated list via ShoppingListStore.
+
+        Issue #65: the list must be readable back from persistent (DB)
+        storage rather than living only in the requesting browser's
+        session cookie.
+        """
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        recipe_store.save_recipe(sample_meal)
+        client.post(
+            "/shopping-list/generate",
+            data={"meals": "Test Pasta"},
+            follow_redirects=True,
+        )
+
+        items = ShoppingListStore(db_path).get_latest_list()
+        assert any(item.ingredient == "pasta" for item in items)
+
+    def test_generate_does_not_store_items_in_session_cookie(
+        self, client: FlaskClient
+    ) -> None:
+        """Test POST no longer writes the generated list into the session.
+
+        Issue #65 (HIGH): storing the list in the Flask session cookie
+        caps it at ~4KB, silently truncating large lists. The list must
+        be persisted server-side instead, and any stale session key must
+        be cleared so old cookies shrink back down.
+        """
         client.post(
             "/shopping-list/generate",
             data={"meals": "Some Meal"},
             follow_redirects=True,
         )
-        # Verify session has items by getting the page
-        response = client.get("/shopping-list")
-        # The page should not show empty state since we generated a list
-        # (even if stub meals, the restock items from seeded data may appear)
-        assert response.status_code == 200
+        with client.session_transaction() as sess:
+            assert "shopping_list_items" not in sess
 
     def test_generate_with_known_recipe(
         self, client: FlaskClient, recipe_store: RecipeStore, sample_meal: ParsedMeal
@@ -1363,6 +1453,48 @@ class TestClassifyParsedMeals:
 
         assert resolved == [pantry_only_meal]
         assert unresolved_names == []
+
+
+# ---------------------------------------------------------------------------
+# TestShoppingListCrossSession
+# ---------------------------------------------------------------------------
+
+
+class TestShoppingListCrossSession:
+    """Tests for cross-browser visibility of the generated shopping list.
+
+    Issue #65 (HIGH): the shopping list was stored in the per-browser
+    session cookie, so it was invisible to other household members and
+    silently truncated once it exceeded the ~4KB cookie cap. These tests
+    reproduce the visibility half of the bug; size-independence is
+    covered by
+    ``TestShoppingListPage.test_shopping_list_renders_large_persisted_list_completely``.
+    """
+
+    def test_list_visible_from_independent_browser_session(
+        self,
+        app: Flask,
+        client: FlaskClient,
+        recipe_store: RecipeStore,
+        sample_meal: ParsedMeal,
+    ) -> None:
+        """Test a list generated by one client is visible from a fresh client.
+
+        ``client`` generates the list; a brand new ``app.test_client()``
+        (its own independent cookie jar, simulating a different household
+        member's browser) must see the same generated items.
+        """
+        recipe_store.save_recipe(sample_meal)
+        client.post(
+            "/shopping-list/generate",
+            data={"meals": "Test Pasta"},
+            follow_redirects=True,
+        )
+
+        fresh_client = app.test_client()
+        response = fresh_client.get("/shopping-list")
+
+        assert b"pasta" in response.data
 
 
 # ---------------------------------------------------------------------------
@@ -1778,6 +1910,119 @@ class TestBrandsRemove:
         )
         assert response.status_code == 302
         assert "/brands" in response.headers["Location"]
+
+    def test_brands_page_renders_real_ids_with_gap(
+        self, client: FlaskClient, recipe_store: RecipeStore
+    ) -> None:
+        """Test the brands page uses real DB ids, not loop.index, in forms."""
+        from grocery_butler.models import (
+            BrandMatchType,
+            BrandPreference,
+            BrandPreferenceType,
+        )
+
+        first_id = recipe_store.add_brand_preference(
+            BrandPreference(
+                match_target="aardvark",
+                match_type=BrandMatchType.INGREDIENT,
+                brand="First Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        middle_id = recipe_store.add_brand_preference(
+            BrandPreference(
+                match_target="middleman",
+                match_type=BrandMatchType.INGREDIENT,
+                brand="Middle Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        third_id = recipe_store.add_brand_preference(
+            BrandPreference(
+                match_target="zucchini",
+                match_type=BrandMatchType.INGREDIENT,
+                brand="Third Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        # Force an id gap: the surviving prefs' ids are no longer sequential
+        # starting at 1, so a template that renders loop.index instead of
+        # pref.id would point at the wrong row.
+        recipe_store.remove_brand_preference(middle_id)
+
+        response = client.get("/brands")
+        html = response.data.decode()
+
+        assert f"/brands/{first_id}/remove" in html
+        assert f"/brands/{third_id}/remove" in html
+        # loop.index over the two surviving prefs would produce "1" and "2".
+        # The surviving real ids are not 1 and 2, so a "/brands/2/remove"
+        # action would only appear if the template incorrectly used
+        # loop.index instead of the real id.
+        assert "/brands/2/remove" not in html
+        assert f"/brands/{middle_id}/remove" not in html
+
+    def test_brands_remove_nonexistent_id_shows_not_found_flash(
+        self, client: FlaskClient
+    ) -> None:
+        """Test removing a nonexistent id flashes an error, not success."""
+        response = client.post(
+            "/brands/9999/remove",
+            follow_redirects=True,
+        )
+        assert response.status_code == 200
+        assert b"Brand preference removed" not in response.data
+        assert b"not found" in response.data.lower()
+
+    def test_brands_remove_clicked_row_deletes_correct_pref(
+        self, client: FlaskClient, recipe_store: RecipeStore
+    ) -> None:
+        """Test clicking Remove on a row deletes only that row, ids gapped."""
+        from grocery_butler.models import (
+            BrandMatchType,
+            BrandPreference,
+            BrandPreferenceType,
+        )
+
+        first_id = recipe_store.add_brand_preference(
+            BrandPreference(
+                match_target="apple",
+                match_type=BrandMatchType.INGREDIENT,
+                brand="Survivor Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        middle_id = recipe_store.add_brand_preference(
+            BrandPreference(
+                match_target="banana",
+                match_type=BrandMatchType.INGREDIENT,
+                brand="Gap Creator Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        highest_id = recipe_store.add_brand_preference(
+            BrandPreference(
+                match_target="cherry",
+                match_type=BrandMatchType.INGREDIENT,
+                brand="Target Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        # Create the id gap directly via the store, then remove the
+        # highest-id row through the web route, as a user clicking the
+        # "Remove" button on that row would.
+        recipe_store.remove_brand_preference(middle_id)
+
+        response = client.post(
+            f"/brands/{highest_id}/remove",
+            follow_redirects=True,
+        )
+
+        assert response.status_code == 200
+        remaining = recipe_store.get_brand_preferences()
+        remaining_ids = {pref.id for pref in remaining}
+        assert highest_id not in remaining_ids
+        assert first_id in remaining_ids
 
 
 # ---------------------------------------------------------------------------
