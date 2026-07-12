@@ -23,6 +23,7 @@
     --color-border: #3d2e33;
     --color-flash-success: #4caf50;
     --color-flash-error: #c0392b;
+    --color-flash-warning: #b7791f;
 
     /* Layout */
     --max-width: 960px;
@@ -220,6 +221,12 @@ main.container {
     background: var(--color-out-bg);
     color: var(--color-flash-error);
     border: 1px solid var(--color-out);
+}
+
+.flash-warning {
+    background: var(--color-low-bg);
+    color: var(--color-flash-warning);
+    border: 1px solid var(--color-low);
 }
 
 .flash-close {
