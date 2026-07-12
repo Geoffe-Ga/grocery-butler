@@ -47,6 +47,28 @@ class TestDimensionOf:
         assert dimension_of(unit) is None
 
 
+class TestDimensionOfNewUnits:
+    """Tests for dimension_of classification of pint/quart/stick (issue #69).
+
+    ``Unit.PINT``/``Unit.QUART``/``Unit.STICK`` don't exist on the current
+    ``Unit`` enum yet, so referencing them raises ``AttributeError`` --
+    written as plain (non-parametrized) test bodies so a missing attribute
+    only fails its own test, not collection of this whole module.
+    """
+
+    def test_pint_is_volume(self) -> None:
+        """Test Unit.PINT classifies as Dimension.VOLUME."""
+        assert dimension_of(Unit.PINT) == Dimension.VOLUME
+
+    def test_quart_is_volume(self) -> None:
+        """Test Unit.QUART classifies as Dimension.VOLUME."""
+        assert dimension_of(Unit.QUART) == Dimension.VOLUME
+
+    def test_stick_is_dimensionless(self) -> None:
+        """Test Unit.STICK (packaging) classifies as None (no fixed dimension)."""
+        assert dimension_of(Unit.STICK) is None
+
+
 # ------------------------------------------------------------------
 # Tests: convert
 # ------------------------------------------------------------------
@@ -128,6 +150,27 @@ class TestConvert:
         assert convert(1.0, Unit.G, Unit.BAG) is None
 
 
+class TestConvertNewUnits:
+    """Tests for convert() involving pint/quart (issue #69).
+
+    ``_VOLUME_FACTORS_ML`` lacks entries for ``Unit.PINT``/``Unit.QUART`` on
+    the current implementation, so these conversions currently return
+    ``None`` instead of the expected converted value.
+    """
+
+    def test_pint_to_quart(self) -> None:
+        """Test 2 pints convert to approximately 1 quart."""
+        assert convert(2.0, Unit.PINT, Unit.QUART) == pytest.approx(1.0)
+
+    def test_quart_to_liter(self) -> None:
+        """Test 1 quart converts to approximately 0.946352946 liters."""
+        assert convert(1.0, Unit.QUART, Unit.L) == pytest.approx(0.946352946)
+
+    def test_gallon_to_quart(self) -> None:
+        """Test 1 gallon converts to exactly 4 quarts."""
+        assert convert(1.0, Unit.GAL, Unit.QUART) == pytest.approx(4.0)
+
+
 # ------------------------------------------------------------------
 # Tests: parse_size
 # ------------------------------------------------------------------
@@ -181,3 +224,15 @@ class TestParseSize:
     def test_leading_whitespace(self) -> None:
         """Test size with leading whitespace is still parsed."""
         assert parse_size("  16 oz") == (16.0, Unit.OZ)
+
+
+class TestParseSizeNewUnits:
+    """Tests for parse_size() recognizing pint/quart tokens (issue #69)."""
+
+    def test_parses_pint(self) -> None:
+        """Test '1 pint' parses to (1.0, Unit.PINT)."""
+        assert parse_size("1 pint") == (1.0, Unit.PINT)
+
+    def test_parses_quart_abbreviation(self) -> None:
+        """Test '2 qt' parses to (2.0, Unit.QUART)."""
+        assert parse_size("2 qt") == (2.0, Unit.QUART)
