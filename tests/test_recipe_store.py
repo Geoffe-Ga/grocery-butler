@@ -578,3 +578,63 @@ class TestBrandPreferences:
         )
         result = store.get_brands_for_ingredient("chicken")
         assert result == []
+
+    def test_get_brand_preferences_populates_id(self, store: RecipeStore) -> None:
+        """Test get_brand_preferences populates the real DB id on each pref."""
+        pref_a = BrandPreference(
+            match_target="dairy",
+            match_type=BrandMatchType.CATEGORY,
+            brand="Organic Valley",
+            preference_type=BrandPreferenceType.PREFERRED,
+        )
+        pref_b = BrandPreference(
+            match_target="soda",
+            match_type=BrandMatchType.CATEGORY,
+            brand="Generic Cola",
+            preference_type=BrandPreferenceType.AVOID,
+        )
+        id_a = store.add_brand_preference(pref_a)
+        id_b = store.add_brand_preference(pref_b)
+
+        result = store.get_brand_preferences()
+        by_brand = {pref.brand: pref for pref in result}
+        assert by_brand["Organic Valley"].id == id_a
+        assert by_brand["Generic Cola"].id == id_b
+
+    def test_get_brands_for_ingredient_populates_id(self, store: RecipeStore) -> None:
+        """Test get_brands_for_ingredient (via _rows_to_brand_prefs) sets id."""
+        pref = BrandPreference(
+            match_target="milk",
+            match_type=BrandMatchType.INGREDIENT,
+            brand="Organic Valley",
+            preference_type=BrandPreferenceType.PREFERRED,
+        )
+        pref_id = store.add_brand_preference(pref)
+
+        result = store.get_brands_for_ingredient("milk")
+        assert len(result) == 1
+        assert result[0].id == pref_id
+
+    def test_remove_brand_preference_returns_true_when_deleted(
+        self, store: RecipeStore
+    ) -> None:
+        """Test remove_brand_preference returns True for an existing id."""
+        pref = BrandPreference(
+            match_target="dairy",
+            match_type=BrandMatchType.CATEGORY,
+            brand="Store Brand",
+            preference_type=BrandPreferenceType.AVOID,
+        )
+        pref_id = store.add_brand_preference(pref)
+
+        result = store.remove_brand_preference(pref_id)
+
+        assert result is True
+
+    def test_remove_brand_preference_returns_false_when_missing(
+        self, store: RecipeStore
+    ) -> None:
+        """Test remove_brand_preference returns False for a nonexistent id."""
+        result = store.remove_brand_preference(9999)
+
+        assert result is False

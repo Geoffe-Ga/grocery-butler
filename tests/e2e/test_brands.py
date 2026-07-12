@@ -1,13 +1,10 @@
 """E2E: brand preference staging via ``/brands/set`` -> confirm/deny.
 
-The web ``/brands/<id>/remove`` form flow is excluded here: it is an
-open bug (#63) where ``templates/brands.html`` links using
-``loop.index`` instead of the preference's real database id (the
-``BrandPreference`` model returned by ``get_brand_preferences`` has no
-``id`` field at all, so the template can only be coincidentally
-correct). That is a templating defect in a different layer than the
-``/api/v1`` blueprint this suite covers, and is reported back rather
-than fixed here.
+The web ``/brands/<id>/remove`` form flow lives in a different layer
+than the ``/api/v1`` blueprint this suite covers. It is exercised by
+the template-rendering and removal tests in ``tests/test_app.py``
+(added for issue #63, which fixed ``templates/brands.html`` to post
+the preference's real database id instead of ``loop.index``).
 """
 
 from __future__ import annotations

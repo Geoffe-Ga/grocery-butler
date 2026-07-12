@@ -663,7 +663,7 @@ def _confirm_brands_set(action: PendingAction, store: PendingActionsStore) -> Re
     pref = BrandPreference.model_validate(action.payload)
     _claim_pending(store, action.action_id)
     pref_id = _recipe_store().add_brand_preference(pref)
-    return _approved(action, {"id": pref_id, **pref.model_dump(mode="json")})
+    return _approved(action, {**pref.model_dump(mode="json"), "id": pref_id})
 
 
 def _confirm_preferences_set(

@@ -124,6 +124,8 @@ class TestInitDb:
             "product_mapping",
             "recipe_ingredients",
             "recipes",
+            "shopping_list_items",
+            "shopping_lists",
         ]
         for table in expected:
             assert table in tables, f"Missing table: {table}"
@@ -256,3 +258,121 @@ class TestInitDb:
                 )
         finally:
             conn.close()
+
+
+class TestShoppingListTables:
+    """Tests for the shopping_lists / shopping_list_items schema.
+
+    Issue #65 (HIGH): the generated shopping list used to live in the
+    Flask session cookie, which silently truncates past ~4KB and is
+    scoped to a single browser. Migration 005 introduces DB-backed
+    storage instead; these tests assert the migration creates the
+    expected tables/index and that init_db stays idempotent.
+    """
+
+    def test_creates_shopping_lists_table(self, tmp_path: Path) -> None:
+        """Test init_db creates the shopping_lists table."""
+        db_path = str(tmp_path / "test.db")
+        init_db(db_path)
+
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='shopping_lists'"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert row is not None
+
+    def test_creates_shopping_list_items_table(self, tmp_path: Path) -> None:
+        """Test init_db creates the shopping_list_items table."""
+        db_path = str(tmp_path / "test.db")
+        init_db(db_path)
+
+        conn = get_connection(db_path)
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name='shopping_list_items'"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert row is not None
+
+    def test_creates_shopping_list_items_list_id_index(self, tmp_path: Path) -> None:
+        """Test init_db creates an index on shopping_list_items.list_id."""
+        db_path = str(tmp_path / "test.db")
+        init_db(db_path)
+
+        conn = get_connection(db_path)
+        try:
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND name NOT LIKE 'sqlite_%'"
+            )
+            indexes = [row["name"] for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+        assert any("list_id" in name for name in indexes), (
+            f"Expected an index on shopping_list_items.list_id, got: {indexes}"
+        )
+
+    def test_shopping_list_tables_survive_double_init(self, tmp_path: Path) -> None:
+        """Test re-running init_db is idempotent for the new tables."""
+        db_path = str(tmp_path / "test.db")
+        init_db(db_path)
+        init_db(db_path)  # Should not raise
+
+        conn = get_connection(db_path)
+        try:
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('shopping_lists', 'shopping_list_items')"
+            )
+            tables = {row["name"] for row in cursor.fetchall()}
+        finally:
+            conn.close()
+
+        assert tables == {"shopping_lists", "shopping_list_items"}
+
+    def test_shopping_list_items_cascade_deletes_with_parent_list(
+        self, tmp_path: Path
+    ) -> None:
+        """Test deleting a shopping_lists row cascades to its items.
+
+        The design specifies ``ON DELETE CASCADE`` from
+        shopping_list_items.list_id to shopping_lists(id).
+        """
+        db_path = str(tmp_path / "test.db")
+        init_db(db_path)
+
+        conn = get_connection(db_path)
+        try:
+            cursor = conn.execute(
+                "INSERT INTO shopping_lists DEFAULT VALUES RETURNING id"
+            )
+            list_id = cursor.fetchone()["id"]
+            conn.execute(
+                "INSERT INTO shopping_list_items "
+                "(list_id, ingredient, quantity, unit, category, "
+                "search_term, from_meals) "
+                "VALUES (?, 'salt', 1.0, 'each', 'pantry_dry', 'salt', '[]')",
+                (list_id,),
+            )
+            conn.commit()
+
+            conn.execute("DELETE FROM shopping_lists WHERE id = ?", (list_id,))
+            conn.commit()
+
+            remaining = conn.execute(
+                "SELECT COUNT(*) as cnt FROM shopping_list_items WHERE list_id = ?",
+                (list_id,),
+            ).fetchone()["cnt"]
+        finally:
+            conn.close()
+
+        assert remaining == 0

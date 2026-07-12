@@ -61,7 +61,7 @@
                     <span class="brand-card-notes">{{ pref.notes }}</span>
                     {% endif %}
                 </div>
-                <form action="/brands/{{ loop.index }}/remove" method="post" class="inline-form">
+                <form action="/brands/{{ pref.id }}/remove" method="post" class="inline-form">
                     <button type="submit" class="btn btn-danger btn-sm">Remove</button>
                 </form>
             </div>
@@ -83,7 +83,7 @@
                     <span class="brand-card-notes">{{ pref.notes }}</span>
                     {% endif %}
                 </div>
-                <form action="/brands/{{ loop.index }}/remove" method="post" class="inline-form">
+                <form action="/brands/{{ pref.id }}/remove" method="post" class="inline-form">
                     <button type="submit" class="btn btn-danger btn-sm">Remove</button>
                 </form>
             </div>

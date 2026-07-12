@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from werkzeug.wrappers import Response
 
     from grocery_butler.db.adapter import DatabaseConnection
-    from grocery_butler.models import Ingredient
+    from grocery_butler.models import Ingredient, ShoppingListItem
 
 from grocery_butler.db import get_connection, init_db
 from grocery_butler.models import (
@@ -35,6 +35,95 @@ from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
 
 logger = logging.getLogger(__name__)
+
+
+def _is_production() -> bool:
+    """Return whether the app is configured to run in production mode.
+
+    Production mode is opted into via the ``APP_ENV`` environment variable
+    (set to ``"production"`` in the Docker runtime image). The comparison
+    is case-insensitive so ``"Production"`` or ``"PRODUCTION"`` also count.
+
+    Returns:
+        True if ``APP_ENV`` is set to ``"production"`` (any case), else
+        False.
+    """
+    return os.environ.get("APP_ENV", "").lower() == "production"
+
+
+def _resolve_secret_key() -> str:
+    """Resolve the Flask session ``SECRET_KEY`` for the current environment.
+
+    ``FLASK_SECRET_KEY`` is used verbatim whenever it's set to a non-empty
+    value. When it's unset (or empty) in production, startup fails fast
+    with a ``RuntimeError`` rather than booting with an ephemeral key --
+    a random per-process key would silently break sessions across restarts
+    and across the multiple gunicorn worker processes production runs. In
+    dev/test mode the same gap is tolerated: a warning is logged and a
+    fresh random key is generated so local development keeps working
+    without any env setup.
+
+    Returns:
+        The resolved secret key string.
+
+    Raises:
+        RuntimeError: If running in production and ``FLASK_SECRET_KEY`` is
+            unset or empty.
+    """
+    secret_key = os.environ.get("FLASK_SECRET_KEY", "")
+    if secret_key:
+        return secret_key
+
+    if _is_production():
+        raise RuntimeError(
+            "FLASK_SECRET_KEY is not set; refusing to start in production. "
+            "A stable secret key is required so sessions survive restarts "
+            "and are shared consistently across gunicorn worker processes."
+        )
+
+    logger.warning(
+        "FLASK_SECRET_KEY is not set; generating a random key for this "
+        "process. Sessions will not survive restarts or be shared across "
+        "multiple workers. Set FLASK_SECRET_KEY for stable sessions."
+    )
+    return os.urandom(32).hex()
+
+
+def _require_rubotpaul_secret() -> None:
+    """Fail fast in production if the RubotPaul shared secret is missing.
+
+    Delegates to ``auth_middleware._shared_secret()``, which already
+    raises ``RuntimeError`` naming ``RUBOTPAUL_SHARED_SECRET`` when the
+    variable is unset or empty. This is a no-op outside production so dev
+    and test environments can boot without the shared secret configured;
+    unauthenticated requests to the API blueprint still 401 at request
+    time via ``require_bearer()``.
+
+    Raises:
+        RuntimeError: If running in production and
+            ``RUBOTPAUL_SHARED_SECRET`` is unset or empty.
+    """
+    if not _is_production():
+        return
+
+    from grocery_butler import auth_middleware
+
+    auth_middleware._shared_secret()
+
+
+def _warn_if_no_anthropic_key() -> None:
+    """Log a warning at startup if ``ANTHROPIC_API_KEY`` is not configured.
+
+    A missing key never blocks boot in any mode -- Claude-backed meal
+    parsing already degrades gracefully to stub/saved-recipe paths -- but
+    operators should be told loudly so the degraded behavior isn't a
+    surprise.
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY", ""):
+        logger.warning(
+            "ANTHROPIC_API_KEY is not set; Claude-backed meal parsing will "
+            "degrade to stub/saved-recipe paths until it is configured."
+        )
 
 
 def _resolve_database_target(db_path: str | None) -> str:
@@ -84,27 +173,55 @@ def create_app(db_path: str | None = None) -> Flask:
     )
     resolved = _resolve_database_target(db_path)
     app.config["DATABASE_PATH"] = resolved
-    app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", os.urandom(32).hex())
+    app.config["SECRET_KEY"] = _resolve_secret_key()
 
     init_db(resolved)
 
     _register_teardown(app)
     _register_error_handlers(app)
     _register_context_processors(app)
+    _register_network_guard(app)
     _register_routes(app)
     _register_api(app)
 
     return app
 
 
-def _register_api(app: Flask) -> None:
-    """Register the RubotPaul-facing /api/v1 JSON blueprint.
+def _register_network_guard(app: Flask) -> None:
+    """Register the tailnet-only boundary guard.
+
+    Installs an app-level ``before_request`` hook, which Flask runs
+    ahead of route handlers and blueprint-level hooks regardless of
+    registration order, so the guard applies uniformly to HTML routes
+    and the ``/api/v1`` blueprint alike. The local import keeps this
+    wrapper consistent with ``_register_api``'s import pattern.
 
     Args:
         app: Flask application instance.
     """
+    from grocery_butler.network_guard import register_network_guard
+
+    register_network_guard(app)
+
+
+def _register_api(app: Flask) -> None:
+    """Register the RubotPaul-facing /api/v1 JSON blueprint.
+
+    Validates production startup config (RubotPaul shared secret) and
+    warns about optional-but-recommended config (Anthropic API key)
+    before the blueprint is registered.
+
+    Args:
+        app: Flask application instance.
+
+    Raises:
+        RuntimeError: If running in production and
+            ``RUBOTPAUL_SHARED_SECRET`` is unset or empty.
+    """
     from grocery_butler.api import api_v1
 
+    _require_rubotpaul_secret()
+    _warn_if_no_anthropic_key()
     app.register_blueprint(api_v1)
 
 
@@ -634,6 +751,24 @@ def _parse_ingredient_form_rows() -> list[Ingredient]:
     return ingredients
 
 
+def _group_shopping_items(
+    items: list[ShoppingListItem],
+) -> dict[str, list[ShoppingListItem]]:
+    """Group shopping list items by category value for template rendering.
+
+    Args:
+        items: Shopping list items to group.
+
+    Returns:
+        Dict mapping category value (e.g. ``"produce"``) to the items in
+        that category, in the order first encountered.
+    """
+    grouped: dict[str, list[ShoppingListItem]] = {}
+    for item in items:
+        grouped.setdefault(item.category.value, []).append(item)
+    return grouped
+
+
 def _register_shopping_list_routes(app: Flask) -> None:
     """Register shopping list page routes.
 
@@ -645,30 +780,24 @@ def _register_shopping_list_routes(app: Flask) -> None:
     def shopping_list() -> str:
         """Render the shopping list page.
 
-        Reads shopping list items from the session if available.
+        Reads the most recently generated shopping list from the
+        database-backed :class:`~grocery_butler.shopping_list_store.ShoppingListStore`
+        (Issue #65: previously read from the per-browser session cookie,
+        which silently truncated large lists and was invisible to other
+        household members).
 
         Returns:
             Rendered shopping list HTML.
         """
-        from flask import session
+        from grocery_butler.shopping_list_store import ShoppingListStore
 
-        raw_items = session.get("shopping_list_items")
-        items: list[dict[str, object]] = (
-            raw_items if isinstance(raw_items, list) else []
-        )
-
-        # Group items by category
-        grouped: dict[str, list[dict[str, object]]] = {}
-        for item in items:
-            cat = str(item.get("category", "other"))
-            if cat not in grouped:
-                grouped[cat] = []
-            grouped[cat].append(item)
+        store = ShoppingListStore(app.config["DATABASE_PATH"])
+        items = store.get_latest_list()
 
         return render_template(
             "shopping_list.html",
             active_page="shopping_list",
-            grouped_items=grouped,
+            grouped_items=_group_shopping_items(items),
             has_items=len(items) > 0,
         )
 
@@ -677,7 +806,12 @@ def _register_shopping_list_routes(app: Flask) -> None:
         """Generate a shopping list from meal names.
 
         Reads meal names from form input, runs the consolidation
-        pipeline, and stores results in the session.
+        pipeline, and persists the result via
+        :class:`~grocery_butler.shopping_list_store.ShoppingListStore`
+        (Issue #65: previously stored in the session cookie, which caps
+        out around 4KB and is scoped to a single browser). Any stale
+        ``shopping_list_items`` session key from a pre-fix browser is
+        cleared so its cookie shrinks back down.
 
         Returns:
             Redirect to the shopping list page.
@@ -702,6 +836,7 @@ def _register_shopping_list_routes(app: Flask) -> None:
 
         from grocery_butler.consolidator import Consolidator
         from grocery_butler.meal_parser import MealParser
+        from grocery_butler.shopping_list_store import ShoppingListStore
 
         parser = MealParser(recipe_store)
         parsed_meals = parser.parse_meals(meal_names)
@@ -713,16 +848,8 @@ def _register_shopping_list_routes(app: Flask) -> None:
             parsed_meals, restock_queue, pantry_staples
         )
 
-        session["shopping_list_items"] = [
-            {
-                "ingredient": item.ingredient,
-                "quantity": item.quantity,
-                "unit": item.unit,
-                "category": item.category.value,
-                "from_meals": item.from_meals,
-            }
-            for item in shopping_items
-        ]
+        ShoppingListStore(db_path).save_list(shopping_items)
+        session.pop("shopping_list_items", None)
 
         flash(f"Generated shopping list from {len(meal_names)} meal(s).", "success")
         return redirect(url_for("shopping_list"))
@@ -896,8 +1023,10 @@ def _register_brand_routes(app: Flask) -> None:
         """
         db_path = app.config["DATABASE_PATH"]
         recipe_store = RecipeStore(db_path)
-        recipe_store.remove_brand_preference(pref_id)
-        flash("Brand preference removed.", "success")
+        if recipe_store.remove_brand_preference(pref_id):
+            flash("Brand preference removed.", "success")
+        else:
+            flash("Brand preference not found.", "error")
         return redirect(url_for("brands"))
 
 
