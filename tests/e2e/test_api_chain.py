@@ -126,6 +126,16 @@ def test_full_chain_meal_to_confirmed_order(
     assert submit_body["status"] == "pending_confirmation"
     action_id = submit_body["action_id"]
 
+    # "spaghetti" (box) and "tomato sauce" (can) don't compare against the
+    # mock's uniform "1 lb" product size, so the real quantity calculator
+    # flags both incomparable_units (issue #59). Per the chief-architect's
+    # ruling, the staged message must name them and their reason before
+    # the human is asked to confirm.
+    staged_message = submit_body["message"]
+    assert "spaghetti" in staged_message
+    assert "tomato sauce" in staged_message
+    assert "incomparable_units" in staged_message
+
     confirmed = client.post(
         "/api/v1/actions/confirm",
         json={"action_id": action_id},

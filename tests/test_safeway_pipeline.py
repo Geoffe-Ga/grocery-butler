@@ -422,9 +422,104 @@ class TestSubmitCart:
 
         assert result is expected
         mock_order_cls.return_value.submit_order.assert_called_once_with(
-            mock_cart_summary
+            mock_cart_summary, allow_review_items=False
         )
         mock_cart_cls.return_value.build_cart.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Submit cart review-gate forwarding tests (issue #59)
+# ---------------------------------------------------------------------------
+#
+# Gate 2.5 blocker: SafewayPipeline.submit_cart must accept and forward
+# allow_review_items to OrderService.submit_order so bot/api/cli callers
+# can pass the human override through, while defaulting to the safe
+# (blocked) behavior when not supplied.
+
+
+class TestSubmitCartReviewGate:
+    """Tests for SafewayPipeline.submit_cart forwarding allow_review_items."""
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_submit_cart_blocks_flagged_cart_by_default(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+    ):
+        """Test submit_cart forwards the default (blocking) review gate.
+
+        Without an explicit override, submit_cart must call
+        OrderService.submit_order with allow_review_items=False so a
+        flagged cart is blocked pending review.
+        """
+        mock_client_cls.return_value.is_authenticated = True
+        blocked = OrderResult(
+            success=False,
+            error_message="Order blocked pending review: flour (incomparable_units)",
+        )
+        mock_order_cls.return_value.submit_order.return_value = blocked
+
+        pipeline = SafewayPipeline(safeway_config, ":memory:")
+        result = pipeline.submit_cart(mock_cart_summary)
+
+        assert result is blocked
+        mock_order_cls.return_value.submit_order.assert_called_once_with(
+            mock_cart_summary, allow_review_items=False
+        )
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_submit_cart_forwards_allow_review_items_true(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+    ):
+        """Test submit_cart forwards an explicit human override.
+
+        Callers (bot confirm view, API confirm endpoint) must be able to
+        pass allow_review_items=True through submit_cart to proceed with
+        a flagged cart after explicit human confirmation.
+        """
+        mock_client_cls.return_value.is_authenticated = True
+        expected = OrderResult(success=True)
+        mock_order_cls.return_value.submit_order.return_value = expected
+
+        pipeline = SafewayPipeline(safeway_config, ":memory:")
+        result = pipeline.submit_cart(mock_cart_summary, allow_review_items=True)
+
+        assert result is expected
+        mock_order_cls.return_value.submit_order.assert_called_once_with(
+            mock_cart_summary, allow_review_items=True
+        )
 
 
 # ---------------------------------------------------------------------------

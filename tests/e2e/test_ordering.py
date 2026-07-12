@@ -177,7 +177,19 @@ def test_order_submit_confirm_hits_orders_endpoint_with_confirmation(
         json={"cart": body["cart"], "total": body["total"]},
         headers=headers,
     )
-    action_id = submitted.get_json()["action_id"]
+    submit_body = submitted.get_json()
+    action_id = submit_body["action_id"]
+
+    # "milk" and "eggs" are searched with unit="each" (see
+    # _shopping_list_body) against the mock's uniform "1 lb" product
+    # size, so the real quantity calculator flags both
+    # incomparable_units (issue #59). Per the chief-architect's ruling,
+    # the staged message must name them and their reason before the
+    # human is asked to confirm.
+    staged_message = submit_body["message"]
+    assert "milk" in staged_message
+    assert "eggs" in staged_message
+    assert "incomparable_units" in staged_message
 
     confirmed = client.post(
         "/api/v1/actions/confirm",

@@ -638,6 +638,62 @@ class TestCartItem:
         assert cart_item.quantity_to_order == 1
         assert cart_item.estimated_cost == 5.99
 
+    def test_default_review_fields_are_unset(self) -> None:
+        """Test needs_review/review_reason default to False and empty string.
+
+        Regression guard for issue #59: existing callers that construct
+        CartItem without the new fields must continue to work.
+        """
+        shopping_item = ShoppingListItem(
+            ingredient="milk",
+            quantity=1.0,
+            unit="gallon",
+            category=IngredientCategory.DAIRY,
+            search_term="whole milk",
+            from_meals=["Cereal"],
+        )
+        product = SafewayProduct(
+            product_id="SW-001",
+            name="Whole Milk",
+            price=5.99,
+            size="1 gallon",
+        )
+        cart_item = CartItem(
+            shopping_list_item=shopping_item,
+            safeway_product=product,
+            quantity_to_order=1,
+            estimated_cost=5.99,
+        )
+        assert cart_item.needs_review is False
+        assert cart_item.review_reason == ""
+
+    def test_explicit_review_fields_are_preserved(self) -> None:
+        """Test needs_review/review_reason can be set explicitly."""
+        shopping_item = ShoppingListItem(
+            ingredient="milk",
+            quantity=1.0,
+            unit="gallon",
+            category=IngredientCategory.DAIRY,
+            search_term="whole milk",
+            from_meals=["Cereal"],
+        )
+        product = SafewayProduct(
+            product_id="SW-001",
+            name="Whole Milk",
+            price=5.99,
+            size="",
+        )
+        cart_item = CartItem(
+            shopping_list_item=shopping_item,
+            safeway_product=product,
+            quantity_to_order=1,
+            estimated_cost=5.99,
+            needs_review=True,
+            review_reason="unparseable_size",
+        )
+        assert cart_item.needs_review is True
+        assert cart_item.review_reason == "unparseable_size"
+
 
 class TestFulfillmentOption:
     """Tests for FulfillmentOption model."""
