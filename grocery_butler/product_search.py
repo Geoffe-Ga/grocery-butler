@@ -5,11 +5,22 @@ Searches the Nimbus API for grocery products, caches results in the
 instances.  Pinned mappings bypass the API entirely.
 
 Cache strategy:
+- ``get_cached_product`` returns a pinned or non-stale cached mapping
+  (touching ``times_selected``/``last_used``) without ever performing a
+  live search; a stale or absent mapping returns ``None`` so the caller
+  falls back to a fresh search and selection.
+- ``save_mapping``/``pin_mapping`` persist the *selected* product (name,
+  price, size, and stock status) so the cache reflects what the user
+  actually chose, not merely the top raw search hit.
+- ``reverify_product`` re-runs a live search for a cache hit's
+  ingredient description and reconciles the cached ``product_id``
+  against the fresh candidates, returning up-to-date price/size/stock
+  (or marking the product out-of-stock if it no longer appears, so the
+  substitution flow can trigger). A search failure falls back to the
+  cached product unchanged.
 - Mappings older than ``CACHE_MAX_AGE_DAYS`` are considered stale and
   re-fetched on the next search.
 - Pinned mappings never expire.
-- ``times_selected`` and ``last_used`` are updated each time a cached
-  mapping is returned.
 """
 
 from __future__ import annotations
@@ -129,32 +140,72 @@ class ProductSearchService:
 
         return _parse_search_results(data)
 
-    def search_or_cached(
+    def get_cached_product(
         self,
         search_term: str,
-    ) -> list[SafewayProduct]:
-        """Return cached results or perform a fresh search.
+    ) -> CachedMapping | None:
+        """Return a usable cached mapping for *search_term*, if any.
 
-        If a pinned mapping exists, returns only that product. If a
-        non-expired cached mapping exists, returns it (and refreshes
-        ``last_used``). Otherwise performs a live search and caches
-        the top result.
+        A pinned mapping is always usable; a non-pinned mapping is
+        usable if it is not yet stale (see ``CACHE_MAX_AGE_DAYS``). In
+        either case, the mapping is "touched" (``times_selected``
+        incremented and ``last_used`` refreshed) before being returned.
+
+        This never performs a live search; callers should fall back to
+        :meth:`search_products` (and, for cache hits, re-verify via
+        :meth:`reverify_product`) when this returns ``None``.
 
         Args:
             search_term: The ingredient search term.
 
         Returns:
-            List of SafewayProduct results (possibly a single pinned item).
+            The usable cached mapping, or ``None`` if no cached mapping
+            exists or the only one found is stale and not pinned.
         """
         cached = self.get_cached_mapping(search_term)
-        if cached is not None and (cached.is_pinned or not self._is_stale(cached)):
-            self._touch_mapping(cached.mapping_id)
-            return [cached.product]
+        if cached is None:
+            return None
+        if not (cached.is_pinned or not self._is_stale(cached)):
+            return None
 
-        products = self.search_products(search_term)
-        if products:
-            self.save_mapping(search_term, products[0])
-        return products
+        self._touch_mapping(cached.mapping_id)
+        return cached
+
+    def reverify_product(self, cached: CachedMapping) -> SafewayProduct:
+        """Re-verify a cached product against a fresh live search.
+
+        Cached price/size/stock can go stale between visits, so a cache
+        hit re-runs a live search for the mapping's ingredient
+        description and looks for a fresh candidate whose
+        ``product_id`` matches the cached product. When found, the
+        fresh candidate (with current price, size, and stock) is
+        returned. When no fresh candidate matches -- the product has
+        been delisted or is otherwise absent from results -- the cached
+        product is returned with ``in_stock`` forced to ``False`` so
+        the substitution flow can trigger. If the live search itself
+        fails, the cached product is returned unchanged (a transient
+        API outage should not be treated as an out-of-stock signal).
+
+        Args:
+            cached: The cached mapping to re-verify.
+
+        Returns:
+            The re-verified SafewayProduct.
+        """
+        try:
+            fresh = self.search_products(cached.ingredient_description)
+        except ProductSearchError:
+            logger.warning(
+                "Re-verification search failed for '%s'; using cached product",
+                cached.ingredient_description,
+            )
+            return cached.product
+
+        for candidate in fresh:
+            if candidate.product_id == cached.product.product_id:
+                return candidate
+
+        return cached.product.model_copy(update={"in_stock": False})
 
     # ------------------------------------------------------------------
     # Cache operations
@@ -176,7 +227,8 @@ class ProductSearchService:
         try:
             row = conn.execute(
                 "SELECT id, ingredient_description, safeway_product_id,"
-                " safeway_product_name, safeway_price, last_used,"
+                " safeway_product_name, safeway_price, safeway_product_size,"
+                " safeway_in_stock, last_used,"
                 " times_selected, is_pinned"
                 " FROM product_mapping"
                 " WHERE ingredient_description = ?"
@@ -223,21 +275,26 @@ class ProductSearchService:
                     "UPDATE product_mapping"
                     " SET times_selected = times_selected + 1,"
                     " last_used = CURRENT_TIMESTAMP,"
-                    " safeway_price = ?"
+                    " safeway_price = ?,"
+                    " safeway_product_size = ?,"
+                    " safeway_in_stock = ?"
                     " WHERE id = ?",
-                    (product.price, row_id),
+                    (product.price, product.size, product.in_stock, row_id),
                 )
             else:
                 cursor = conn.execute(
                     "INSERT INTO product_mapping"
                     " (ingredient_description, safeway_product_id,"
-                    "  safeway_product_name, safeway_price)"
-                    " VALUES (?, ?, ?, ?)",
+                    "  safeway_product_name, safeway_price,"
+                    "  safeway_product_size, safeway_in_stock)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         search_term,
                         product.product_id,
                         product.name,
                         product.price,
+                        product.size,
+                        product.in_stock,
                     ),
                 )
                 row_id = cursor.lastrowid
@@ -288,21 +345,26 @@ class ProductSearchService:
                     "UPDATE product_mapping"
                     " SET is_pinned = TRUE,"
                     " last_used = CURRENT_TIMESTAMP,"
-                    " safeway_price = ?"
+                    " safeway_price = ?,"
+                    " safeway_product_size = ?,"
+                    " safeway_in_stock = ?"
                     " WHERE id = ?",
-                    (product.price, row_id),
+                    (product.price, product.size, product.in_stock, row_id),
                 )
             else:
                 cursor = conn.execute(
                     "INSERT INTO product_mapping"
                     " (ingredient_description, safeway_product_id,"
-                    "  safeway_product_name, safeway_price, is_pinned)"
-                    " VALUES (?, ?, ?, ?, TRUE)",
+                    "  safeway_product_name, safeway_price,"
+                    "  safeway_product_size, safeway_in_stock, is_pinned)"
+                    " VALUES (?, ?, ?, ?, ?, ?, TRUE)",
                     (
                         search_term,
                         product.product_id,
                         product.name,
                         product.price,
+                        product.size,
+                        product.in_stock,
                     ),
                 )
                 row_id = cursor.lastrowid
@@ -498,6 +560,7 @@ def _row_to_cached_mapping(row: DictRow) -> CachedMapping:
     else:
         last_used = datetime.now(tz=UTC)
 
+    in_stock_value = row["safeway_in_stock"]
     return CachedMapping(
         mapping_id=row["id"],
         ingredient_description=row["ingredient_description"],
@@ -505,7 +568,8 @@ def _row_to_cached_mapping(row: DictRow) -> CachedMapping:
             product_id=row["safeway_product_id"],
             name=row["safeway_product_name"],
             price=row["safeway_price"] or 0.0,
-            size="",
+            size=row["safeway_product_size"] or "",
+            in_stock=True if in_stock_value is None else bool(in_stock_value),
         ),
         is_pinned=bool(row["is_pinned"]),
         times_selected=row["times_selected"],

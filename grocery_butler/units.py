@@ -55,6 +55,8 @@ _VOLUME_FACTORS_ML: dict[Unit, float] = {
     Unit.FL_OZ: 29.5735296,
     Unit.CUP: 236.588237,
     Unit.GAL: 3785.411784,
+    Unit.PINT: 473.176473,
+    Unit.QUART: 946.352946,
 }
 
 # Count units, expressed as each-per-unit.
@@ -63,10 +65,10 @@ _COUNT_FACTORS_EACH: dict[Unit, float] = {
     Unit.DOZEN: 12.0,
 }
 
-# Packaging/"other" units (bag, can, box, jar, bottle, package, block, pinch,
-# dash, to_taste, bunch, head, clove, slice) are deliberately absent: they
-# carry no fixed physical size, so they are non-convertible and classify as
-# dimensionless (``dimension_of`` returns ``None``).
+# Packaging/"other" units (bag, can, box, jar, bottle, package, block, stick,
+# pinch, dash, to_taste, bunch, head, clove, slice) are deliberately absent:
+# they carry no fixed physical size, so they are non-convertible and
+# classify as dimensionless (``dimension_of`` returns ``None``).
 
 _DIMENSION_TABLE: dict[Unit, tuple[Dimension, float]] = {
     **{unit: (Dimension.MASS, factor) for unit, factor in _MASS_FACTORS_G.items()},

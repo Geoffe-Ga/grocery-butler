@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS product_mapping (
     safeway_product_id TEXT NOT NULL,
     safeway_product_name TEXT NOT NULL,
     safeway_price DOUBLE PRECISION,
+    safeway_product_size TEXT,
+    safeway_in_stock BOOLEAN DEFAULT TRUE,
     last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     times_selected INTEGER DEFAULT 1,
     is_pinned BOOLEAN DEFAULT FALSE
