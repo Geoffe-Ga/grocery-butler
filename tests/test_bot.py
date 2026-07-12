@@ -2249,6 +2249,47 @@ class TestOrderConfirmView:
         assert view.is_finished() is True
 
     @pytest.mark.asyncio()
+    async def test_confirm_pipeline_error_reports_message(self, mock_interaction):
+        """Test confirm surfaces a SafewayPipelineError message, not the generic one."""
+        from grocery_butler.safeway_pipeline import SafewayPipelineError
+
+        cart = _make_cart_summary()
+        mock_pipeline = MagicMock()
+        mock_pipeline.submit_cart.side_effect = SafewayPipelineError("auth expired")
+
+        view = _OrderConfirmView(mock_pipeline, cart)
+        await type(view).confirm(view, mock_interaction, MagicMock())
+
+        call_args = str(mock_interaction.followup.send.call_args)
+        assert "auth expired" in call_args
+        mock_pipeline.close.assert_called_once()
+        assert view.is_finished() is True
+
+    @pytest.mark.asyncio()
+    async def test_confirm_disabled_submission_reports_actionable_message(
+        self, mock_interaction
+    ):
+        """Issue #60: confirm surfaces the actionable disabled-submission message."""
+        from grocery_butler.safeway_pipeline import OrderSubmissionDisabledError
+
+        cart = _make_cart_summary()
+        mock_pipeline = MagicMock()
+        mock_pipeline.submit_cart.side_effect = OrderSubmissionDisabledError(
+            "Order submission is descoped for v1.0 (Issue #60): "
+            "unverified checkout surface. Build/review the cart instead, "
+            "or set SAFEWAY_ORDER_SUBMISSION_ENABLED=true after live "
+            "verification."
+        )
+
+        view = _OrderConfirmView(mock_pipeline, cart)
+        await type(view).confirm(view, mock_interaction, MagicMock())
+
+        call_args = str(mock_interaction.followup.send.call_args)
+        assert "Issue #60" in call_args
+        mock_pipeline.close.assert_called_once()
+        assert view.is_finished() is True
+
+    @pytest.mark.asyncio()
     async def test_cancel_closes_pipeline_and_notifies(self, mock_interaction):
         """Test cancel closes the pipeline and notifies the user."""
         cart = _make_cart_summary()

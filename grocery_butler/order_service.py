@@ -17,6 +17,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Issue #60: real order submission is descoped for v1.0. The Safeway
+#: checkout API surface (Okta auth, payment method, delivery slot
+#: reservation) is unverified against the live API, so submission is
+#: gated off by default and this message is returned instead of ever
+#: calling the client.
+ORDER_SUBMISSION_DISABLED_MESSAGE = (
+    "Order submission is descoped for v1.0 (Issue #60): unverified "
+    "checkout surface (no payment method, no delivery slot reservation, "
+    "and a likely-invalid Okta client id). Build or review the cart "
+    "instead — that dry-run path works today. Once the live checkout "
+    "flow has been verified end-to-end, set "
+    "SAFEWAY_ORDER_SUBMISSION_ENABLED=true to enable real submissions."
+)
+
 
 @dataclass
 class OrderConfirmation:
@@ -62,21 +76,31 @@ class OrderService:
     Args:
         safeway_client: Authenticated Safeway API client.
         pantry_manager: Pantry manager for inventory updates.
+        submission_enabled: Issue #60 fail-safe gate. Real submission to
+            Safeway is descoped for v1.0 because the checkout API surface
+            is unverified, so this defaults to ``False``. Callers must
+            opt in explicitly (see ``SAFEWAY_ORDER_SUBMISSION_ENABLED``).
     """
 
     def __init__(
         self,
         safeway_client: Any,
         pantry_manager: PantryManager,
+        *,
+        submission_enabled: bool = False,
     ) -> None:
         """Initialize the order service.
 
         Args:
             safeway_client: Safeway API client.
             pantry_manager: Pantry manager for restocking.
+            submission_enabled: Issue #60 fail-safe gate. Defaults to
+                ``False`` so submission is blocked unless explicitly
+                enabled by the caller.
         """
         self._client = safeway_client
         self._pantry = pantry_manager
+        self._submission_enabled = submission_enabled
 
     def submit_order(
         self,
@@ -88,8 +112,17 @@ class OrderService:
             cart: The built cart summary to submit.
 
         Returns:
-            OrderResult with confirmation or error details.
+            OrderResult with confirmation or error details. If order
+            submission is disabled (Issue #60), returns a failure result
+            with :data:`ORDER_SUBMISSION_DISABLED_MESSAGE` before any
+            other validation or API call.
         """
+        if not self._submission_enabled:
+            return OrderResult(
+                success=False,
+                error_message=ORDER_SUBMISSION_DISABLED_MESSAGE,
+            )
+
         if not cart.items and not cart.restock_items:
             return OrderResult(
                 success=False,

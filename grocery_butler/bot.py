@@ -288,6 +288,8 @@ class _OrderConfirmView(discord.ui.View):
             interaction: Discord interaction context.
             button: The button that was pressed.
         """
+        from grocery_butler.safeway_pipeline import SafewayPipelineError
+
         await interaction.response.defer()
         try:
             order_result = await asyncio.to_thread(
@@ -295,6 +297,9 @@ class _OrderConfirmView(discord.ui.View):
             )
             msg = _format_order_result(order_result)
             await interaction.followup.send(msg)
+        except SafewayPipelineError as exc:
+            logger.exception("Order submission failed")
+            await interaction.followup.send(f"Order submission failed: {exc}")
         except Exception:
             logger.exception("Order submission failed")
             await interaction.followup.send("Order submission failed.")

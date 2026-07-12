@@ -9,6 +9,28 @@ Authentication flow:
 2. Exchange session token for access token via OAuth2 implicit grant
 3. Use bearer token for Nimbus API calls
 4. Auto-refresh when token approaches expiry
+
+Issue #60 — UNVERIFIED API SURFACE, ORDER SUBMISSION DESCOPED FOR v1.0:
+    This entire client is unverified against the live Safeway/Albertsons
+    API. It was written from inference, not from a confirmed working
+    integration, and has several concrete red flags:
+
+    - ``OKTA_CLIENT_ID`` (``ausp6soxrIyPrm8rS2p6``) is used as *both* the
+      Okta authorization-server segment in the auth URL *and* the OAuth2
+      ``client_id``. An ``aus``-prefixed value is an authorization-server
+      id, not a client id (client ids are normally ``0oa``-prefixed), so
+      the OAuth2 implicit-grant exchange this client performs is
+      unverified and may not work against the real Okta tenant.
+    - The order-submission endpoint (``/abs/pub/web/orders``) and its
+      header scheme are unverified: no payment method is wired up and no
+      delivery slot reservation step exists before submission.
+
+    Because this surface is unverified, real order submission is
+    disabled by default (see :mod:`grocery_butler.order_service`,
+    ``ORDER_SUBMISSION_DISABLED_MESSAGE``) and gated behind the
+    ``SAFEWAY_ORDER_SUBMISSION_ENABLED`` environment variable. Do not
+    enable it in production until this client has been verified against
+    a live Safeway/Albertsons account.
 """
 
 from __future__ import annotations

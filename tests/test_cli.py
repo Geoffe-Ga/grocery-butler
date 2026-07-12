@@ -1562,6 +1562,43 @@ class TestHandleOrder:
         assert "ORD-001" in captured.out
         assert "Restocked" in captured.out
 
+    def test_disabled_submission_reports_actionable_error(self, capsys):
+        """Issue #60: a disabled pipeline surfaces the actionable message.
+
+        ``OrderSubmissionDisabledError`` is a ``SafewayPipelineError``
+        subclass, so the existing ``except SafewayPipelineError`` handler
+        must already print it and exit 1 without any further changes.
+        """
+        from grocery_butler.safeway_pipeline import OrderSubmissionDisabledError
+
+        cfg = MagicMock()
+        cfg.anthropic_api_key = "sk-test"
+        cfg.safeway_username = "user"
+        cfg.safeway_password = "pass"
+        cfg.safeway_store_id = "1234"
+        cfg.database_path = ":memory:"
+
+        with (
+            patch("grocery_butler.cli._load_config_safe", return_value=cfg),
+            patch("grocery_butler.cli._make_anthropic_client", return_value=None),
+            patch("grocery_butler.cli.SafewayPipeline") as mock_pipeline_cls,
+        ):
+            mock_pipeline = MagicMock()
+            mock_pipeline.run.side_effect = OrderSubmissionDisabledError(
+                "Order submission is descoped for v1.0 (Issue #60): "
+                "unverified checkout surface."
+            )
+            mock_pipeline_cls.return_value = mock_pipeline
+
+            parser = _build_parser()
+            args = parser.parse_args(["order", "--items", "milk"])
+            code = _handle_order(args)
+
+        assert code == 1
+        captured = capsys.readouterr()
+        assert "Issue #60" in captured.err
+        mock_pipeline.close.assert_called_once()
+
     def test_submit_failure(self, capsys):
         """Test failed order submission."""
         from grocery_butler.order_service import OrderResult
