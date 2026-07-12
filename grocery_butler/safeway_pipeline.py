@@ -7,13 +7,21 @@ together, and exposes a two-step flow: build cart → submit order.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from grocery_butler.cart_builder import CartBuilder
 from grocery_butler.order_service import (
     ORDER_SUBMISSION_DISABLED_MESSAGE,
+    OrderOutcome,
     OrderResult,
     OrderService,
+    review_block_result,
+)
+from grocery_butler.order_submissions import (
+    DUPLICATE_WINDOW,
+    OrderSubmissionStore,
+    cart_fingerprint,
 )
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.product_search import ProductSearchService
@@ -27,6 +35,11 @@ if TYPE_CHECKING:
     from grocery_butler.models import CartSummary, ShoppingListItem
 
 logger = logging.getLogger(__name__)
+
+_DUPLICATE_ERROR_MESSAGE = (
+    "Duplicate order blocked — a matching cart was submitted recently. "
+    "Verify your recent Safeway orders before retrying."
+)
 
 
 class SafewayPipelineError(Exception):
@@ -110,6 +123,7 @@ class SafewayPipeline:
             pantry_manager,
             submission_enabled=self._submission_enabled,
         )
+        self._order_submissions = OrderSubmissionStore(db_path)
 
     @property
     def order_submission_enabled(self) -> bool:
@@ -125,12 +139,15 @@ class SafewayPipeline:
         self,
         items: list[ShoppingListItem],
         restock_items: list[ShoppingListItem] | None = None,
+        idempotency_key: str | None = None,
     ) -> OrderResult:
         """Execute the full pipeline: build cart then submit order.
 
         Args:
             items: Shopping list items to order.
             restock_items: Optional restock items to include.
+            idempotency_key: Optional client order id forwarded to the
+                duplicate-order guard and Safeway (Issue #61).
 
         Returns:
             OrderResult with confirmation or error details.
@@ -145,7 +162,7 @@ class SafewayPipeline:
             raise OrderSubmissionDisabledError(ORDER_SUBMISSION_DISABLED_MESSAGE)
         self._authenticate()
         cart = self._cart_builder.build_cart(items, restock_items)
-        return self._order_service.submit_order(cart)
+        return self._submit_guarded(cart, idempotency_key)
 
     def build_cart_only(
         self,
@@ -170,6 +187,7 @@ class SafewayPipeline:
     def submit_cart(
         self,
         cart: CartSummary,
+        idempotency_key: str | None = None,
         *,
         allow_review_items: bool = False,
     ) -> OrderResult:
@@ -180,6 +198,8 @@ class SafewayPipeline:
 
         Args:
             cart: Pre-built cart summary to submit.
+            idempotency_key: Optional client order id forwarded to the
+                duplicate-order guard and Safeway (Issue #61).
             allow_review_items: If True, bypass the review gate for
                 items flagged as ``needs_review`` (explicit human
                 override). Defaults to False (safe/blocking).
@@ -195,8 +215,8 @@ class SafewayPipeline:
         if not self._submission_enabled:
             raise OrderSubmissionDisabledError(ORDER_SUBMISSION_DISABLED_MESSAGE)
         self._authenticate()
-        return self._order_service.submit_order(
-            cart, allow_review_items=allow_review_items
+        return self._submit_guarded(
+            cart, idempotency_key, allow_review_items=allow_review_items
         )
 
     def close(self) -> None:
@@ -215,3 +235,119 @@ class SafewayPipeline:
             self._client.authenticate()
         except Exception as exc:
             raise SafewayPipelineError(f"Safeway authentication failed: {exc}") from exc
+
+    def _submit_guarded(
+        self,
+        cart: CartSummary,
+        idempotency_key: str | None,
+        *,
+        allow_review_items: bool = False,
+    ) -> OrderResult:
+        """Submit a cart through the duplicate-order guard (Issue #61).
+
+        An empty cart bypasses the guard entirely and goes straight to
+        :class:`~grocery_butler.order_service.OrderService` (which
+        rejects it with its existing "cart is empty" error). A cart with
+        items flagged ``needs_review`` is blocked next (Issue #59) —
+        unless ``allow_review_items`` overrides — *before* any ledger
+        write, so a review-blocked attempt (which never reaches Safeway)
+        can never leave behind a ledger row that would spuriously mark
+        the post-review resubmission a duplicate. Otherwise, the attempt
+        is atomically recorded in the ledger — or rejected as a
+        duplicate — via a single call to
+        ``OrderSubmissionStore.try_record_attempt`` (fail-closed, and
+        race-safe: a security review found the prior
+        ``find_recent_blocking`` + ``record_attempt`` pair vulnerable
+        to a check-then-insert race that let two concurrent
+        submissions of an identical cart both reach Safeway).
+
+        Args:
+            cart: Cart summary to submit.
+            idempotency_key: Client order id, or None to generate one.
+            allow_review_items: If True, bypass the review gate for
+                flagged items (explicit human override). Defaults to
+                False (safe/blocking).
+
+        Returns:
+            OrderResult with confirmation, error, or DUPLICATE details.
+        """
+        if not cart.items and not cart.restock_items:
+            return self._order_service.submit_order(cart)
+
+        if not allow_review_items:
+            blocked = review_block_result(cart)
+            if blocked is not None:
+                return blocked
+
+        fingerprint = cart_fingerprint(cart)
+        key = idempotency_key or str(uuid.uuid4())
+        # Deliberately NOT wrapped in try/except, in contrast to
+        # _finalize_submission below: no money has moved yet, so if the
+        # ledger write itself fails (e.g. a transient DB lock) the only
+        # safe response is to fail closed and let the error propagate,
+        # aborting the submission. Swallowing it here would send a
+        # real-money order to Safeway with no duplicate-guard record of
+        # the attempt (PR #107 review feedback, Issue #61).
+        submission_id = self._order_submissions.try_record_attempt(
+            key, fingerprint, DUPLICATE_WINDOW
+        )
+        if submission_id is None:
+            return OrderResult(
+                success=False,
+                outcome=OrderOutcome.DUPLICATE,
+                error_message=_DUPLICATE_ERROR_MESSAGE,
+            )
+
+        # Always forward the exact key recorded in the ledger so the
+        # clientOrderId sent to Safeway and our ledger row correlate,
+        # even when the key was generated here rather than supplied.
+        result = self._order_service.submit_order(
+            cart,
+            idempotency_key=key,
+            allow_review_items=allow_review_items,
+        )
+
+        self._finalize_submission(submission_id, result)
+        return result
+
+    def _finalize_submission(self, submission_id: int, result: OrderResult) -> None:
+        """Record a submission attempt's final status in the ledger.
+
+        Called only after ``OrderService.submit_order`` has already
+        returned — for a successful outcome, that means Safeway has
+        already confirmed and charged the order — so any failure of the
+        ledger write itself must never propagate: raising at this point
+        would surface a successfully-placed, real-money order as an
+        unhandled exception to the caller, and the caller would lose
+        the confirmation/order_id entirely (Gate 2.5 review BLOCKER,
+        Issue #61; mirrors
+        :meth:`~grocery_butler.order_service.OrderService._restock_ordered_items`).
+        The row is left at ``'submitted'`` in this case, which still
+        blocks duplicate resubmissions of the same cart for the
+        remainder of :data:`~grocery_butler.order_submissions.DUPLICATE_WINDOW`
+        (``'submitted'`` is one of the blocking statuses), so the guard's
+        protection is unaffected even though the final status update
+        was lost.
+
+        Args:
+            submission_id: Row id returned by
+                :meth:`OrderSubmissionStore.try_record_attempt`.
+            result: The result returned by the order service.
+        """
+        try:
+            if result.outcome is OrderOutcome.SUCCESS:
+                order_id = result.confirmation.order_id if result.confirmation else None
+                self._order_submissions.mark(
+                    submission_id, "confirmed", order_id=order_id
+                )
+            elif result.outcome is OrderOutcome.UNKNOWN:
+                self._order_submissions.mark(submission_id, "unknown")
+            else:
+                self._order_submissions.mark(submission_id, "failed")
+        except Exception:
+            logger.exception(
+                "Failed to record final submission status in the "
+                "duplicate-order ledger (submission_id=%s); the order "
+                "result itself is unaffected",
+                submission_id,
+            )
