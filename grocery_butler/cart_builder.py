@@ -151,7 +151,7 @@ class CartBuilder:
             if substitute_item is not None:
                 cart_items.append(substitute_item)
 
-        fulfillment_options = self._get_fulfillment_options()
+        fulfillment_options, unverified = self._get_fulfillment_options()
         recommended = _recommend_fulfillment(fulfillment_options)
         subtotal = _calculate_subtotal(cart_items, restock_cart)
         fee = _get_fulfillment_fee(fulfillment_options, recommended)
@@ -166,6 +166,7 @@ class CartBuilder:
             fulfillment_options=fulfillment_options,
             recommended_fulfillment=recommended,
             estimated_total=estimated_total,
+            fulfillment_unverified=unverified,
         )
 
     # ------------------------------------------------------------------
@@ -276,21 +277,29 @@ class CartBuilder:
             result.selected = result.alternatives[0]
         return result
 
-    def _get_fulfillment_options(self) -> list[FulfillmentOption]:
+    def _get_fulfillment_options(self) -> tuple[list[FulfillmentOption], bool]:
         """Query available fulfillment options from Safeway.
 
+        Issue #72 (HIGH): a fetch failure must never be papered over with
+        fabricated pickup/delivery options presented as real availability
+        and fees. On failure this returns an empty options list and flags
+        the result as unverified so callers can warn the human and
+        require an explicit override before submitting.
+
         Returns:
-            List of available fulfillment options.
+            A tuple of (fulfillment options, unverified). ``unverified``
+            is True when the fetch failed, in which case the options
+            list is empty; False (with the parsed options) on success.
         """
         try:
             store_id = self._client.store_id
             response = self._client.get(
                 f"/abs/pub/web/stores/{store_id}/fulfillment",
             )
-            return _parse_fulfillment_response(response)
+            return _parse_fulfillment_response(response), False
         except Exception:
             logger.exception("Failed to fetch fulfillment options")
-            return _default_fulfillment_options()
+            return [], True
 
 
 # ------------------------------------------------------------------
@@ -477,25 +486,3 @@ def _substitution_to_cart_item(
         needs_review=True,
         review_reason="substitution",
     )
-
-
-def _default_fulfillment_options() -> list[FulfillmentOption]:
-    """Return default fulfillment options when API is unavailable.
-
-    Returns:
-        Pickup and delivery with default values.
-    """
-    return [
-        FulfillmentOption(
-            type=FulfillmentType.PICKUP,
-            available=True,
-            fee=0.0,
-            windows=[],
-        ),
-        FulfillmentOption(
-            type=FulfillmentType.DELIVERY,
-            available=True,
-            fee=9.95,
-            windows=[],
-        ),
-    ]

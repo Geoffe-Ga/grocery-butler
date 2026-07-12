@@ -140,6 +140,7 @@ class OrderService:
         idempotency_key: str | None = None,
         *,
         allow_review_items: bool = False,
+        allow_unverified_fulfillment: bool = False,
     ) -> OrderResult:
         """Submit a cart to Safeway and update inventory.
 
@@ -147,6 +148,10 @@ class OrderService:
         by unit-aware quantity math (see :attr:`CartItem.needs_review`).
         Flagged items block submission unless ``allow_review_items`` is
         set, which represents an explicit human override after review.
+        The cart is also checked for unverified fulfillment (Issue #72):
+        if Safeway's fulfillment options could not be fetched when the
+        cart was built, submission blocks unless
+        ``allow_unverified_fulfillment`` is set.
 
         Sends a ``clientOrderId`` (the given ``idempotency_key``, or a
         freshly generated UUID4 if none is given) with the order so
@@ -164,6 +169,10 @@ class OrderService:
             allow_review_items: If True, bypass the review gate and
                 submit even if items are flagged as ``needs_review``.
                 Defaults to False (safe/blocking).
+            allow_unverified_fulfillment: If True, bypass the fulfillment
+                gate and submit even if ``cart.fulfillment_unverified``
+                is True (Issue #72 explicit human override). Defaults to
+                False (safe/blocking).
 
         Returns:
             OrderResult with confirmation or error details. If order
@@ -171,7 +180,11 @@ class OrderService:
             with :data:`ORDER_SUBMISSION_DISABLED_MESSAGE` before any
             other validation or API call.
         """
-        blocked = self._preflight_block(cart, allow_review_items=allow_review_items)
+        blocked = self._preflight_block(
+            cart,
+            allow_review_items=allow_review_items,
+            allow_unverified_fulfillment=allow_unverified_fulfillment,
+        )
         if blocked is not None:
             return blocked
 
@@ -263,18 +276,22 @@ class OrderService:
         cart: CartSummary,
         *,
         allow_review_items: bool,
+        allow_unverified_fulfillment: bool,
     ) -> OrderResult | None:
         """Run the pre-flight gates that block a submission before any I/O.
 
         Gates run in a deliberate order: the Issue #60 descope gate
         short-circuits first (before any other validation), then the
-        Issue #59 review gate (unless overridden), then the empty-cart
-        check — all before any HTTP call or ledger write.
+        Issue #59 review gate (unless overridden), then the Issue #72
+        fulfillment gate (unless overridden), then the empty-cart check
+        — all before any HTTP call or ledger write.
 
         Args:
             cart: The built cart summary to validate.
             allow_review_items: If True, skip the review gate (explicit
                 human override).
+            allow_unverified_fulfillment: If True, skip the fulfillment
+                gate (explicit human override, Issue #72).
 
         Returns:
             A failed OrderResult describing the first gate that blocks
@@ -288,6 +305,11 @@ class OrderService:
 
         if not allow_review_items:
             blocked = review_block_result(cart)
+            if blocked is not None:
+                return blocked
+
+        if not allow_unverified_fulfillment:
+            blocked = fulfillment_block_result(cart)
             if blocked is not None:
                 return blocked
 
@@ -479,6 +501,45 @@ def _format_review_block_message(flagged: list[CartItem]) -> str:
         "Order blocked pending review: the following items need "
         f"manual review before ordering: {named}. Re-submit with "
         "allow_review_items=True after confirming quantities."
+    )
+
+
+def fulfillment_block_result(cart: CartSummary) -> OrderResult | None:
+    """Return the blocking result for a cart with unverified fulfillment.
+
+    Shared by :meth:`OrderService.submit_order` and the pipeline's
+    duplicate-order guard so the fulfillment gate (Issue #72) is
+    enforced once, consistently, *before* any ledger write or HTTP call
+    — a fulfillment-blocked attempt must never record a duplicate-guard
+    ledger row, because it never reaches Safeway (Issue #61).
+
+    Issue #72 (HIGH): when Safeway's fulfillment options could not be
+    fetched while building the cart, ``CartBuilder`` previously
+    substituted fabricated defaults (free pickup, $9.95 delivery, both
+    marked available) instead of surfacing the failure — presenting
+    invented availability and fees as if fulfillment had been confirmed.
+    The fix flags such a cart ``fulfillment_unverified`` and this
+    function blocks it here, honestly, before any money moves.
+
+    Args:
+        cart: Cart summary to inspect for ``fulfillment_unverified``.
+
+    Returns:
+        A failed :class:`OrderResult` explaining that fulfillment could
+        not be confirmed with Safeway, or None when nothing blocks
+        submission.
+    """
+    if not cart.fulfillment_unverified:
+        return None
+    return OrderResult(
+        success=False,
+        error_message=(
+            "Order blocked — fulfillment options could not be confirmed "
+            "with Safeway, so pickup/delivery availability and fees are "
+            "unverified. Re-submit with "
+            "allow_unverified_fulfillment=True after confirming "
+            "fulfillment manually."
+        ),
     )
 
 

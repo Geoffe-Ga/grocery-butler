@@ -596,6 +596,14 @@ def _format_cart_summary(cart: CartSummary) -> str:
             lines.append(f"  {orig} -> {alt}")
         lines.append("")
 
+    if cart.fulfillment_unverified:
+        lines.append(
+            "WARNING: fulfillment options could not be confirmed with "
+            "Safeway (unverified) — pickup/delivery availability and "
+            "fees below are not final."
+        )
+        lines.append("")
+
     lines.append(f"Subtotal:  ${cart.subtotal:.2f}")
     lines.append(f"Fulfillment: {cart.recommended_fulfillment.value}")
     lines.append(f"Est. Total: ${cart.estimated_total:.2f}")
