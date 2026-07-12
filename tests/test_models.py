@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from pydantic import ValidationError
 
@@ -148,7 +150,12 @@ class TestUnit:
         assert Unit.LB == "lb"
 
     def test_known_members_exist(self) -> None:
-        """Test all expected unit members are defined."""
+        """Test all expected unit members are defined.
+
+        Includes pint/quart/stick, added for issue #69 (Unit enum lacked
+        these units, forcing recipes that used them through the silent
+        parse_unit -> EACH fallback).
+        """
         expected = {
             "tsp",
             "tbsp",
@@ -157,6 +164,8 @@ class TestUnit:
             "ml",
             "l",
             "gal",
+            "pint",
+            "quart",
             "oz",
             "lb",
             "g",
@@ -174,6 +183,7 @@ class TestUnit:
             "bottle",
             "package",
             "block",
+            "stick",
             "pinch",
             "dash",
             "to_taste",
@@ -243,6 +253,57 @@ class TestParseUnit:
         """Test unrecognized strings default to EACH."""
         assert parse_unit("foobar") == Unit.EACH
         assert parse_unit("xyz123") == Unit.EACH
+
+
+class TestParseUnitNewUnits:
+    """Tests for parse_unit support of pint/quart/stick units (issue #69)."""
+
+    def test_pint_and_aliases(self) -> None:
+        """Test 'pint', 'pt', and 'pints' all resolve to Unit.PINT."""
+        assert parse_unit("pint") == Unit.PINT
+        assert parse_unit("pt") == Unit.PINT
+        assert parse_unit("pints") == Unit.PINT
+
+    def test_quart_and_aliases(self) -> None:
+        """Test 'quart', 'qt', and 'quarts' all resolve to Unit.QUART."""
+        assert parse_unit("quart") == Unit.QUART
+        assert parse_unit("qt") == Unit.QUART
+        assert parse_unit("quarts") == Unit.QUART
+
+    def test_stick_and_aliases(self) -> None:
+        """Test 'stick' and 'sticks' both resolve to Unit.STICK."""
+        assert parse_unit("stick") == Unit.STICK
+        assert parse_unit("sticks") == Unit.STICK
+
+
+class TestParseUnitWarningLogging:
+    """Tests for parse_unit's WARNING log on unknown unit fallback (issue #69).
+
+    Currently ``parse_unit`` silently falls back to ``Unit.EACH`` for any
+    unrecognized token, with no logging at all -- masking data-quality
+    problems from LLM output or user input. Post-fix, an unrecognized
+    non-blank token must log a WARNING containing the raw token, while a
+    blank/empty token continues to fall back silently.
+    """
+
+    def test_unknown_unit_logs_warning_with_raw_token(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Test an unrecognized unit token logs a WARNING containing the token."""
+        with caplog.at_level(logging.WARNING, logger="grocery_butler.models"):
+            result = parse_unit("zorbml")
+        assert result == Unit.EACH
+        assert len(caplog.records) == 1
+        assert "zorbml" in caplog.text
+
+    def test_empty_string_emits_no_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Test blank input falls back to EACH silently, with no WARNING logged."""
+        with caplog.at_level(logging.WARNING, logger="grocery_butler.models"):
+            result = parse_unit("")
+        assert result == Unit.EACH
+        assert len(caplog.records) == 0
 
 
 class TestCoerceUnit:

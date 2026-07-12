@@ -14,10 +14,11 @@ from typing import TYPE_CHECKING, Any
 from grocery_butler.claude_utils import extract_json_text
 from grocery_butler.models import IngredientCategory, ShoppingListItem, Unit, parse_unit
 from grocery_butler.prompt_loader import load_prompt
+from grocery_butler.units import convert, dimension_of
 
 if TYPE_CHECKING:
     from grocery_butler.config import Config
-    from grocery_butler.models import InventoryItem, ParsedMeal
+    from grocery_butler.models import Ingredient, InventoryItem, ParsedMeal
 
 logger = logging.getLogger(__name__)
 
@@ -190,8 +191,9 @@ class Consolidator:
     """Consolidates meal ingredients into a unified shopping list.
 
     Uses Claude API to intelligently merge quantities, handle unit
-    conversions, and exclude pantry staples. Falls back to pure-Python
-    dedup when no API client is available.
+    conversions, and exclude pantry staples. Falls back to a pure-Python,
+    dimension-aware merge (see :meth:`consolidate_simple`) when no API
+    client is available.
     """
 
     def __init__(
@@ -286,8 +288,14 @@ class Consolidator:
     ) -> list[ShoppingListItem]:
         """Pure-Python fallback consolidation without Claude.
 
-        Performs basic dedup and quantity summing. Used when the API
-        is unavailable or in tests.
+        Performs dimension-aware merging: ingredients sharing a name and a
+        compatible unit (same physical dimension -- mass, volume, or count)
+        have their quantities converted to a common unit and summed into a
+        single line item. Ingredients with incompatible units (e.g. a
+        packaging unit like "jar" vs. "can", or a dimensioned unit vs. a
+        packaging unit) are kept as separate line items rather than being
+        naively added together. Used when the API is unavailable or in
+        tests.
 
         Args:
             meals: List of parsed meals with ingredient lists.
@@ -295,7 +303,7 @@ class Consolidator:
             pantry_staples: Names of pantry staple ingredients.
 
         Returns:
-            Consolidated shopping list with basic merging.
+            Consolidated shopping list with unit-aware merging.
         """
         pantry_lower = {s.lower() for s in pantry_staples}
         merged = self._merge_meal_ingredients(meals, pantry_lower)
@@ -309,32 +317,87 @@ class Consolidator:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _ingredient_group_key(ingredient: str, unit: Unit) -> tuple[str, str]:
+        """Build the composite merge key for an ingredient/unit pairing.
+
+        Units with a fixed physical dimension (mass, volume, count) are
+        grouped by dimension so compatible units (e.g. cup and gallon) merge
+        into a single line item. Packaging/"other" units with no fixed
+        dimension are grouped by their exact unit instead, so incompatible
+        packaging (e.g. jar vs. can) stays split into separate line items.
+
+        Args:
+            ingredient: Raw ingredient name (not yet lowercased).
+            unit: The ingredient's parsed unit.
+
+        Returns:
+            A ``(ingredient_lower, group_token)`` tuple suitable for use as
+            a merge dict key.
+        """
+        dimension = dimension_of(unit)
+        if dimension is not None:
+            return (ingredient.lower(), f"dim:{dimension.value}")
+        return (ingredient.lower(), f"unit:{unit.value}")
+
+    @staticmethod
+    def _merge_quantity(entry: dict[str, object], item: Ingredient) -> None:
+        """Add an ingredient's quantity into an existing merge entry in place.
+
+        Converts ``item.quantity`` from ``item.unit`` into the entry's
+        canonical unit before summing, so dimensionally compatible units
+        (e.g. cups and gallons) combine correctly. If the units turn out to
+        be incomparable (``convert`` returns ``None`` -- unreachable in
+        normal orchestration since entries only share a group key when
+        their units are compatible, but guarded defensively), falls back to
+        adding the raw quantities unconverted.
+
+        Args:
+            entry: The existing merge entry to update in place. Expected to
+                hold ``"quantity"`` (a number) and ``"unit"`` (a ``Unit``).
+            item: The ingredient whose quantity is being merged in.
+
+        Returns:
+            None. ``entry["quantity"]`` is updated in place.
+        """
+        raw_qty = entry.get("quantity", 0.0)
+        current_qty = float(raw_qty) if isinstance(raw_qty, (int, float)) else 0.0
+
+        raw_unit = entry.get("unit")
+        canonical_unit = raw_unit if isinstance(raw_unit, Unit) else Unit.EACH
+
+        converted = convert(item.quantity, item.unit, canonical_unit)
+        addition = converted if converted is not None else item.quantity
+        entry["quantity"] = current_qty + addition
+
+    @staticmethod
     def _merge_meal_ingredients(
         meals: list[ParsedMeal],
         pantry_lower: set[str],
-    ) -> dict[str, dict[str, object]]:
+    ) -> dict[tuple[str, str], dict[str, object]]:
         """Merge ingredient quantities across meals, excluding pantry staples.
+
+        Ingredients are grouped by ``(ingredient_lower, group_token)`` via
+        :meth:`_ingredient_group_key` so unit conversion only ever combines
+        dimensionally compatible quantities; incompatible units for the same
+        ingredient are kept as separate line items.
 
         Args:
             meals: List of parsed meals.
             pantry_lower: Lowercased pantry staple names to exclude.
 
         Returns:
-            Dict keyed by ingredient name with merged data.
+            Dict keyed by ``(ingredient_lower, group_token)`` with merged
+            data.
         """
-        merged: dict[str, dict[str, object]] = {}
+        merged: dict[tuple[str, str], dict[str, object]] = {}
         for meal in meals:
             for item in meal.purchase_items:
-                key = item.ingredient.lower()
-                if key in pantry_lower:
+                if item.ingredient.lower() in pantry_lower:
                     continue
+                key = Consolidator._ingredient_group_key(item.ingredient, item.unit)
                 if key in merged:
                     entry = merged[key]
-                    raw_qty = entry.get("quantity", 0.0)
-                    current_qty = (
-                        float(raw_qty) if isinstance(raw_qty, (int, float)) else 0.0
-                    )
-                    entry["quantity"] = current_qty + item.quantity
+                    Consolidator._merge_quantity(entry, item)
                     raw_meals = entry.get("from_meals", [])
                     from_meals_list: list[str] = (
                         list(raw_meals) if isinstance(raw_meals, list) else []
@@ -354,12 +417,13 @@ class Consolidator:
 
     @staticmethod
     def _build_items_from_merged(
-        merged: dict[str, dict[str, object]],
+        merged: dict[tuple[str, str], dict[str, object]],
     ) -> list[ShoppingListItem]:
         """Convert merged ingredient dict into ShoppingListItem list.
 
         Args:
-            merged: Dict keyed by ingredient name with merged data.
+            merged: Dict keyed by ``(ingredient_lower, group_token)`` with
+                merged data.
 
         Returns:
             List of ShoppingListItem instances.

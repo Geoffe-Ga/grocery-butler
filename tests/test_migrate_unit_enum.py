@@ -285,6 +285,46 @@ class TestMigrate:
 
 
 # ---------------------------------------------------------------------------
+# Regression tests: pint/stick units must not be rewritten (issue #69)
+#
+# Current bug: the ``Unit`` enum lacks ``PINT``/``QUART``/``STICK`` members,
+# so ``parse_unit`` (used internally by the migration) silently falls back
+# to ``Unit.EACH`` for these valid-but-unsupported tokens. That means a
+# stored "pint" or "stick" unit gets incorrectly rewritten to "each" the
+# first time this migration runs -- silent, lossy data corruption. Post-fix,
+# these units are first-class Unit members, so the migration must treat
+# them as already-normalized and leave them untouched.
+# ---------------------------------------------------------------------------
+
+
+class TestMigrateUnitEnumNewUnits:
+    """Regression tests: pint/stick units must not be rewritten (issue #69)."""
+
+    def test_pint_unit_not_rewritten(self, tmp_path: Path) -> None:
+        """Test a stored 'pint' recipe ingredient unit is left unchanged."""
+        db_path = str(tmp_path / "test.db")
+        init_db(db_path)
+        recipe_id = _seed_recipe(db_path)
+        row_id = _seed_recipe_ingredient(db_path, recipe_id, "pint")
+
+        count = _migrate_recipe_ingredients(db_path)
+
+        assert count == 0
+        assert _fetch_recipe_ingredient_unit(db_path, row_id) == "pint"
+
+    def test_stick_unit_not_rewritten(self, tmp_path: Path) -> None:
+        """Test a stored 'stick' household_inventory default_unit is unchanged."""
+        db_path = str(tmp_path / "test.db")
+        init_db(db_path)
+        row_id = _seed_inventory_item(db_path, "butter", "stick")
+
+        count = _migrate_household_inventory(db_path)
+
+        assert count == 0
+        assert _fetch_inventory_default_unit(db_path, row_id) == "stick"
+
+
+# ---------------------------------------------------------------------------
 # Tests for CLI entry point
 # ---------------------------------------------------------------------------
 

@@ -7,10 +7,13 @@ including future Safeway models that aren't used yet.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, field_validator
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -64,6 +67,8 @@ class Unit(StrEnum):
     ML = "ml"
     L = "l"
     GAL = "gal"
+    PINT = "pint"
+    QUART = "quart"
 
     # Weight
     OZ = "oz"
@@ -87,6 +92,7 @@ class Unit(StrEnum):
     BOTTLE = "bottle"
     PACKAGE = "package"
     BLOCK = "block"
+    STICK = "stick"
 
     # Other
     PINCH = "pinch"
@@ -120,6 +126,10 @@ _UNIT_ALIASES: dict[str, Unit] = {
     "liters": Unit.L,
     "gallon": Unit.GAL,
     "gallons": Unit.GAL,
+    "pints": Unit.PINT,
+    "pt": Unit.PINT,
+    "quarts": Unit.QUART,
+    "qt": Unit.QUART,
     # Count plurals
     "piece": Unit.EACH,
     "pieces": Unit.EACH,
@@ -136,6 +146,7 @@ _UNIT_ALIASES: dict[str, Unit] = {
     "packages": Unit.PACKAGE,
     "pkg": Unit.PACKAGE,
     "blocks": Unit.BLOCK,
+    "sticks": Unit.STICK,
 }
 
 
@@ -143,7 +154,10 @@ def parse_unit(raw: str) -> Unit:
     """Parse a raw unit string into a Unit enum member.
 
     Handles exact matches, aliases, and case-insensitive lookup.
-    Falls back to Unit.EACH for unrecognized strings.
+    Falls back to Unit.EACH for unrecognized strings, emitting a WARNING
+    log with the raw token so silent unit rewrites are detectable
+    (issue #69). Empty or blank input also falls back to Unit.EACH but
+    stays silent, since a missing unit is a legitimate default.
 
     Args:
         raw: Raw unit string from LLM output, database, or user input.
@@ -161,6 +175,7 @@ def parse_unit(raw: str) -> Unit:
     result = _UNIT_ALIASES.get(cleaned)
     if result is not None:
         return result
+    logger.warning("parse_unit: unknown unit %r; falling back to Unit.EACH", raw)
     return Unit.EACH
 
 
