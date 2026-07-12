@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from grocery_butler.config import Config
     from grocery_butler.models import (
         BrandPreference,
+        CartItem,
         CartSummary,
         InventoryItem,
         ParsedMeal,
@@ -292,8 +293,12 @@ class _OrderConfirmView(discord.ui.View):
 
         await interaction.response.defer()
         try:
+            # The rendered preview (_format_cart_summary) already showed
+            # the user every flagged item and its reason code, so this
+            # button press IS the explicit human override of the review
+            # gate (chief-architect ruling, issue #59 round 3).
             order_result = await asyncio.to_thread(
-                self._pipeline.submit_cart, self._cart
+                self._pipeline.submit_cart, self._cart, allow_review_items=True
             )
             msg = _format_order_result(order_result)
             await interaction.followup.send(msg)
@@ -344,6 +349,28 @@ def _make_bot_anthropic_client(config: Config) -> object | None:
     return make_anthropic_client(config.anthropic_api_key)
 
 
+def _format_cart_item_line(ci: CartItem) -> str:
+    """Format a single cart item line for display.
+
+    Appends a ``" (review: <reason>)"`` marker when the item's quantity
+    calculation was flagged for human review (issue #59). The reason
+    code is included so the user has actually seen what needs checking
+    before confirming the order (chief-architect ruling, round 3): a
+    bare ``"(review)"`` marker would not satisfy that.
+
+    Args:
+        ci: The cart item to format.
+
+    Returns:
+        A single formatted display line for the item.
+    """
+    marker = f" (review: {ci.review_reason})" if ci.needs_review else ""
+    return (
+        f"  {ci.quantity_to_order}x {ci.safeway_product.name}"
+        f"  ${ci.estimated_cost:.2f}{marker}"
+    )
+
+
 def _format_cart_summary(cart: CartSummary) -> str:
     """Format a CartSummary for Discord display.
 
@@ -357,19 +384,11 @@ def _format_cart_summary(cart: CartSummary) -> str:
 
     if cart.items:
         lines.append(f"Items ({len(cart.items)}):")
-        for ci in cart.items:
-            lines.append(
-                f"  {ci.quantity_to_order}x {ci.safeway_product.name}"
-                f"  ${ci.estimated_cost:.2f}"
-            )
+        lines.extend(_format_cart_item_line(ci) for ci in cart.items)
 
     if cart.restock_items:
         lines.append(f"\nRestock ({len(cart.restock_items)}):")
-        for ci in cart.restock_items:
-            lines.append(
-                f"  {ci.quantity_to_order}x {ci.safeway_product.name}"
-                f"  ${ci.estimated_cost:.2f}"
-            )
+        lines.extend(_format_cart_item_line(ci) for ci in cart.restock_items)
 
     if cart.substituted_items:
         lines.append(f"\nSubstituted ({len(cart.substituted_items)}):")

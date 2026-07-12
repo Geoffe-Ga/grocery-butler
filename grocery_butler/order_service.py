@@ -138,8 +138,15 @@ class OrderService:
         self,
         cart: CartSummary,
         idempotency_key: str | None = None,
+        *,
+        allow_review_items: bool = False,
     ) -> OrderResult:
         """Submit a cart to Safeway and update inventory.
+
+        Before any money is spent, the cart is checked for items flagged
+        by unit-aware quantity math (see :attr:`CartItem.needs_review`).
+        Flagged items block submission unless ``allow_review_items`` is
+        set, which represents an explicit human override after review.
 
         Sends a ``clientOrderId`` (the given ``idempotency_key``, or a
         freshly generated UUID4 if none is given) with the order so
@@ -154,6 +161,9 @@ class OrderService:
             cart: The built cart summary to submit.
             idempotency_key: Client order id to send with the request. A
                 UUID4 is generated when not given.
+            allow_review_items: If True, bypass the review gate and
+                submit even if items are flagged as ``needs_review``.
+                Defaults to False (safe/blocking).
 
         Returns:
             OrderResult with confirmation or error details. If order
@@ -161,17 +171,9 @@ class OrderService:
             with :data:`ORDER_SUBMISSION_DISABLED_MESSAGE` before any
             other validation or API call.
         """
-        if not self._submission_enabled:
-            return OrderResult(
-                success=False,
-                error_message=ORDER_SUBMISSION_DISABLED_MESSAGE,
-            )
-
-        if not cart.items and not cart.restock_items:
-            return OrderResult(
-                success=False,
-                error_message="Cart is empty — nothing to order",
-            )
+        blocked = self._preflight_block(cart, allow_review_items=allow_review_items)
+        if blocked is not None:
+            return blocked
 
         client_order_id = idempotency_key or str(uuid.uuid4())
         payload = _build_order_payload(cart, client_order_id)
@@ -229,6 +231,46 @@ class OrderService:
             confirmation=confirmation,
             items_restocked=restocked,
         )
+
+    def _preflight_block(
+        self,
+        cart: CartSummary,
+        *,
+        allow_review_items: bool,
+    ) -> OrderResult | None:
+        """Run the pre-flight gates that block a submission before any I/O.
+
+        Gates run in a deliberate order: the Issue #60 descope gate
+        short-circuits first (before any other validation), then the
+        Issue #59 review gate (unless overridden), then the empty-cart
+        check — all before any HTTP call or ledger write.
+
+        Args:
+            cart: The built cart summary to validate.
+            allow_review_items: If True, skip the review gate (explicit
+                human override).
+
+        Returns:
+            A failed OrderResult describing the first gate that blocks
+            this submission, or None when the order may proceed.
+        """
+        if not self._submission_enabled:
+            return OrderResult(
+                success=False,
+                error_message=ORDER_SUBMISSION_DISABLED_MESSAGE,
+            )
+
+        if not allow_review_items:
+            blocked = review_block_result(cart)
+            if blocked is not None:
+                return blocked
+
+        if not cart.items and not cart.restock_items:
+            return OrderResult(
+                success=False,
+                error_message="Cart is empty — nothing to order",
+            )
+        return None
 
     def _restock_ordered_items(self, cart: CartSummary) -> int:
         """Mark ordered restock items as back in stock.
@@ -353,6 +395,65 @@ def _safe_float(value: Any, fallback: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def review_block_result(cart: CartSummary) -> OrderResult | None:
+    """Return the blocking result for a cart pending review, if any.
+
+    Shared by :meth:`OrderService.submit_order` and the pipeline's
+    duplicate-order guard so the review gate (Issue #59) is enforced
+    once, consistently, *before* any ledger write or HTTP call — a
+    review-blocked attempt must never record a duplicate-guard ledger
+    row, because it never reaches Safeway (Issue #61).
+
+    Args:
+        cart: Cart summary to inspect for ``needs_review`` items.
+
+    Returns:
+        A failed :class:`OrderResult` naming every flagged item if any
+        item needs review, or None when nothing blocks submission.
+    """
+    flagged = _collect_review_items(cart)
+    if not flagged:
+        return None
+    return OrderResult(
+        success=False,
+        error_message=_format_review_block_message(flagged),
+    )
+
+
+def _collect_review_items(cart: CartSummary) -> list[CartItem]:
+    """Collect cart items flagged as needing human review.
+
+    Args:
+        cart: Cart summary with regular and restock items.
+
+    Returns:
+        List of items (from ``items`` and ``restock_items``) whose
+        ``needs_review`` flag is True, in cart order.
+    """
+    return [item for item in cart.items + cart.restock_items if item.needs_review]
+
+
+def _format_review_block_message(flagged: list[CartItem]) -> str:
+    """Build the error message for an order blocked pending review.
+
+    Args:
+        flagged: Cart items flagged as ``needs_review``.
+
+    Returns:
+        Human-readable message naming each flagged ingredient and its
+        review reason, stating the order was blocked pending review.
+    """
+    named = ", ".join(
+        f"{item.shopping_list_item.ingredient} ({item.review_reason})"
+        for item in flagged
+    )
+    return (
+        "Order blocked pending review: the following items need "
+        f"manual review before ordering: {named}. Re-submit with "
+        "allow_review_items=True after confirming quantities."
+    )
 
 
 def _collect_restock_ingredients(cart: CartSummary) -> list[str]:

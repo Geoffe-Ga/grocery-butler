@@ -16,6 +16,7 @@ from grocery_butler.order_service import (
     OrderOutcome,
     OrderResult,
     OrderService,
+    review_block_result,
 )
 from grocery_butler.order_submissions import (
     DUPLICATE_WINDOW,
@@ -187,6 +188,8 @@ class SafewayPipeline:
         self,
         cart: CartSummary,
         idempotency_key: str | None = None,
+        *,
+        allow_review_items: bool = False,
     ) -> OrderResult:
         """Submit a pre-built cart to Safeway.
 
@@ -197,6 +200,9 @@ class SafewayPipeline:
             cart: Pre-built cart summary to submit.
             idempotency_key: Optional client order id forwarded to the
                 duplicate-order guard and Safeway (Issue #61).
+            allow_review_items: If True, bypass the review gate for
+                items flagged as ``needs_review`` (explicit human
+                override). Defaults to False (safe/blocking).
 
         Returns:
             OrderResult with confirmation or error details.
@@ -209,7 +215,9 @@ class SafewayPipeline:
         if not self._submission_enabled:
             raise OrderSubmissionDisabledError(ORDER_SUBMISSION_DISABLED_MESSAGE)
         self._authenticate()
-        return self._submit_guarded(cart, idempotency_key)
+        return self._submit_guarded(
+            cart, idempotency_key, allow_review_items=allow_review_items
+        )
 
     def close(self) -> None:
         """Clean up SafewayClient HTTP resources."""
@@ -232,14 +240,21 @@ class SafewayPipeline:
         self,
         cart: CartSummary,
         idempotency_key: str | None,
+        *,
+        allow_review_items: bool = False,
     ) -> OrderResult:
         """Submit a cart through the duplicate-order guard (Issue #61).
 
         An empty cart bypasses the guard entirely and goes straight to
         :class:`~grocery_butler.order_service.OrderService` (which
-        rejects it with its existing "cart is empty" error). Otherwise,
-        the attempt is atomically recorded in the ledger — or rejected
-        as a duplicate — via a single call to
+        rejects it with its existing "cart is empty" error). A cart with
+        items flagged ``needs_review`` is blocked next (Issue #59) —
+        unless ``allow_review_items`` overrides — *before* any ledger
+        write, so a review-blocked attempt (which never reaches Safeway)
+        can never leave behind a ledger row that would spuriously mark
+        the post-review resubmission a duplicate. Otherwise, the attempt
+        is atomically recorded in the ledger — or rejected as a
+        duplicate — via a single call to
         ``OrderSubmissionStore.try_record_attempt`` (fail-closed, and
         race-safe: a security review found the prior
         ``find_recent_blocking`` + ``record_attempt`` pair vulnerable
@@ -249,12 +264,20 @@ class SafewayPipeline:
         Args:
             cart: Cart summary to submit.
             idempotency_key: Client order id, or None to generate one.
+            allow_review_items: If True, bypass the review gate for
+                flagged items (explicit human override). Defaults to
+                False (safe/blocking).
 
         Returns:
             OrderResult with confirmation, error, or DUPLICATE details.
         """
         if not cart.items and not cart.restock_items:
             return self._order_service.submit_order(cart)
+
+        if not allow_review_items:
+            blocked = review_block_result(cart)
+            if blocked is not None:
+                return blocked
 
         fingerprint = cart_fingerprint(cart)
         key = idempotency_key or str(uuid.uuid4())
@@ -271,7 +294,11 @@ class SafewayPipeline:
         # Always forward the exact key recorded in the ledger so the
         # clientOrderId sent to Safeway and our ledger row correlate,
         # even when the key was generated here rather than supplied.
-        result = self._order_service.submit_order(cart, idempotency_key=key)
+        result = self._order_service.submit_order(
+            cart,
+            idempotency_key=key,
+            allow_review_items=allow_review_items,
+        )
 
         self._finalize_submission(submission_id, result)
         return result

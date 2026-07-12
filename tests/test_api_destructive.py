@@ -112,8 +112,24 @@ def _make_shopping_item(ingredient: str = "pasta") -> ShoppingListItem:
     )
 
 
-def _make_cart_item(ingredient: str, cost: float) -> CartItem:
-    """Return a CartItem with the given estimated cost."""
+def _make_cart_item(
+    ingredient: str,
+    cost: float,
+    *,
+    needs_review: bool = False,
+    review_reason: str = "",
+) -> CartItem:
+    """Return a CartItem with the given estimated cost.
+
+    Args:
+        ingredient: Ingredient name for the underlying shopping list item.
+        cost: Estimated cost assigned to the item.
+        needs_review: Whether to flag the item as needing human review.
+        review_reason: Machine-readable reason code when flagged.
+
+    Returns:
+        A CartItem, optionally flagged for review (issue #59).
+    """
     return CartItem(
         shopping_list_item=_make_shopping_item(ingredient),
         safeway_product=SafewayProduct(
@@ -124,6 +140,8 @@ def _make_cart_item(ingredient: str, cost: float) -> CartItem:
         ),
         quantity_to_order=1,
         estimated_cost=cost,
+        needs_review=needs_review,
+        review_reason=review_reason,
     )
 
 
@@ -139,6 +157,33 @@ def _make_cart(costs: dict[str, float]) -> CartSummary:
         fulfillment_options=[],
         recommended_fulfillment=FulfillmentType.PICKUP,
         estimated_total=sum(costs.values()),
+    )
+
+
+def _make_cart_with_flagged_item() -> CartSummary:
+    """Return a CartSummary with one flagged item and one clean item.
+
+    The flagged item ("spaghetti") carries ``needs_review=True`` with
+    reason code ``"incomparable_units"``, matching the real quantity
+    calculator's flag for a fixture-style unit mismatch (issue #59).
+    """
+    flagged = _make_cart_item(
+        "spaghetti",
+        2.50,
+        needs_review=True,
+        review_reason="incomparable_units",
+    )
+    clean = _make_cart_item("ground beef", 5.00)
+    items = [flagged, clean]
+    return CartSummary(
+        items=items,
+        failed_items=[],
+        substituted_items=[],
+        restock_items=[],
+        subtotal=7.50,
+        fulfillment_options=[],
+        recommended_fulfillment=FulfillmentType.PICKUP,
+        estimated_total=7.50,
     )
 
 
@@ -319,6 +364,39 @@ class TestOrderSubmitStaging:
             )
         assert response.status_code == 200
         factory.assert_not_called()
+
+    def test_staged_message_lists_flagged_items_and_reasons(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """The staged message must surface flagged ingredients and reasons.
+
+        Per the chief-architect's ruling: a human confirm only counts as
+        review approval if flagged items AND their reason codes were
+        rendered to that human first. The staging response is what
+        RubotPaul posts to chat before asking for confirmation, so it
+        must name every flagged ingredient and its reason code.
+        """
+        cart = _make_cart_with_flagged_item()
+        response = client.post(
+            "/api/v1/order/submit",
+            json={"cart": cart.model_dump(mode="json")},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        message = response.get_json()["message"]
+        assert "spaghetti" in message
+        assert "incomparable_units" in message
+
+    def test_staged_message_has_no_review_section_for_clean_cart(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """A cart with no flagged items keeps the plain staging message."""
+        response = client.post(
+            "/api/v1/order/submit", json=_order_body(), headers=auth_headers
+        )
+        assert response.status_code == 200
+        message = response.get_json()["message"]
+        assert "review" not in message.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +579,38 @@ class TestActionsConfirm:
         assert action is not None
         assert action.status is PendingActionStatus.APPROVED
         assert action.resolved_at is not None
+
+    def test_confirm_order_forwards_allow_review_items_override(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Confirming a staged order must override the review gate.
+
+        Per the chief-architect's ruling: the human already saw the
+        flagged items and their reason codes in the staged message
+        before replying "confirm", so that confirm IS the explicit
+        review approval. The confirm executor must therefore call
+        ``pipeline.submit_cart`` with ``allow_review_items=True`` --
+        otherwise a flagged cart the human already approved would still
+        be hard-blocked by ``OrderService.submit_order``.
+        """
+        body = {"cart": _make_cart_with_flagged_item().model_dump(mode="json")}
+        action_id = _stage_via_api(client, auth_headers, "/api/v1/order/submit", body)
+
+        pipeline = MagicMock()
+        pipeline.submit_cart.return_value = _successful_order_result()
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        pipeline.submit_cart.assert_called_once()
+        _, kwargs = pipeline.submit_cart.call_args
+        assert kwargs.get("allow_review_items") is True
 
     def test_failed_order_submission_returns_502(
         self,
