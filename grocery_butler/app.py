@@ -37,6 +37,95 @@ from grocery_butler.recipe_store import RecipeStore
 logger = logging.getLogger(__name__)
 
 
+def _is_production() -> bool:
+    """Return whether the app is configured to run in production mode.
+
+    Production mode is opted into via the ``APP_ENV`` environment variable
+    (set to ``"production"`` in the Docker runtime image). The comparison
+    is case-insensitive so ``"Production"`` or ``"PRODUCTION"`` also count.
+
+    Returns:
+        True if ``APP_ENV`` is set to ``"production"`` (any case), else
+        False.
+    """
+    return os.environ.get("APP_ENV", "").lower() == "production"
+
+
+def _resolve_secret_key() -> str:
+    """Resolve the Flask session ``SECRET_KEY`` for the current environment.
+
+    ``FLASK_SECRET_KEY`` is used verbatim whenever it's set to a non-empty
+    value. When it's unset (or empty) in production, startup fails fast
+    with a ``RuntimeError`` rather than booting with an ephemeral key --
+    a random per-process key would silently break sessions across restarts
+    and across the multiple gunicorn worker processes production runs. In
+    dev/test mode the same gap is tolerated: a warning is logged and a
+    fresh random key is generated so local development keeps working
+    without any env setup.
+
+    Returns:
+        The resolved secret key string.
+
+    Raises:
+        RuntimeError: If running in production and ``FLASK_SECRET_KEY`` is
+            unset or empty.
+    """
+    secret_key = os.environ.get("FLASK_SECRET_KEY", "")
+    if secret_key:
+        return secret_key
+
+    if _is_production():
+        raise RuntimeError(
+            "FLASK_SECRET_KEY is not set; refusing to start in production. "
+            "A stable secret key is required so sessions survive restarts "
+            "and are shared consistently across gunicorn worker processes."
+        )
+
+    logger.warning(
+        "FLASK_SECRET_KEY is not set; generating a random key for this "
+        "process. Sessions will not survive restarts or be shared across "
+        "multiple workers. Set FLASK_SECRET_KEY for stable sessions."
+    )
+    return os.urandom(32).hex()
+
+
+def _require_rubotpaul_secret() -> None:
+    """Fail fast in production if the RubotPaul shared secret is missing.
+
+    Delegates to ``auth_middleware._shared_secret()``, which already
+    raises ``RuntimeError`` naming ``RUBOTPAUL_SHARED_SECRET`` when the
+    variable is unset or empty. This is a no-op outside production so dev
+    and test environments can boot without the shared secret configured;
+    unauthenticated requests to the API blueprint still 401 at request
+    time via ``require_bearer()``.
+
+    Raises:
+        RuntimeError: If running in production and
+            ``RUBOTPAUL_SHARED_SECRET`` is unset or empty.
+    """
+    if not _is_production():
+        return
+
+    from grocery_butler import auth_middleware
+
+    auth_middleware._shared_secret()
+
+
+def _warn_if_no_anthropic_key() -> None:
+    """Log a warning at startup if ``ANTHROPIC_API_KEY`` is not configured.
+
+    A missing key never blocks boot in any mode -- Claude-backed meal
+    parsing already degrades gracefully to stub/saved-recipe paths -- but
+    operators should be told loudly so the degraded behavior isn't a
+    surprise.
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY", ""):
+        logger.warning(
+            "ANTHROPIC_API_KEY is not set; Claude-backed meal parsing will "
+            "degrade to stub/saved-recipe paths until it is configured."
+        )
+
+
 def _resolve_database_target(db_path: str | None) -> str:
     """Resolve the database path or connection URL to use for the app.
 
@@ -84,7 +173,7 @@ def create_app(db_path: str | None = None) -> Flask:
     )
     resolved = _resolve_database_target(db_path)
     app.config["DATABASE_PATH"] = resolved
-    app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", os.urandom(32).hex())
+    app.config["SECRET_KEY"] = _resolve_secret_key()
 
     init_db(resolved)
 
@@ -100,11 +189,21 @@ def create_app(db_path: str | None = None) -> Flask:
 def _register_api(app: Flask) -> None:
     """Register the RubotPaul-facing /api/v1 JSON blueprint.
 
+    Validates production startup config (RubotPaul shared secret) and
+    warns about optional-but-recommended config (Anthropic API key)
+    before the blueprint is registered.
+
     Args:
         app: Flask application instance.
+
+    Raises:
+        RuntimeError: If running in production and
+            ``RUBOTPAUL_SHARED_SECRET`` is unset or empty.
     """
     from grocery_butler.api import api_v1
 
+    _require_rubotpaul_secret()
+    _warn_if_no_anthropic_key()
     app.register_blueprint(api_v1)
 
 
