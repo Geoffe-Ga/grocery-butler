@@ -556,9 +556,10 @@ def _format_cart_items(
         return []
     lines = [header]
     for ci in items:
+        marker = " (review)" if ci.needs_review else ""
         lines.append(
             f"  {ci.quantity_to_order}x {ci.safeway_product.name}"
-            f"  ${ci.estimated_cost:.2f}"
+            f"  ${ci.estimated_cost:.2f}{marker}"
         )
     lines.append("")
     return lines
