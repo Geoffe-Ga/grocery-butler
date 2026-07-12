@@ -82,11 +82,17 @@ def test_order_preview_substitution_reflected_in_response(
     no_claude: None,
     safeway_mock: SafewayMockState,
 ) -> None:
-    """An out-of-stock primary product surfaces a substitute in the preview.
+    """An out-of-stock primary product surfaces a priced substitute.
 
-    Bug #70 (open) blocks driving a substituted cart through
-    submit -> confirm, so this test stops at preview and does not
-    exercise ``/order/submit`` with a substituted item.
+    Regression guard for issue #70: previously the selected substitute
+    was tracked only in ``substituted_items`` and never converted into
+    a priced ``CartItem``, so it was silently dropped from the
+    submitted order. Per the chief-architect's ruling, the selected
+    substitute must now also appear in ``cart["items"]``, correctly
+    priced and always flagged ``needs_review`` with
+    ``review_reason="substitution"`` (a human must confirm every
+    substitution), while ``substituted_items`` continues to carry the
+    same provenance record as before.
     """
     headers = signed_headers()
     safeway_mock.oos_once.add("bell pepper")
@@ -107,7 +113,16 @@ def test_order_preview_substitution_reflected_in_response(
     )
     assert response.status_code == 200
     cart = response.get_json()["cart"]
-    assert cart["items"] == []
+
+    assert len(cart["items"]) == 1
+    substitute_item = cart["items"][0]
+    assert substitute_item["safeway_product"]["product_id"] == "upc-bell-pepper-alt"
+    assert substitute_item["quantity_to_order"] == 1
+    assert substitute_item["estimated_cost"] == 1.49
+    assert substitute_item["needs_review"] is True
+    assert substitute_item["review_reason"] == "substitution"
+    assert cart["subtotal"] == 1.49
+
     assert len(cart["substituted_items"]) == 1
     substitution = cart["substituted_items"][0]
     assert substitution["status"] == "alternatives_found"

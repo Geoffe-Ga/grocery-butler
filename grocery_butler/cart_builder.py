@@ -104,6 +104,13 @@ class CartBuilder:
     ) -> CartSummary:
         """Build a complete cart from shopping list items.
 
+        Selected substitutions (out-of-stock items with an
+        auto-selected alternative) are converted into priced,
+        ``needs_review=True`` cart items so they are included in the
+        submitted order rather than silently dropped (issue #70). They
+        also remain listed in ``substituted_items`` as a display and
+        provenance record.
+
         Args:
             items: Shopping list items to add to cart.
             restock_items: Optional restock queue items.
@@ -136,6 +143,13 @@ class CartBuilder:
                     cart_items.append(result)
             elif isinstance(result, SubstitutionResult):
                 substituted.append(result)
+
+        for sub in substituted:
+            substitute_item = _substitution_to_cart_item(
+                sub, self._max_quantity_per_item
+            )
+            if substitute_item is not None:
+                cart_items.append(substitute_item)
 
         fulfillment_options = self._get_fulfillment_options()
         recommended = _recommend_fulfillment(fulfillment_options)
@@ -377,6 +391,45 @@ def _parse_fulfillment_response(
             )
         )
     return options
+
+
+def _substitution_to_cart_item(
+    result: SubstitutionResult,
+    cap: int,
+) -> CartItem | None:
+    """Convert a selected substitution into a priced, review-flagged item.
+
+    A substitution is a machine decision (the best available alternative,
+    auto-selected by :meth:`CartBuilder._handle_out_of_stock`) and must be
+    confirmed by a human before the order is submitted. Per the
+    chief-architect's ruling on issue #70, the resulting ``CartItem`` is
+    always flagged ``needs_review=True`` with ``review_reason="substitution"``,
+    regardless of whether the quantity calculation itself needed review.
+
+    Args:
+        result: A ``SubstitutionResult`` produced while processing an
+            out-of-stock shopping list item.
+        cap: Maximum quantity to order without flagging for review, passed
+            through to the underlying quantity calculation.
+
+    Returns:
+        A ``CartItem`` for the selected substitute product, or ``None``
+        when ``result.selected`` is unset (no alternative was chosen).
+    """
+    if result.selected is None:
+        return None
+
+    product = result.selected.product
+    decision = _calculate_quantity(result.original_item, product, cap=cap)
+    cost = round(product.price * decision.quantity, 2)
+    return CartItem(
+        shopping_list_item=result.original_item,
+        safeway_product=product,
+        quantity_to_order=decision.quantity,
+        estimated_cost=cost,
+        needs_review=True,
+        review_reason="substitution",
+    )
 
 
 def _default_fulfillment_options() -> list[FulfillmentOption]:

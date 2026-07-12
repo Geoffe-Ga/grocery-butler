@@ -190,6 +190,30 @@ class TestBuildOrderPayload:
         assert "P001" in product_ids
         assert "R1" in product_ids
 
+    def test_includes_substitute_item(self) -> None:
+        """Test a substitute-style CartItem in cart.items reaches the payload.
+
+        Contract guard for issue #70: once CartBuilder converts a
+        selected substitution into a CartItem (needs_review=True,
+        review_reason="substitution") and appends it to ``cart.items``,
+        ``_build_order_payload`` must serialize it exactly like any
+        other cart item, using its current (cart-only) signature.
+        """
+        substitute = _make_cart_item(
+            ingredient="bell pepper",
+            product_id="ALT1",
+            price=1.49,
+            needs_review=True,
+            review_reason="substitution",
+        )
+        cart = _make_cart(items=[substitute])
+
+        result = _build_order_payload(cart)
+
+        product_ids = [i["productId"] for i in result["items"]]
+        assert "ALT1" in product_ids
+        assert result["estimatedTotal"] == cart.estimated_total
+
 
 # ------------------------------------------------------------------
 # Tests: _parse_order_response
@@ -598,6 +622,43 @@ class TestSubmitOrderReviewGate:
         result = service.submit_order(_make_cart())
 
         assert result.success is True
+        service._client.post.assert_called_once()
+
+    def test_blocks_unreviewed_substitution(self) -> None:
+        """Test a substitute CartItem blocks submission pending review.
+
+        Contract guard for issue #70: once CartBuilder appends a
+        selected substitution to ``cart.items`` with
+        ``review_reason="substitution"``, the existing issue #59 review
+        gate must block it exactly like any other flagged item unless
+        the caller explicitly opts in with ``allow_review_items=True``.
+        """
+        service = self._make_service(
+            api_response={
+                "orderId": "ORD-123",
+                "status": "confirmed",
+                "total": 1.49,
+            }
+        )
+        substitute = _make_cart_item(
+            ingredient="bell pepper",
+            product_id="ALT1",
+            price=1.49,
+            needs_review=True,
+            review_reason="substitution",
+        )
+        cart = _make_cart(items=[substitute])
+
+        blocked = service.submit_order(cart)
+
+        assert blocked.success is False
+        assert "substitution" in blocked.error_message.lower()
+        service._client.post.assert_not_called()
+
+        allowed = service.submit_order(cart, allow_review_items=True)
+
+        assert allowed.success is True
+        assert allowed.confirmation is not None
         service._client.post.assert_called_once()
 
 
