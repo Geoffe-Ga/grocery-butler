@@ -185,14 +185,7 @@ class CartBuilder:
             CartItem if successful, SubstitutionResult if substituted,
             or None if no product found.
         """
-        candidates = self._search.search_or_cached(item.search_term)
-        if not candidates:
-            logger.warning("No products found for '%s'", item.search_term)
-            return None
-
-        selection = self._selector.select_product(item, candidates)
-        product = selection.product
-
+        product = self._resolve_product(item)
         if product is None:
             return None
 
@@ -209,6 +202,60 @@ class CartBuilder:
             needs_review=decision.needs_review,
             review_reason=decision.review_reason,
         )
+
+    def _resolve_product(
+        self,
+        item: ShoppingListItem,
+    ) -> SafewayProduct | None:
+        """Resolve a shopping list item to a product via cache or search.
+
+        On a cache hit, the cached product is re-verified against a
+        fresh live search (see
+        :meth:`ProductSearchService.reverify_product`) so quantity and
+        stock decisions never rely on stale cached data. On a cache
+        miss, a full search-and-select flow runs instead.
+
+        Args:
+            item: The shopping list item to resolve.
+
+        Returns:
+            The resolved SafewayProduct, or None if unresolvable.
+        """
+        cached = self._search.get_cached_product(item.search_term)
+        if cached is not None:
+            return self._search.reverify_product(cached)
+        return self._search_and_select(item)
+
+    def _search_and_select(
+        self,
+        item: ShoppingListItem,
+    ) -> SafewayProduct | None:
+        """Search for and select a product on a cache miss.
+
+        Performs a live search, hands the candidates to the product
+        selector, and -- when a selection is made -- caches the
+        selected product (not merely the top raw search hit) so future
+        lookups hit the cache with the right product.
+
+        Args:
+            item: The shopping list item to search for.
+
+        Returns:
+            The selected SafewayProduct, or None if no products were
+            found or none was selected.
+        """
+        candidates = self._search.search_products(item.search_term)
+        if not candidates:
+            logger.warning("No products found for '%s'", item.search_term)
+            return None
+
+        selection = self._selector.select_product(item, candidates)
+        product = selection.product
+        if product is None:
+            return None
+
+        self._search.save_mapping(item.search_term, product)
+        return product
 
     def _handle_out_of_stock(
         self,

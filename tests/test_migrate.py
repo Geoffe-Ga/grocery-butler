@@ -487,6 +487,37 @@ class TestMigrate:
 # ---------------------------------------------------------------------------
 
 
+class TestMigration007ProductMappingStockSize:
+    """Tests for migration 007 (product_mapping size/stock columns).
+
+    Issue #71: ``ProductSearchService`` used to rehydrate cached rows
+    with a hardcoded ``size=""`` and a default ``in_stock=True`` because
+    the ``product_mapping`` table never stored the real values. This
+    migration adds the two columns so the fix has somewhere to persist
+    them.
+    """
+
+    def test_migration_007_adds_product_mapping_columns(self, db_path: str) -> None:
+        """Test migrate() adds safeway_product_size/safeway_in_stock columns.
+
+        Running migrate() a second time afterwards must apply zero
+        additional migrations (idempotency).
+        """
+        migrate(db_path)
+
+        conn = get_connection(db_path)
+        try:
+            cursor = conn.execute("PRAGMA table_info(product_mapping)")
+            columns = {row["name"] for row in cursor.fetchall()}
+        finally:
+            conn.close()
+
+        assert "safeway_product_size" in columns
+        assert "safeway_in_stock" in columns
+
+        assert migrate(db_path) == 0
+
+
 class TestCLI:
     """Tests for the CLI entry point."""
 
