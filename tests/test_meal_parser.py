@@ -968,6 +968,160 @@ class TestRetryOnApiError:
         assert results[0].purchase_items == []
 
 
+class TestMalformedCategoryDegradation:
+    """Tests for graceful degradation on malformed category data (Issue #68).
+
+    Claude's JSON output occasionally contains an ``category`` value that
+    is not one of the known ``IngredientCategory`` members (e.g. "spices")
+    or is ``null``. Today ``_parse_ingredient`` calls
+    ``IngredientCategory(str(data.get("category", "other")))`` directly,
+    which raises ``ValueError`` and escapes
+    ``_parse_decomposition_response``'s try/except, producing a 500 on
+    ``POST /api/v1/meals/parse``. These tests should drive
+    ``_parse_ingredient`` to use ``coerce_category`` instead.
+    """
+
+    def test_parse_ingredient_unknown_category_returns_other(self):
+        """Test _parse_ingredient degrades an unknown category to OTHER."""
+        data: dict[str, object] = {
+            "ingredient": "cumin",
+            "quantity": 1.0,
+            "unit": "tsp",
+            "category": "spices",
+        }
+        result = _parse_ingredient(data)
+        assert result.category == IngredientCategory.OTHER
+
+    def test_decompose_meal_unknown_category_degrades_to_other(
+        self, store: RecipeStore, mock_client: MagicMock
+    ):
+        """Test an unknown purchase-item category doesn't crash decomposition."""
+        decomp_json = json.dumps(
+            [
+                {
+                    "name": "Taco Night",
+                    "servings": 4,
+                    "known_recipe": False,
+                    "needs_confirmation": True,
+                    "purchase_items": [
+                        {
+                            "ingredient": "cumin",
+                            "quantity": 1,
+                            "unit": "tsp",
+                            "category": "spices",
+                        },
+                    ],
+                    "pantry_items": [],
+                }
+            ]
+        )
+        mock_client.messages.create.return_value = _make_claude_response(decomp_json)
+        parser = MealParser(store, anthropic_client=mock_client)
+
+        results = parser.parse_meals(["Taco Night"])
+
+        assert len(results) == 1
+        meal = results[0]
+        assert isinstance(meal, ParsedMeal)
+        assert len(meal.purchase_items) == 1
+        assert meal.purchase_items[0].category == IngredientCategory.OTHER
+
+    def test_decompose_meal_null_category_degrades_to_other(
+        self, store: RecipeStore, mock_client: MagicMock
+    ):
+        """Test a null purchase-item category doesn't crash decomposition."""
+        decomp_json = json.dumps(
+            [
+                {
+                    "name": "Taco Night",
+                    "servings": 4,
+                    "known_recipe": False,
+                    "needs_confirmation": True,
+                    "purchase_items": [
+                        {
+                            "ingredient": "cumin",
+                            "quantity": 1,
+                            "unit": "tsp",
+                            "category": None,
+                        },
+                    ],
+                    "pantry_items": [],
+                }
+            ]
+        )
+        mock_client.messages.create.return_value = _make_claude_response(decomp_json)
+        parser = MealParser(store, anthropic_client=mock_client)
+
+        results = parser.parse_meals(["Taco Night"])
+
+        assert len(results) == 1
+        meal = results[0]
+        assert isinstance(meal, ParsedMeal)
+        assert len(meal.purchase_items) == 1
+        assert meal.purchase_items[0].category == IngredientCategory.OTHER
+
+
+class TestFuzzyMatchMalformedConfidence:
+    """Tests for graceful degradation on malformed confidence data (Issue #68).
+
+    Claude's fuzzy-match JSON occasionally has a ``confidence`` value that
+    is not numeric (``null`` or a string like ``"high"``). Today
+    ``_parse_fuzzy_match_response`` calls
+    ``float(data.get("confidence", 0))`` directly, which raises
+    ``TypeError`` on ``None`` and ``ValueError`` on non-numeric strings.
+    These tests should drive the fix to use the repo's isinstance-numeric
+    idiom (non-numeric -> 0.0, which falls below the 0.6 threshold).
+    """
+
+    def test_fuzzy_match_null_confidence_returns_none(
+        self, store: RecipeStore, sample_meal: ParsedMeal, mock_client: MagicMock
+    ):
+        """Test a null confidence value does not raise and yields no match."""
+        store.save_recipe(sample_meal)
+        match_response = json.dumps({"match": "Chicken Tacos", "confidence": None})
+        decomp_response = _valid_decomposition_json(name="Chicken Tacos But Weird")
+        mock_client.messages.create.side_effect = [
+            _make_claude_response(match_response),
+            _make_claude_response(decomp_response),
+        ]
+        parser = MealParser(store, anthropic_client=mock_client)
+
+        results = parser.parse_meals(["chicken tacos but weird"])
+
+        assert results[0].needs_confirmation is True
+
+    def test_fuzzy_match_string_confidence_returns_none(
+        self, store: RecipeStore, sample_meal: ParsedMeal, mock_client: MagicMock
+    ):
+        """Test a non-numeric confidence value does not raise and no-matches."""
+        store.save_recipe(sample_meal)
+        match_response = json.dumps({"match": "Chicken Tacos", "confidence": "high"})
+        decomp_response = _valid_decomposition_json(name="Chicken Tacos But Weird")
+        mock_client.messages.create.side_effect = [
+            _make_claude_response(match_response),
+            _make_claude_response(decomp_response),
+        ]
+        parser = MealParser(store, anthropic_client=mock_client)
+
+        results = parser.parse_meals(["chicken tacos but weird"])
+
+        assert results[0].needs_confirmation is True
+
+    def test_fuzzy_match_valid_confidence_still_matches(
+        self, store: RecipeStore, sample_meal: ParsedMeal, mock_client: MagicMock
+    ):
+        """Regression guard: a valid numeric confidence still matches."""
+        store.save_recipe(sample_meal)
+        match_response = json.dumps({"match": "Chicken Tacos", "confidence": 0.9})
+        mock_client.messages.create.return_value = _make_claude_response(match_response)
+        parser = MealParser(store, anthropic_client=mock_client)
+
+        results = parser.parse_meals(["tacos with chicken"])
+
+        assert results[0].name == "Chicken Tacos"
+        assert results[0].known_recipe is True
+
+
 class TestFuzzyMatchWithNoClient:
     """Tests for fuzzy matching behavior without a client."""
 

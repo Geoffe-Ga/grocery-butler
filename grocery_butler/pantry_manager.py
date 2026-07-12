@@ -16,7 +16,12 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from grocery_butler.db import get_connection, init_db
-from grocery_butler.models import InventoryItem, InventoryStatus, InventoryUpdate
+from grocery_butler.models import (
+    InventoryItem,
+    InventoryStatus,
+    InventoryUpdate,
+    coerce_category_optional,
+)
 from grocery_butler.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
@@ -348,7 +353,7 @@ def _row_to_item(row: Any) -> InventoryItem:
     return InventoryItem(
         ingredient=row["ingredient"],
         display_name=row["display_name"],
-        category=row["category"],
+        category=coerce_category_optional(row["category"]),
         status=row["status"],
         current_quantity=row["current_quantity"],
         current_unit=row["current_unit"],
