@@ -520,6 +520,7 @@ class RecipeStore:
                     brand=row["brand"],
                     preference_type=BrandPreferenceType(row["preference_type"]),
                     notes=row["notes"] or "",
+                    id=row["id"],
                 )
                 for row in rows
             ]
@@ -558,16 +559,22 @@ class RecipeStore:
         finally:
             conn.close()
 
-    def remove_brand_preference(self, pref_id: int) -> None:
+    def remove_brand_preference(self, pref_id: int) -> bool:
         """Remove a brand preference by ID.
 
         Args:
             pref_id: Database ID of preference to remove.
+
+        Returns:
+            True if a row was deleted, False if no row matched the ID.
         """
         conn = self._connect()
         try:
-            conn.execute("DELETE FROM brand_preferences WHERE id = ?", (pref_id,))
+            cursor = conn.execute(
+                "DELETE FROM brand_preferences WHERE id = ?", (pref_id,)
+            )
             conn.commit()
+            return cursor.rowcount > 0
         finally:
             conn.close()
 
@@ -628,6 +635,7 @@ class RecipeStore:
                 brand=row["brand"],
                 preference_type=BrandPreferenceType(row["preference_type"]),
                 notes=row["notes"] or "",
+                id=row["id"],
             )
             for row in rows
         ]

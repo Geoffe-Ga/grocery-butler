@@ -326,13 +326,18 @@ class InventoryUpdate(BaseModel):
 
 
 class BrandPreference(BaseModel):
-    """A brand preference rule (preferred or avoided)."""
+    """A brand preference rule (preferred or avoided).
+
+    The ``id`` field is the database row id. It is ``None`` for models
+    built in memory and is populated only when read back from the store.
+    """
 
     match_target: str
     match_type: BrandMatchType
     brand: str
     preference_type: BrandPreferenceType
     notes: str = ""
+    id: int | None = None
 
 
 # ---------------------------------------------------------------------------

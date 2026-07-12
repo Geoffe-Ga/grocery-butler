@@ -1706,6 +1706,119 @@ class TestBrandsRemove:
         assert response.status_code == 302
         assert "/brands" in response.headers["Location"]
 
+    def test_brands_page_renders_real_ids_with_gap(
+        self, client: FlaskClient, recipe_store: RecipeStore
+    ) -> None:
+        """Test the brands page uses real DB ids, not loop.index, in forms."""
+        from grocery_butler.models import (
+            BrandMatchType,
+            BrandPreference,
+            BrandPreferenceType,
+        )
+
+        first_id = recipe_store.add_brand_preference(
+            BrandPreference(
+                match_target="aardvark",
+                match_type=BrandMatchType.INGREDIENT,
+                brand="First Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        middle_id = recipe_store.add_brand_preference(
+            BrandPreference(
+                match_target="middleman",
+                match_type=BrandMatchType.INGREDIENT,
+                brand="Middle Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        third_id = recipe_store.add_brand_preference(
+            BrandPreference(
+                match_target="zucchini",
+                match_type=BrandMatchType.INGREDIENT,
+                brand="Third Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        # Force an id gap: the surviving prefs' ids are no longer sequential
+        # starting at 1, so a template that renders loop.index instead of
+        # pref.id would point at the wrong row.
+        recipe_store.remove_brand_preference(middle_id)
+
+        response = client.get("/brands")
+        html = response.data.decode()
+
+        assert f"/brands/{first_id}/remove" in html
+        assert f"/brands/{third_id}/remove" in html
+        # loop.index over the two surviving prefs would produce "1" and "2".
+        # The surviving real ids are not 1 and 2, so a "/brands/2/remove"
+        # action would only appear if the template incorrectly used
+        # loop.index instead of the real id.
+        assert "/brands/2/remove" not in html
+        assert f"/brands/{middle_id}/remove" not in html
+
+    def test_brands_remove_nonexistent_id_shows_not_found_flash(
+        self, client: FlaskClient
+    ) -> None:
+        """Test removing a nonexistent id flashes an error, not success."""
+        response = client.post(
+            "/brands/9999/remove",
+            follow_redirects=True,
+        )
+        assert response.status_code == 200
+        assert b"Brand preference removed" not in response.data
+        assert b"not found" in response.data.lower()
+
+    def test_brands_remove_clicked_row_deletes_correct_pref(
+        self, client: FlaskClient, recipe_store: RecipeStore
+    ) -> None:
+        """Test clicking Remove on a row deletes only that row, ids gapped."""
+        from grocery_butler.models import (
+            BrandMatchType,
+            BrandPreference,
+            BrandPreferenceType,
+        )
+
+        first_id = recipe_store.add_brand_preference(
+            BrandPreference(
+                match_target="apple",
+                match_type=BrandMatchType.INGREDIENT,
+                brand="Survivor Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        middle_id = recipe_store.add_brand_preference(
+            BrandPreference(
+                match_target="banana",
+                match_type=BrandMatchType.INGREDIENT,
+                brand="Gap Creator Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        highest_id = recipe_store.add_brand_preference(
+            BrandPreference(
+                match_target="cherry",
+                match_type=BrandMatchType.INGREDIENT,
+                brand="Target Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        # Create the id gap directly via the store, then remove the
+        # highest-id row through the web route, as a user clicking the
+        # "Remove" button on that row would.
+        recipe_store.remove_brand_preference(middle_id)
+
+        response = client.post(
+            f"/brands/{highest_id}/remove",
+            follow_redirects=True,
+        )
+
+        assert response.status_code == 200
+        remaining = recipe_store.get_brand_preferences()
+        remaining_ids = {pref.id for pref in remaining}
+        assert highest_id not in remaining_ids
+        assert first_id in remaining_ids
+
 
 # ---------------------------------------------------------------------------
 # TestPreferencesPage
