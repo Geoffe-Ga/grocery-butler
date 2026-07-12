@@ -725,3 +725,107 @@ class TestActionsDeny:
             headers=auth_headers,
         )
         assert second.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Issue #61: idempotency-key forwarding and outcome-aware status codes
+#
+# ``OrderOutcome`` does not exist yet, so it is imported inside each test
+# body rather than at module scope — this keeps every pre-existing test
+# above collecting and passing before the feature lands.
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestConfirmOrderIdempotency:
+    """/actions/confirm forwards an idempotency key and reports new outcomes."""
+
+    def test_confirm_order_passes_action_id_as_idempotency_key(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Test the staged action_id is forwarded as the idempotency key."""
+        action_id = _stage_via_api(
+            client, auth_headers, "/api/v1/order/submit", _order_body()
+        )
+        pipeline = MagicMock()
+        pipeline.submit_cart.return_value = _successful_order_result()
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        pipeline.submit_cart.assert_called_once()
+        _args, kwargs = pipeline.submit_cart.call_args
+        assert kwargs.get("idempotency_key") == action_id
+
+    def test_unknown_outcome_returns_504(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pending_store: PendingActionsStore,
+    ) -> None:
+        """Test an UNKNOWN order outcome surfaces as HTTP 504 with status unknown."""
+        from grocery_butler.order_service import OrderOutcome
+
+        action_id = _stage_via_api(
+            client, auth_headers, "/api/v1/order/submit", _order_body()
+        )
+        pipeline = MagicMock()
+        pipeline.submit_cart.return_value = OrderResult(
+            success=False,
+            outcome=OrderOutcome.UNKNOWN,
+            error_message="Order outcome unknown — request timed out",
+        )
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 504
+        data = response.get_json()
+        assert data["status"] == "unknown"
+        assert "error" in data
+
+        action = pending_store.get_pending_action(action_id)
+        assert action is not None
+        assert action.status is PendingActionStatus.APPROVED
+
+    def test_duplicate_outcome_returns_409(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pending_store: PendingActionsStore,
+    ) -> None:
+        """Test a DUPLICATE order outcome surfaces as HTTP 409 duplicate_prevented."""
+        from grocery_butler.order_service import OrderOutcome
+
+        action_id = _stage_via_api(
+            client, auth_headers, "/api/v1/order/submit", _order_body()
+        )
+        pipeline = MagicMock()
+        pipeline.submit_cart.return_value = OrderResult(
+            success=False,
+            outcome=OrderOutcome.DUPLICATE,
+            error_message="Duplicate order blocked — a recent submission is pending",
+        )
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 409
+        data = response.get_json()
+        assert data["status"] == "duplicate_prevented"
+
+        action = pending_store.get_pending_action(action_id)
+        assert action is not None
+        assert action.status is PendingActionStatus.APPROVED

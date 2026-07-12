@@ -42,6 +42,17 @@ class SafewayAPIError(Exception):
     """Raised when a Safeway API call fails."""
 
 
+class SafewayTimeoutError(SafewayAPIError):
+    """Raised when a Safeway API request times out — outcome unknown.
+
+    A timeout means we cannot tell whether Safeway received and processed
+    the request (e.g. an order submission may or may not have gone
+    through). Callers must treat this distinctly from a definitive
+    failure: do not blindly retry a non-idempotent request without first
+    checking whether it actually succeeded.
+    """
+
+
 @dataclass
 class TokenState:
     """Internal token lifecycle state.
@@ -257,14 +268,24 @@ class SafewayClient:
         self,
         path: str,
         json_data: dict[str, Any] | None = None,
+        *,
+        retry_on_auth_failure: bool = True,
     ) -> dict[str, Any]:
         """Make an authenticated POST request to the Nimbus API.
 
-        Automatically handles authentication and retries once on 401.
+        Automatically handles authentication. By default, retries once on
+        401 (refreshing the token and resending the request). Set
+        ``retry_on_auth_failure=False`` for non-idempotent requests (e.g.
+        order submission) where resending the body after a token refresh
+        risks a duplicate side effect (double charge) — in that mode the
+        token is still refreshed for future calls, but this request is
+        not resent.
 
         Args:
             path: API path (appended to Nimbus base URL).
             json_data: Optional JSON body.
+            retry_on_auth_failure: Whether to refresh the token and resend
+                the request on a 401. Defaults to True.
 
         Returns:
             Parsed JSON response dict.
@@ -272,9 +293,15 @@ class SafewayClient:
         Raises:
             SafewayAuthError: If authentication fails.
             SafewayAPIError: If the API request fails.
+            SafewayTimeoutError: If the request times out.
         """
         self._ensure_authenticated()
-        return self._request("POST", path, json_data=json_data)
+        return self._request(
+            "POST",
+            path,
+            json_data=json_data,
+            retry_on_auth_failure=retry_on_auth_failure,
+        )
 
     def _request(
         self,
@@ -282,25 +309,39 @@ class SafewayClient:
         path: str,
         params: dict[str, str] | None = None,
         json_data: dict[str, Any] | None = None,
+        retry_on_auth_failure: bool = True,
     ) -> dict[str, Any]:
-        """Execute an API request with retry on 401.
+        """Execute an API request, handling 401s per ``retry_on_auth_failure``.
 
         Args:
             method: HTTP method (GET or POST).
             path: API path relative to Nimbus base URL.
             params: Optional query parameters.
             json_data: Optional JSON body for POST requests.
+            retry_on_auth_failure: If True (default), a 401 triggers a
+                token refresh and a single resend. If False, a 401 still
+                refreshes the token (for future calls) but raises
+                immediately instead of resending this request.
 
         Returns:
             Parsed JSON response dict.
 
         Raises:
-            SafewayAPIError: If the request fails after retry.
+            SafewayAPIError: If the request fails (after retry, when
+                retrying is enabled).
+            SafewayTimeoutError: If the request times out.
         """
         url = f"{NIMBUS_BASE}{path}"
         result = self._send_request(method, url, params, json_data)
         if result is not None:
             return result
+
+        # 401 received.
+        if not retry_on_auth_failure:
+            self.authenticate()  # Refresh the token for future calls only.
+            raise SafewayAPIError(
+                f"Safeway API request failed (401, not retried): {method} {path}"
+            )
 
         # 401 — re-authenticate and retry once
         self.authenticate()
@@ -329,6 +370,7 @@ class SafewayClient:
 
         Raises:
             SafewayAPIError: On non-401 HTTP errors.
+            SafewayTimeoutError: If the request times out.
         """
         self._rate_limit()
         try:
@@ -346,6 +388,10 @@ class SafewayClient:
                 return None
             raise SafewayAPIError(
                 f"Safeway API error: {exc.response.status_code}"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise SafewayTimeoutError(
+                f"Safeway API request timed out — outcome unknown: {method} {url}"
             ) from exc
         except httpx.HTTPError as exc:
             raise SafewayAPIError(f"Safeway API request failed: {exc}") from exc

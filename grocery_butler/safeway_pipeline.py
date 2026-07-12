@@ -7,10 +7,16 @@ together, and exposes a two-step flow: build cart → submit order.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from grocery_butler.cart_builder import CartBuilder
-from grocery_butler.order_service import OrderResult, OrderService
+from grocery_butler.order_service import OrderOutcome, OrderResult, OrderService
+from grocery_butler.order_submissions import (
+    DUPLICATE_WINDOW,
+    OrderSubmissionStore,
+    cart_fingerprint,
+)
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.product_search import ProductSearchService
 from grocery_butler.product_selector import ProductSelector
@@ -23,6 +29,11 @@ if TYPE_CHECKING:
     from grocery_butler.models import CartSummary, ShoppingListItem
 
 logger = logging.getLogger(__name__)
+
+_DUPLICATE_ERROR_MESSAGE = (
+    "Duplicate order blocked — a matching cart was submitted recently. "
+    "Verify your recent Safeway orders before retrying."
+)
 
 
 class SafewayPipelineError(Exception):
@@ -86,17 +97,21 @@ class SafewayPipeline:
 
         pantry_manager = PantryManager(db_path, anthropic_client)
         self._order_service = OrderService(self._client, pantry_manager)
+        self._order_submissions = OrderSubmissionStore(db_path)
 
     def run(
         self,
         items: list[ShoppingListItem],
         restock_items: list[ShoppingListItem] | None = None,
+        idempotency_key: str | None = None,
     ) -> OrderResult:
         """Execute the full pipeline: build cart then submit order.
 
         Args:
             items: Shopping list items to order.
             restock_items: Optional restock items to include.
+            idempotency_key: Optional client order id forwarded to the
+                duplicate-order guard and Safeway (Issue #61).
 
         Returns:
             OrderResult with confirmation or error details.
@@ -106,7 +121,7 @@ class SafewayPipeline:
         """
         self._authenticate()
         cart = self._cart_builder.build_cart(items, restock_items)
-        return self._order_service.submit_order(cart)
+        return self._submit_guarded(cart, idempotency_key)
 
     def build_cart_only(
         self,
@@ -128,7 +143,11 @@ class SafewayPipeline:
         self._authenticate()
         return self._cart_builder.build_cart(items, restock_items)
 
-    def submit_cart(self, cart: CartSummary) -> OrderResult:
+    def submit_cart(
+        self,
+        cart: CartSummary,
+        idempotency_key: str | None = None,
+    ) -> OrderResult:
         """Submit a pre-built cart to Safeway.
 
         Use this when the cart has already been built via
@@ -136,6 +155,8 @@ class SafewayPipeline:
 
         Args:
             cart: Pre-built cart summary to submit.
+            idempotency_key: Optional client order id forwarded to the
+                duplicate-order guard and Safeway (Issue #61).
 
         Returns:
             OrderResult with confirmation or error details.
@@ -144,7 +165,7 @@ class SafewayPipeline:
             SafewayPipelineError: If authentication fails.
         """
         self._authenticate()
-        return self._order_service.submit_order(cart)
+        return self._submit_guarded(cart, idempotency_key)
 
     def close(self) -> None:
         """Clean up SafewayClient HTTP resources."""
@@ -162,3 +183,64 @@ class SafewayPipeline:
             self._client.authenticate()
         except Exception as exc:
             raise SafewayPipelineError(f"Safeway authentication failed: {exc}") from exc
+
+    def _submit_guarded(
+        self,
+        cart: CartSummary,
+        idempotency_key: str | None,
+    ) -> OrderResult:
+        """Submit a cart through the duplicate-order guard (Issue #61).
+
+        An empty cart bypasses the guard entirely and goes straight to
+        :class:`~grocery_butler.order_service.OrderService` (which
+        rejects it with its existing "cart is empty" error). Otherwise,
+        a recent submission of an identical cart (by content, not price)
+        blocks this attempt outright; else the attempt is recorded in
+        the ledger *before* the outbound Safeway call (fail-closed) and
+        finalized once the result is known.
+
+        Args:
+            cart: Cart summary to submit.
+            idempotency_key: Client order id, or None to generate one.
+
+        Returns:
+            OrderResult with confirmation, error, or DUPLICATE details.
+        """
+        if not cart.items and not cart.restock_items:
+            return self._order_service.submit_order(cart)
+
+        fingerprint = cart_fingerprint(cart)
+        if self._order_submissions.find_recent_blocking(fingerprint, DUPLICATE_WINDOW):
+            return OrderResult(
+                success=False,
+                outcome=OrderOutcome.DUPLICATE,
+                error_message=_DUPLICATE_ERROR_MESSAGE,
+            )
+
+        key = idempotency_key or str(uuid.uuid4())
+        submission_id = self._order_submissions.record_attempt(key, fingerprint)
+
+        result = (
+            self._order_service.submit_order(cart, idempotency_key=key)
+            if idempotency_key is not None
+            else self._order_service.submit_order(cart)
+        )
+
+        self._finalize_submission(submission_id, result)
+        return result
+
+    def _finalize_submission(self, submission_id: int, result: OrderResult) -> None:
+        """Record a submission attempt's final status in the ledger.
+
+        Args:
+            submission_id: Row id returned by
+                :meth:`OrderSubmissionStore.record_attempt`.
+            result: The result returned by the order service.
+        """
+        if result.outcome is OrderOutcome.SUCCESS:
+            order_id = result.confirmation.order_id if result.confirmation else None
+            self._order_submissions.mark(submission_id, "confirmed", order_id=order_id)
+        elif result.outcome is OrderOutcome.UNKNOWN:
+            self._order_submissions.mark(submission_id, "unknown")
+        else:
+            self._order_submissions.mark(submission_id, "failed")
