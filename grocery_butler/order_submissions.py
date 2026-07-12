@@ -178,6 +178,20 @@ class OrderSubmissionStore:
         concurrent/duplicate resubmissions even before the outbound call
         completes (fail-closed).
 
+        Warning:
+            This is a non-atomic building block, not the duplicate-order
+            guard. Pairing a :meth:`find_recent_blocking` check with a
+            subsequent call to this method runs the two as separate
+            statements on separate connections, which is vulnerable to a
+            check-then-insert (TOCTOU) race: two concurrent submissions
+            of an identical cart can both pass the check before either
+            insert commits, defeating the guard (Issue #61 security
+            review). The duplicate-order guard MUST use
+            :meth:`try_record_attempt` instead, which performs the
+            check and insert atomically on one connection. This method
+            (and :meth:`find_recent_blocking`) are kept only for their
+            direct unit tests.
+
         Args:
             idempotency_key: The client order id used for this attempt.
             cart_fingerprint: Fingerprint of the cart being submitted.
@@ -235,6 +249,20 @@ class OrderSubmissionStore:
         within: dt.timedelta,
     ) -> DictRow | None:
         """Find a recent submission that should block a new attempt.
+
+        Warning:
+            This is a non-atomic building block, not the duplicate-order
+            guard. Pairing this check with a subsequent
+            :meth:`record_attempt` call runs the two as separate
+            statements on separate connections, which is vulnerable to a
+            check-then-insert (TOCTOU) race: two concurrent submissions
+            of an identical cart can both pass this check before either
+            insert commits, defeating the guard (Issue #61 security
+            review). The duplicate-order guard MUST use
+            :meth:`try_record_attempt` instead, which performs the
+            check and insert atomically on one connection. This method
+            (and :meth:`record_attempt`) are kept only for their direct
+            unit tests.
 
         Args:
             cart_fingerprint: Fingerprint of the cart being submitted.

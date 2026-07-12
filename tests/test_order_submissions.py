@@ -1,11 +1,10 @@
-"""Tests for the new grocery_butler.order_submissions module (Issue #61).
+"""Tests for the grocery_butler.order_submissions module (Issue #61).
 
 Covers ``cart_fingerprint`` determinism and the ``OrderSubmissionStore``
 duplicate-order ledger that backs the pipeline's duplicate guard. This
-module does not exist yet, so the whole file is expected to fail to
-collect (ModuleNotFoundError/ImportError) until it is implemented —
-every test in this file is new, so there is no pre-existing coverage to
-protect from that collection failure.
+module and every test in this file were written test-first, before the
+module existed, so the whole file was originally expected to fail to
+collect (ModuleNotFoundError/ImportError) until it was implemented.
 """
 
 from __future__ import annotations
@@ -396,8 +395,9 @@ class TestOrderSubmissionStore:
 # reach OrderService.submit_order — the exact double-charge Issue #61
 # exists to prevent. try_record_attempt closes that gap with a single
 # atomic ``INSERT ... SELECT ... WHERE NOT EXISTS (...)`` statement on one
-# connection. This class does not exist yet, so every test below is
-# expected to fail with AttributeError until it is implemented.
+# connection. This class and every test below were written test-first,
+# before the method existed, so they originally failed with
+# AttributeError until it was implemented.
 # ---------------------------------------------------------------------------
 
 

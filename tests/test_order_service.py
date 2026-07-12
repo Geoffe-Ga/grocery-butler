@@ -607,10 +607,10 @@ class TestSafeFloat:
 # Issue #61: OrderOutcome, timeout handling, clientOrderId plumbing
 #
 # The new names (OrderOutcome, SafewayTimeoutError, and the
-# idempotency_key/retry_on_auth_failure plumbing) do not exist yet. They
-# are imported inside each test body rather than at module scope so the
-# pre-existing tests above keep collecting and passing before the
-# feature lands.
+# idempotency_key/retry_on_auth_failure plumbing) are imported inside
+# each test body rather than at module scope because these tests were
+# written test-first, before the names existed; the local imports are
+# kept as a historic artifact of that TDD process.
 # ------------------------------------------------------------------
 
 

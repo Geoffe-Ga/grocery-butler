@@ -766,9 +766,10 @@ class TestActionsDeny:
 # ---------------------------------------------------------------------------
 # Issue #61: idempotency-key forwarding and outcome-aware status codes
 #
-# ``OrderOutcome`` does not exist yet, so it is imported inside each test
-# body rather than at module scope — this keeps every pre-existing test
-# above collecting and passing before the feature lands.
+# ``OrderOutcome`` is imported inside each test body rather than at module
+# scope because these tests were written test-first, before the name
+# existed; the local imports are kept as a historic artifact of that TDD
+# process.
 # ---------------------------------------------------------------------------
 
 

@@ -575,11 +575,11 @@ class TestConfigSafewayFields:
 # ---------------------------------------------------------------------------
 # Issue #61: SafewayTimeoutError + retry_on_auth_failure=False
 #
-# These tests exercise API surface that does not exist yet
-# (``SafewayTimeoutError``, ``post(..., retry_on_auth_failure=...)``). The
-# new names are imported inside each test body rather than at module scope
-# so the pre-existing tests above keep collecting and passing even before
-# the feature lands.
+# These tests exercise API surface (``SafewayTimeoutError``,
+# ``post(..., retry_on_auth_failure=...)``) whose names are imported
+# inside each test body rather than at module scope because these tests
+# were written test-first, before the names existed; the local imports
+# are kept as a historic artifact of that TDD process.
 # ---------------------------------------------------------------------------
 
 

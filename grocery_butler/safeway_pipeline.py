@@ -279,15 +279,41 @@ class SafewayPipeline:
     def _finalize_submission(self, submission_id: int, result: OrderResult) -> None:
         """Record a submission attempt's final status in the ledger.
 
+        Called only after ``OrderService.submit_order`` has already
+        returned — for a successful outcome, that means Safeway has
+        already confirmed and charged the order — so any failure of the
+        ledger write itself must never propagate: raising at this point
+        would surface a successfully-placed, real-money order as an
+        unhandled exception to the caller, and the caller would lose
+        the confirmation/order_id entirely (Gate 2.5 review BLOCKER,
+        Issue #61; mirrors
+        :meth:`~grocery_butler.order_service.OrderService._restock_ordered_items`).
+        The row is left at ``'submitted'`` in this case, which still
+        blocks duplicate resubmissions of the same cart for the
+        remainder of :data:`~grocery_butler.order_submissions.DUPLICATE_WINDOW`
+        (``'submitted'`` is one of the blocking statuses), so the guard's
+        protection is unaffected even though the final status update
+        was lost.
+
         Args:
             submission_id: Row id returned by
                 :meth:`OrderSubmissionStore.record_attempt`.
             result: The result returned by the order service.
         """
-        if result.outcome is OrderOutcome.SUCCESS:
-            order_id = result.confirmation.order_id if result.confirmation else None
-            self._order_submissions.mark(submission_id, "confirmed", order_id=order_id)
-        elif result.outcome is OrderOutcome.UNKNOWN:
-            self._order_submissions.mark(submission_id, "unknown")
-        else:
-            self._order_submissions.mark(submission_id, "failed")
+        try:
+            if result.outcome is OrderOutcome.SUCCESS:
+                order_id = result.confirmation.order_id if result.confirmation else None
+                self._order_submissions.mark(
+                    submission_id, "confirmed", order_id=order_id
+                )
+            elif result.outcome is OrderOutcome.UNKNOWN:
+                self._order_submissions.mark(submission_id, "unknown")
+            else:
+                self._order_submissions.mark(submission_id, "failed")
+        except Exception:
+            logger.exception(
+                "Failed to record final submission status in the "
+                "duplicate-order ledger (submission_id=%s); the order "
+                "result itself is unaffected",
+                submission_id,
+            )
