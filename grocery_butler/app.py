@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from werkzeug.wrappers import Response
 
     from grocery_butler.db.adapter import DatabaseConnection
-    from grocery_butler.models import Ingredient
+    from grocery_butler.models import Ingredient, ShoppingListItem
 
 from grocery_butler.db import get_connection, init_db
 from grocery_butler.models import (
@@ -751,6 +751,24 @@ def _parse_ingredient_form_rows() -> list[Ingredient]:
     return ingredients
 
 
+def _group_shopping_items(
+    items: list[ShoppingListItem],
+) -> dict[str, list[ShoppingListItem]]:
+    """Group shopping list items by category value for template rendering.
+
+    Args:
+        items: Shopping list items to group.
+
+    Returns:
+        Dict mapping category value (e.g. ``"produce"``) to the items in
+        that category, in the order first encountered.
+    """
+    grouped: dict[str, list[ShoppingListItem]] = {}
+    for item in items:
+        grouped.setdefault(item.category.value, []).append(item)
+    return grouped
+
+
 def _register_shopping_list_routes(app: Flask) -> None:
     """Register shopping list page routes.
 
@@ -762,30 +780,24 @@ def _register_shopping_list_routes(app: Flask) -> None:
     def shopping_list() -> str:
         """Render the shopping list page.
 
-        Reads shopping list items from the session if available.
+        Reads the most recently generated shopping list from the
+        database-backed :class:`~grocery_butler.shopping_list_store.ShoppingListStore`
+        (Issue #65: previously read from the per-browser session cookie,
+        which silently truncated large lists and was invisible to other
+        household members).
 
         Returns:
             Rendered shopping list HTML.
         """
-        from flask import session
+        from grocery_butler.shopping_list_store import ShoppingListStore
 
-        raw_items = session.get("shopping_list_items")
-        items: list[dict[str, object]] = (
-            raw_items if isinstance(raw_items, list) else []
-        )
-
-        # Group items by category
-        grouped: dict[str, list[dict[str, object]]] = {}
-        for item in items:
-            cat = str(item.get("category", "other"))
-            if cat not in grouped:
-                grouped[cat] = []
-            grouped[cat].append(item)
+        store = ShoppingListStore(app.config["DATABASE_PATH"])
+        items = store.get_latest_list()
 
         return render_template(
             "shopping_list.html",
             active_page="shopping_list",
-            grouped_items=grouped,
+            grouped_items=_group_shopping_items(items),
             has_items=len(items) > 0,
         )
 
@@ -794,7 +806,12 @@ def _register_shopping_list_routes(app: Flask) -> None:
         """Generate a shopping list from meal names.
 
         Reads meal names from form input, runs the consolidation
-        pipeline, and stores results in the session.
+        pipeline, and persists the result via
+        :class:`~grocery_butler.shopping_list_store.ShoppingListStore`
+        (Issue #65: previously stored in the session cookie, which caps
+        out around 4KB and is scoped to a single browser). Any stale
+        ``shopping_list_items`` session key from a pre-fix browser is
+        cleared so its cookie shrinks back down.
 
         Returns:
             Redirect to the shopping list page.
@@ -819,6 +836,7 @@ def _register_shopping_list_routes(app: Flask) -> None:
 
         from grocery_butler.consolidator import Consolidator
         from grocery_butler.meal_parser import MealParser
+        from grocery_butler.shopping_list_store import ShoppingListStore
 
         parser = MealParser(recipe_store)
         parsed_meals = parser.parse_meals(meal_names)
@@ -830,16 +848,8 @@ def _register_shopping_list_routes(app: Flask) -> None:
             parsed_meals, restock_queue, pantry_staples
         )
 
-        session["shopping_list_items"] = [
-            {
-                "ingredient": item.ingredient,
-                "quantity": item.quantity,
-                "unit": item.unit,
-                "category": item.category.value,
-                "from_meals": item.from_meals,
-            }
-            for item in shopping_items
-        ]
+        ShoppingListStore(db_path).save_list(shopping_items)
+        session.pop("shopping_list_items", None)
 
         flash(f"Generated shopping list from {len(meal_names)} meal(s).", "success")
         return redirect(url_for("shopping_list"))

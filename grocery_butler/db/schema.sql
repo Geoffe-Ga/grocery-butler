@@ -92,3 +92,25 @@ CREATE TABLE IF NOT EXISTS product_mapping (
 
 CREATE INDEX IF NOT EXISTS idx_product_mapping_ingredient
     ON product_mapping(ingredient_description);
+
+-- Generated shopping lists (Issue #65): persisted server-side so lists of
+-- any size are visible to every household member, instead of living in a
+-- single browser's session cookie. from_meals is JSON-encoded TEXT.
+CREATE TABLE IF NOT EXISTS shopping_lists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS shopping_list_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    list_id INTEGER NOT NULL REFERENCES shopping_lists(id) ON DELETE CASCADE,
+    ingredient TEXT NOT NULL,
+    quantity REAL,
+    unit TEXT NOT NULL,
+    category TEXT NOT NULL,
+    search_term TEXT,
+    from_meals TEXT NOT NULL                  -- JSON-encoded list of strings
+);
+
+CREATE INDEX IF NOT EXISTS idx_shopping_list_items_list_id
+    ON shopping_list_items(list_id);
