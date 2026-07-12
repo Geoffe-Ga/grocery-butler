@@ -570,3 +570,19 @@ class TestConfigSafewayFields:
         assert cfg.safeway_username == "user@example.com"
         assert cfg.safeway_password == "pass123"
         assert cfg.safeway_store_id == "5678"
+
+
+# ---------------------------------------------------------------------------
+# Issue #60 — unverified surface must be documented in-module
+# ---------------------------------------------------------------------------
+
+
+class TestModuleDocumentsUnverifiedSurface:
+    """Tests that this module flags itself as an unverified real-money surface."""
+
+    def test_module_docstring_references_issue_60(self) -> None:
+        """Test the module docstring flags Issue #60 as unverified."""
+        import grocery_butler.safeway_client as safeway_client_module
+
+        assert safeway_client_module.__doc__ is not None
+        assert "Issue #60" in safeway_client_module.__doc__

@@ -25,13 +25,32 @@ from grocery_butler.safeway_pipeline import SafewayPipeline, SafewayPipelineErro
 
 @pytest.fixture()
 def safeway_config() -> Config:
-    """Return a Config with Safeway credentials set."""
+    """Return a Config with Safeway credentials set.
+
+    Issue #60: order submission is opted in here (``True``) so the
+    pre-existing run/submit_cart tests below keep exercising the real
+    submission path — the ``Config`` default is ``False``.
+    """
     return Config(
         anthropic_api_key="sk-test",
         safeway_username="user@example.com",
         safeway_password="secret",
         safeway_store_id="1234",
         database_path=":memory:",
+        safeway_order_submission_enabled=True,
+    )
+
+
+@pytest.fixture()
+def disabled_safeway_config() -> Config:
+    """Return a Config with Safeway credentials set but submission disabled."""
+    return Config(
+        anthropic_api_key="sk-test",
+        safeway_username="user@example.com",
+        safeway_password="secret",
+        safeway_store_id="1234",
+        database_path=":memory:",
+        safeway_order_submission_enabled=False,
     )
 
 
@@ -556,3 +575,183 @@ class TestEmptyShoppingList:
 
         assert result.success is False
         assert "empty" in result.error_message.lower()
+
+
+# ---------------------------------------------------------------------------
+# Issue #60 — order submission descoped for v1.0 behind a fail-safe gate
+# ---------------------------------------------------------------------------
+
+
+class TestOrderSubmissionDisabledError:
+    """Tests for the OrderSubmissionDisabledError exception type."""
+
+    def test_is_a_safeway_pipeline_error(self) -> None:
+        """Test OrderSubmissionDisabledError subclasses SafewayPipelineError."""
+        from grocery_butler.safeway_pipeline import OrderSubmissionDisabledError
+
+        assert issubclass(OrderSubmissionDisabledError, SafewayPipelineError)
+
+    def test_message_matches_the_shared_disabled_message(self) -> None:
+        """Test the exception message is the shared actionable message."""
+        from grocery_butler.order_service import ORDER_SUBMISSION_DISABLED_MESSAGE
+        from grocery_butler.safeway_pipeline import OrderSubmissionDisabledError
+
+        err = OrderSubmissionDisabledError(ORDER_SUBMISSION_DISABLED_MESSAGE)
+        assert str(err) == ORDER_SUBMISSION_DISABLED_MESSAGE
+
+
+class TestOrderSubmissionEnabledProperty:
+    """Tests for SafewayPipeline.order_submission_enabled."""
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    def test_reflects_enabled_config(
+        self,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+    ):
+        """Test the property is True when the config gate is enabled."""
+        pipeline = SafewayPipeline(safeway_config, ":memory:")
+        assert pipeline.order_submission_enabled is True
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    def test_reflects_disabled_config(
+        self,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        disabled_safeway_config: Config,
+    ):
+        """Test the property is False when the config gate is disabled."""
+        pipeline = SafewayPipeline(disabled_safeway_config, ":memory:")
+        assert pipeline.order_submission_enabled is False
+
+
+class TestSubmissionDisabledBlocksRun:
+    """Tests that a disabled config short-circuits run() before any I/O."""
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_run_raises_without_authenticating_or_building_cart(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        disabled_safeway_config: Config,
+        sample_items: list[ShoppingListItem],
+    ):
+        """Test run() raises OrderSubmissionDisabledError before any I/O."""
+        from grocery_butler.safeway_pipeline import OrderSubmissionDisabledError
+
+        mock_client = mock_client_cls.return_value
+        mock_client.is_authenticated = False
+
+        pipeline = SafewayPipeline(disabled_safeway_config, ":memory:")
+
+        with pytest.raises(OrderSubmissionDisabledError):
+            pipeline.run(sample_items)
+
+        mock_client.authenticate.assert_not_called()
+        mock_cart_cls.return_value.build_cart.assert_not_called()
+        mock_order_cls.return_value.submit_order.assert_not_called()
+
+
+class TestSubmissionDisabledBlocksSubmitCart:
+    """Tests that a disabled config short-circuits submit_cart() before auth."""
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_submit_cart_raises_without_authenticating(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        disabled_safeway_config: Config,
+        mock_cart_summary: CartSummary,
+    ):
+        """Test submit_cart raises OrderSubmissionDisabledError before auth."""
+        from grocery_butler.safeway_pipeline import OrderSubmissionDisabledError
+
+        mock_client = mock_client_cls.return_value
+        mock_client.is_authenticated = False
+
+        pipeline = SafewayPipeline(disabled_safeway_config, ":memory:")
+
+        with pytest.raises(OrderSubmissionDisabledError):
+            pipeline.submit_cart(mock_cart_summary)
+
+        mock_client.authenticate.assert_not_called()
+        mock_order_cls.return_value.submit_order.assert_not_called()
+
+
+class TestSubmissionDisabledDoesNotAffectBuildCartOnly:
+    """Tests that build_cart_only is unaffected by the Issue #60 gate."""
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    def test_build_cart_only_works_when_disabled(
+        self,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        disabled_safeway_config: Config,
+        sample_items: list[ShoppingListItem],
+        mock_cart_summary: CartSummary,
+    ):
+        """Test cart building/review keeps working when submission is disabled."""
+        mock_client = mock_client_cls.return_value
+        mock_client.is_authenticated = True
+        mock_cart_cls.return_value.build_cart.return_value = mock_cart_summary
+
+        pipeline = SafewayPipeline(disabled_safeway_config, ":memory:")
+        cart = pipeline.build_cart_only(sample_items)
+
+        assert cart is mock_cart_summary

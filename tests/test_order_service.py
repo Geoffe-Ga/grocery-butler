@@ -302,12 +302,17 @@ class TestSubmitOrder:
         self,
         api_response: dict[str, Any] | None = None,
         api_error: bool = False,
+        submission_enabled: bool = True,
     ) -> OrderService:
         """Create an OrderService with mock dependencies.
 
         Args:
             api_response: Response from Safeway API.
             api_error: Whether API should raise an exception.
+            submission_enabled: Issue #60 gate — defaults to True here so
+                the pre-existing submission-path tests in this file keep
+                exercising the real submit flow (the OrderService default
+                is False; production callers must opt in explicitly).
 
         Returns:
             OrderService with mocked client and pantry.
@@ -321,7 +326,9 @@ class TestSubmitOrder:
         mock_pantry = MagicMock()
         mock_pantry.mark_restocked.return_value = 0
 
-        return OrderService(mock_client, mock_pantry)
+        return OrderService(
+            mock_client, mock_pantry, submission_enabled=submission_enabled
+        )
 
     def test_successful_order(self) -> None:
         """Test successful order submission."""
@@ -468,7 +475,10 @@ class TestSubmitOrderReviewGate:
                 the order submission is allowed to proceed.
 
         Returns:
-            OrderService with mocked client and pantry.
+            OrderService with mocked client and pantry. Constructed
+            with ``submission_enabled=True`` because the review gate
+            under test sits behind the Issue #60 descope gate, which
+            blocks everything by default.
         """
         mock_client = MagicMock()
         mock_client.post.return_value = api_response or {}
@@ -476,7 +486,7 @@ class TestSubmitOrderReviewGate:
         mock_pantry = MagicMock()
         mock_pantry.mark_restocked.return_value = 0
 
-        return OrderService(mock_client, mock_pantry)
+        return OrderService(mock_client, mock_pantry, submission_enabled=True)
 
     def test_blocks_cart_with_flagged_regular_item(self) -> None:
         """Test a flagged regular item blocks submission before any spend.
@@ -589,6 +599,118 @@ class TestSubmitOrderReviewGate:
 
         assert result.success is True
         service._client.post.assert_called_once()
+
+
+# ------------------------------------------------------------------
+# Tests: Issue #60 — order submission descoped for v1.0 by default
+# ------------------------------------------------------------------
+
+
+class TestSubmissionDisabledGate:
+    """Tests for the Issue #60 fail-safe order-submission gate."""
+
+    def test_default_construction_blocks_submission(self) -> None:
+        """Test default OrderService blocks submission without calling out."""
+        from grocery_butler.order_service import ORDER_SUBMISSION_DISABLED_MESSAGE
+
+        mock_client = MagicMock()
+        mock_pantry = MagicMock()
+        service = OrderService(mock_client, mock_pantry)
+
+        result = service.submit_order(_make_cart())
+
+        assert result.success is False
+        assert result.error_message == ORDER_SUBMISSION_DISABLED_MESSAGE
+        mock_client.post.assert_not_called()
+        mock_pantry.mark_restocked.assert_not_called()
+
+    def test_explicit_disabled_blocks_submission(self) -> None:
+        """Test submission_enabled=False explicitly blocks submission."""
+        from grocery_butler.order_service import ORDER_SUBMISSION_DISABLED_MESSAGE
+
+        mock_client = MagicMock()
+        mock_pantry = MagicMock()
+        service = OrderService(mock_client, mock_pantry, submission_enabled=False)
+
+        result = service.submit_order(_make_cart())
+
+        assert result.success is False
+        assert result.error_message == ORDER_SUBMISSION_DISABLED_MESSAGE
+        mock_client.post.assert_not_called()
+        mock_pantry.mark_restocked.assert_not_called()
+
+    def test_disabled_blocks_even_empty_cart(self) -> None:
+        """Test the disabled gate fires before any other submission logic.
+
+        Regardless of whether the guard is checked before or after the
+        empty-cart check, a disabled service must never reach the client.
+        """
+        from grocery_butler.order_service import ORDER_SUBMISSION_DISABLED_MESSAGE
+
+        mock_client = MagicMock()
+        mock_pantry = MagicMock()
+        service = OrderService(mock_client, mock_pantry, submission_enabled=False)
+
+        result = service.submit_order(_make_cart(items=[], restock_items=[]))
+
+        assert result.success is False
+        assert result.error_message == ORDER_SUBMISSION_DISABLED_MESSAGE
+        mock_client.post.assert_not_called()
+
+    def test_disabled_message_is_actionable(self) -> None:
+        """Test the disabled message references Issue #60 and the enable var."""
+        from grocery_butler.order_service import ORDER_SUBMISSION_DISABLED_MESSAGE
+
+        message = ORDER_SUBMISSION_DISABLED_MESSAGE
+        assert "Issue #60" in message
+        assert "SAFEWAY_ORDER_SUBMISSION_ENABLED=true" in message
+        assert "unverified" in message.lower()
+        assert "v1.0" in message
+        # Actionable alternative: build/review still works.
+        assert "review" in message.lower() or "build" in message.lower()
+
+    def test_enabled_true_preserves_happy_path(self) -> None:
+        """Test submission_enabled=True preserves the existing successful flow."""
+        mock_client = MagicMock()
+        mock_client.post.return_value = {
+            "orderId": "ORD-999",
+            "status": "confirmed",
+            "total": 8.99,
+        }
+        mock_pantry = MagicMock()
+        mock_pantry.mark_restocked.return_value = 0
+        service = OrderService(mock_client, mock_pantry, submission_enabled=True)
+
+        result = service.submit_order(_make_cart())
+
+        assert result.success is True
+        assert result.confirmation is not None
+        assert result.confirmation.order_id == "ORD-999"
+        mock_client.post.assert_called_once()
+
+    def test_disabled_gate_precedes_review_gate(self) -> None:
+        """Test the Issue #60 gate fires before the issue #59 review gate.
+
+        A disabled service must return the descope message even when the
+        cart contains flagged items — the fail-safe outer guard takes
+        priority over the review block, and the client is never called.
+        """
+        from grocery_butler.order_service import ORDER_SUBMISSION_DISABLED_MESSAGE
+
+        mock_client = MagicMock()
+        mock_pantry = MagicMock()
+        service = OrderService(mock_client, mock_pantry)
+        flagged = _make_cart_item(
+            ingredient="flour",
+            needs_review=True,
+            review_reason="incomparable_units",
+        )
+
+        result = service.submit_order(_make_cart(items=[flagged]))
+
+        assert result.success is False
+        assert result.error_message == ORDER_SUBMISSION_DISABLED_MESSAGE
+        mock_client.post.assert_not_called()
 
 
 # ------------------------------------------------------------------
