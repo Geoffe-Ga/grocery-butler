@@ -21,6 +21,7 @@ from grocery_butler.models import (
     InventoryStatus,
     ParsedMeal,
     ShoppingListItem,
+    parse_unit,
 )
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
@@ -28,6 +29,22 @@ from grocery_butler.recipe_store import RecipeStore
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_claude(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep web-app tests offline regardless of the developer's environment.
+
+    ``_web_anthropic_client()`` (Issue #66) reads ``ANTHROPIC_API_KEY``
+    from the environment at request time; deleting it here forces every
+    Claude-backed pipeline onto its deterministic pure-Python fallback so
+    the suite never makes network calls on machines where a real key is
+    configured (mirrors the ``no_claude`` seam in ``tests/e2e/conftest.py``).
+
+    Args:
+        monkeypatch: Pytest's monkeypatch fixture.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
 
 @pytest.fixture()
@@ -1184,14 +1201,113 @@ class TestShoppingListGenerate:
         assert response.status_code == 302
         assert "/shopping-list" in response.headers["Location"]
 
-    def test_generate_shows_flash_message(self, client: FlaskClient) -> None:
-        """Test POST shows generation success flash."""
+    def test_generate_unknown_meals_shows_warning_not_success(
+        self, client: FlaskClient
+    ) -> None:
+        """Test POST with only unrecognized meals shows a warning, no success.
+
+        Unknown meal names never resolve to a real recipe (no Anthropic
+        client is configured in tests), so the route must not claim it
+        generated a shopping list from them. Instead it should surface a
+        warning naming every unresolved meal.
+        """
         response = client.post(
             "/shopping-list/generate",
             data={"meals": "Meal One\nMeal Two"},
             follow_redirects=True,
         )
-        assert b"Generated shopping list from 2 meal(s)" in response.data
+        assert b"Generated shopping list" not in response.data
+        # Jinja auto-escapes the apostrophe in "Couldn't", so we assert the
+        # surrounding text verbatim (no special characters to escape) and
+        # the escape-agnostic "Couldn" prefix separately.
+        assert b"Couldn" in response.data
+        assert b"recognize: Meal One, Meal Two." in response.data
+        assert b"Add each under Recipes first, then regenerate." in response.data
+
+    def test_generate_all_unknown_meals_no_success_flash(
+        self, client: FlaskClient
+    ) -> None:
+        """Test POST with only unresolved meals never flashes success.
+
+        Regardless of HTML-escaping of the apostrophe, the success message
+        must be entirely absent, the warning marker text must appear, and
+        the user must be pointed at Recipes to resolve the problem.
+        """
+        response = client.post(
+            "/shopping-list/generate",
+            data={"meals": "Meal One\nMeal Two"},
+            follow_redirects=True,
+        )
+        assert b"Generated shopping list" not in response.data
+        assert b"Couldn" in response.data
+        assert b"recognize" in response.data
+        assert b"Recipes" in response.data
+
+    def test_generate_known_recipe_shows_success_with_resolved_count(
+        self, client: FlaskClient, recipe_store: RecipeStore, sample_meal: ParsedMeal
+    ) -> None:
+        """Test a single known recipe produces a success flash, no warning.
+
+        The success count reflects the number of *resolved* meals, and
+        since every submitted meal name resolved, no warning is flashed.
+        """
+        recipe_store.save_recipe(sample_meal)
+        response = client.post(
+            "/shopping-list/generate",
+            data={"meals": "Test Pasta"},
+            follow_redirects=True,
+        )
+        assert response.status_code == 200
+        assert b"Generated shopping list from 1 meal(s)." in response.data
+        assert b"Couldn" not in response.data
+
+    def test_generate_partial_resolution_shows_both_flashes(
+        self, client: FlaskClient, recipe_store: RecipeStore, sample_meal: ParsedMeal
+    ) -> None:
+        """Test one known meal plus one unknown meal shows both flashes.
+
+        The success flash must count only the resolved meal (1), and the
+        warning flash must name only the unresolved meal.
+        """
+        recipe_store.save_recipe(sample_meal)
+        response = client.post(
+            "/shopping-list/generate",
+            data={"meals": "Test Pasta\nMystery Meal"},
+            follow_redirects=True,
+        )
+        assert b"Generated shopping list from 1 meal(s)." in response.data
+        assert b"Generated shopping list from 2 meal(s)." not in response.data
+        assert b"Couldn" in response.data
+        assert b"Mystery Meal" in response.data
+
+    def test_generate_warning_lists_unresolved_meal_names(
+        self, client: FlaskClient
+    ) -> None:
+        """Test the warning flash names the exact unresolved meal."""
+        response = client.post(
+            "/shopping-list/generate",
+            data={"meals": "Chicken Stir Fry"},
+            follow_redirects=True,
+        )
+        assert b"Chicken Stir Fry" in response.data
+        assert b"Couldn" in response.data
+        assert b"recognize" in response.data
+
+    def test_generate_warning_uses_warning_flash_category(
+        self, client: FlaskClient
+    ) -> None:
+        """Test the unresolved-meal warning renders with category "warning".
+
+        ``base.html`` renders each flash message as
+        ``class="flash flash-{{ category }}"``, so a warning-category
+        flash must render the literal ``flash-warning`` CSS class.
+        """
+        response = client.post(
+            "/shopping-list/generate",
+            data={"meals": "Meal One"},
+            follow_redirects=True,
+        )
+        assert b"flash-warning" in response.data
 
     def test_generate_persists_items_to_store(
         self,
@@ -1248,6 +1364,95 @@ class TestShoppingListGenerate:
         )
         assert response.status_code == 200
         assert b"Generated shopping list" in response.data
+
+
+# ---------------------------------------------------------------------------
+# TestClassifyParsedMeals
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyParsedMeals:
+    """Unit tests for grocery_butler.app._classify_parsed_meals."""
+
+    def test_classify_parsed_meals_splits_resolved_and_unresolved(self) -> None:
+        """Test resolved meals and unresolved-stub names are separated.
+
+        A meal is an unresolved stub iff it is flagged
+        ``needs_confirmation`` and is neither a known recipe nor carries
+        any purchase or pantry items. Any other meal counts as resolved,
+        even if it also happens to have ``needs_confirmation`` set (e.g.
+        a low-confidence LLM parse that still produced items).
+        """
+        from grocery_butler.app import _classify_parsed_meals
+
+        resolved_meal = ParsedMeal(
+            name="Known Meal",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="pasta",
+                    quantity=1.0,
+                    unit=parse_unit("lb"),
+                    category=IngredientCategory.PANTRY_DRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        stub_meal = ParsedMeal(
+            name="Unknown Meal",
+            servings=1,
+            known_recipe=False,
+            needs_confirmation=True,
+            purchase_items=[],
+            pantry_items=[],
+        )
+
+        resolved, unresolved_names = _classify_parsed_meals([resolved_meal, stub_meal])
+
+        assert resolved == [resolved_meal]
+        assert unresolved_names == ["Unknown Meal"]
+
+    def test_classify_parsed_meals_empty_list_returns_empty_results(self) -> None:
+        """Test an empty input list yields empty resolved/unresolved lists."""
+        from grocery_butler.app import _classify_parsed_meals
+
+        resolved, unresolved_names = _classify_parsed_meals([])
+
+        assert resolved == []
+        assert unresolved_names == []
+
+    def test_classify_parsed_meals_pantry_only_item_counts_as_resolved(self) -> None:
+        """Test a stub-flagged meal with only pantry items is resolved.
+
+        Per the classification rule, having *any* pantry item (even with
+        no purchase items) is enough to disqualify a meal from being
+        treated as an unresolved stub.
+        """
+        from grocery_butler.app import _classify_parsed_meals
+
+        pantry_only_meal = ParsedMeal(
+            name="Pantry Only Meal",
+            servings=1,
+            known_recipe=False,
+            needs_confirmation=True,
+            purchase_items=[],
+            pantry_items=[
+                Ingredient(
+                    ingredient="salt",
+                    quantity=1.0,
+                    unit=parse_unit("tsp"),
+                    category=IngredientCategory.PANTRY_DRY,
+                    is_pantry_item=True,
+                ),
+            ],
+        )
+
+        resolved, unresolved_names = _classify_parsed_meals([pantry_only_meal])
+
+        assert resolved == [pantry_only_meal]
+        assert unresolved_names == []
 
 
 # ---------------------------------------------------------------------------

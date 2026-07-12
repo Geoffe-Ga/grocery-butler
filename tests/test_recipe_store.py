@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 
+from grocery_butler.db import get_connection
+from grocery_butler.db.migrate import migrate
 from grocery_butler.models import (
     BrandMatchType,
     BrandPreference,
@@ -18,6 +22,7 @@ from grocery_butler.models import (
 from grocery_butler.recipe_store import RecipeStore, normalize_recipe_name
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -468,6 +473,57 @@ class TestPreferences:
         store.set_preference("default_servings", "6")
         assert store.get_preference("default_servings") == "6"
 
+    def test_set_preference_uses_returning_to_avoid_adapter_id_injection(
+        self, store: RecipeStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test set_preference's SQL carries its own RETURNING clause.
+
+        Without an explicit ``RETURNING`` clause, the PostgreSQL adapter's
+        ``_inject_returning`` appends ``RETURNING id`` to any bare INSERT
+        statement. The ``preferences`` table has no ``id`` column, so that
+        blind injection raises ``UndefinedColumn`` on Postgres. Emitting
+        ``RETURNING key`` ourselves means the SQL already contains
+        "RETURNING", so the adapter's injection is skipped.
+
+        Args:
+            store: RecipeStore fixture backed by a temporary SQLite file.
+            monkeypatch: Pytest fixture for patching attributes.
+        """
+        mock_conn = MagicMock()
+        monkeypatch.setattr(store, "_connect", lambda: mock_conn)
+
+        store.set_preference("theme", "dark")
+
+        mock_conn.execute.assert_called_once_with(
+            "INSERT INTO preferences (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            " RETURNING key",
+            ("theme", "dark"),
+        )
+
+    def test_set_preference_drains_returning_before_commit(
+        self, store: RecipeStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test the RETURNING result set is drained before commit.
+
+        PostgreSQL requires the result set of a ``RETURNING`` clause to
+        be consumed before the transaction commits; leaving it undrained
+        can leave the connection in an unusable state. This mirrors the
+        pattern already used by ``_record_migration`` and
+        ``PendingActionsStore``.
+
+        Args:
+            store: RecipeStore fixture backed by a temporary SQLite file.
+            monkeypatch: Pytest fixture for patching attributes.
+        """
+        mock_conn = MagicMock()
+        monkeypatch.setattr(store, "_connect", lambda: mock_conn)
+
+        store.set_preference("theme", "dark")
+
+        mock_conn.execute.return_value.fetchall.assert_called_once()
+        mock_conn.commit.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Brand preference tests
@@ -638,3 +694,71 @@ class TestBrandPreferences:
         result = store.remove_brand_preference(9999)
 
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL integration tests (require a running Postgres instance)
+# ---------------------------------------------------------------------------
+
+_TEST_DB_URL = os.environ.get("TEST_DATABASE_URL", "")
+_skip_no_pg = pytest.mark.skipif(
+    not _TEST_DB_URL,
+    reason="TEST_DATABASE_URL not set — no Postgres server available",
+)
+
+
+@_skip_no_pg
+class TestRecipeStorePostgres:
+    """Integration tests against PostgreSQL.
+
+    Requires a running PostgreSQL instance. Set TEST_DATABASE_URL
+    to run: ``TEST_DATABASE_URL=postgresql://user:pass@localhost/test``.
+    """
+
+    @pytest.fixture
+    def pg_store(self) -> Iterator[RecipeStore]:
+        """Yield a RecipeStore backed by PostgreSQL, cleaning up test rows.
+
+        Runs migrations, deletes any leftover ``pg-test-%`` preference
+        rows before yielding the store, then deletes them again on
+        teardown so runs don't leak state between tests.
+
+        Yields:
+            A RecipeStore connected to TEST_DATABASE_URL.
+        """
+        migrate(_TEST_DB_URL)
+        conn = get_connection(_TEST_DB_URL)
+        try:
+            conn.execute("DELETE FROM preferences WHERE key LIKE ?", ("pg-test-%",))
+            conn.commit()
+        finally:
+            conn.close()
+
+        yield RecipeStore(_TEST_DB_URL)
+
+        conn = get_connection(_TEST_DB_URL)
+        try:
+            conn.execute("DELETE FROM preferences WHERE key LIKE ?", ("pg-test-%",))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_set_preference_persists_on_postgres(self, pg_store: RecipeStore) -> None:
+        """Test a preference set via set_preference is durably stored."""
+        pg_store.set_preference("pg-test-theme", "dark")
+
+        assert pg_store.get_preference("pg-test-theme") == "dark"
+
+    def test_set_preference_upsert_overwrites_on_postgres(
+        self, pg_store: RecipeStore
+    ) -> None:
+        """Test setting the same key twice overwrites the value (upsert)."""
+        pg_store.set_preference("pg-test-theme", "light")
+        pg_store.set_preference("pg-test-theme", "dark")
+
+        assert pg_store.get_preference("pg-test-theme") == "dark"
+        all_prefs = pg_store.get_all_preferences()
+        pg_test_prefs = {
+            key: value for key, value in all_prefs.items() if key.startswith("pg-test-")
+        }
+        assert pg_test_prefs == {"pg-test-theme": "dark"}
