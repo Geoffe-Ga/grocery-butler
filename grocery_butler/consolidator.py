@@ -12,7 +12,13 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from grocery_butler.claude_utils import extract_json_text
-from grocery_butler.models import IngredientCategory, ShoppingListItem, Unit, parse_unit
+from grocery_butler.models import (
+    IngredientCategory,
+    ShoppingListItem,
+    Unit,
+    coerce_category,
+    parse_unit,
+)
 from grocery_butler.prompt_loader import load_prompt
 
 if TYPE_CHECKING:
@@ -98,11 +104,7 @@ def _parse_shopping_item(data: dict[str, object]) -> ShoppingListItem:
         [str(m) for m in raw_from_meals] if isinstance(raw_from_meals, list) else []
     )
 
-    raw_category = str(data.get("category", "other"))
-    try:
-        category = IngredientCategory(raw_category)
-    except ValueError:
-        category = IngredientCategory.OTHER
+    category = coerce_category(data.get("category", "other"))
 
     return ShoppingListItem(
         ingredient=str(data.get("ingredient", "")),
