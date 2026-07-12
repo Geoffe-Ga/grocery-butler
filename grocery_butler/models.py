@@ -179,6 +179,48 @@ def parse_unit(raw: str) -> Unit:
     return Unit.EACH
 
 
+def coerce_category(raw: object) -> IngredientCategory:
+    """Coerce a raw value into an IngredientCategory, defaulting to OTHER.
+
+    Handles exact matches (case-insensitive), existing enum members, and
+    ``None``/empty values. Unrecognized strings degrade to
+    ``IngredientCategory.OTHER`` with a warning logged; ``None`` and empty
+    strings degrade silently since they represent "no data" rather than
+    "bad data".
+
+    Args:
+        raw: Raw category value from LLM output, database, or user input.
+
+    Returns:
+        Matching IngredientCategory enum member, or OTHER if unrecognized.
+    """
+    if isinstance(raw, IngredientCategory):
+        return raw
+    text = "" if raw is None else str(raw).strip().lower()
+    if not text:
+        return IngredientCategory.OTHER
+    try:
+        return IngredientCategory(text)
+    except ValueError:
+        logger.warning("Unknown ingredient category %r; using OTHER", raw)
+        return IngredientCategory.OTHER
+
+
+def coerce_category_optional(raw: object) -> IngredientCategory | None:
+    """Coerce a raw value into an IngredientCategory, preserving None.
+
+    Args:
+        raw: Raw category value, or None.
+
+    Returns:
+        Matching IngredientCategory enum member, None if input was None,
+        or OTHER if the input was a non-None, unrecognized value.
+    """
+    if raw is None:
+        return None
+    return coerce_category(raw)
+
+
 def _coerce_unit(v: object) -> Unit:
     """Coerce a raw value to a Unit enum member.
 

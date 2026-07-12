@@ -31,6 +31,8 @@ from grocery_butler.models import (
     Unit,
     _coerce_unit,
     _coerce_unit_optional,
+    coerce_category,
+    coerce_category_optional,
     parse_unit,
 )
 
@@ -344,6 +346,58 @@ class TestCoerceUnitOptional:
     def test_exact_string_normalized(self) -> None:
         """Test exact unit strings are resolved."""
         assert _coerce_unit_optional("gal") == Unit.GAL
+
+
+class TestCoerceCategory:
+    """Tests for the coerce_category module-level helper (Issue #68)."""
+
+    def test_known_value_returns_enum(self) -> None:
+        """Test a known category string maps to its enum member."""
+        assert coerce_category("produce") == IngredientCategory.PRODUCE
+
+    def test_unknown_value_returns_other(self) -> None:
+        """Test an unrecognized category string degrades to OTHER."""
+        assert coerce_category("spices") == IngredientCategory.OTHER
+
+    def test_unknown_value_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Test an unrecognized category string logs a WARNING mentioning it."""
+        with caplog.at_level(logging.WARNING, logger="grocery_butler.models"):
+            coerce_category("spices")
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "spices" in warnings[0].message
+
+    def test_none_returns_other(self) -> None:
+        """Test None input degrades to OTHER."""
+        assert coerce_category(None) == IngredientCategory.OTHER
+
+    def test_empty_string_returns_other_silently(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Test an empty string degrades to OTHER without logging a WARNING."""
+        with caplog.at_level(logging.WARNING, logger="grocery_butler.models"):
+            result = coerce_category("")
+
+        assert result == IngredientCategory.OTHER
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == []
+
+    def test_existing_enum_passthrough(self) -> None:
+        """Test an existing IngredientCategory member passes through unchanged."""
+        assert coerce_category(IngredientCategory.MEAT) == IngredientCategory.MEAT
+
+
+class TestCoerceCategoryOptional:
+    """Tests for the coerce_category_optional module-level helper (Issue #68)."""
+
+    def test_none_returns_none(self) -> None:
+        """Test None input is preserved as None (not coerced to OTHER)."""
+        assert coerce_category_optional(None) is None
+
+    def test_invalid_returns_other(self) -> None:
+        """Test an invalid category string degrades to OTHER."""
+        assert coerce_category_optional("legacy_snacks") == IngredientCategory.OTHER
 
 
 class TestUnitValidatorOnModels:
