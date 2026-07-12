@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import uuid
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +20,9 @@ from grocery_butler.models import (
 )
 from grocery_butler.order_service import OrderConfirmation, OrderResult
 from grocery_butler.safeway_pipeline import SafewayPipeline, SafewayPipelineError
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -410,7 +416,13 @@ class TestSubmitCart:
         safeway_config: Config,
         mock_cart_summary: CartSummary,
     ):
-        """Test submit_cart delegates to order service without rebuilding."""
+        """Test submit_cart delegates to order service without rebuilding.
+
+        When no idempotency key is supplied, the pipeline generates a
+        UUID4 key and forwards it to the order service so the ledger row
+        and the ``clientOrderId`` sent to Safeway always correlate
+        (Issue #61).
+        """
         mock_client = mock_client_cls.return_value
         mock_client.is_authenticated = True
 
@@ -421,9 +433,13 @@ class TestSubmitCart:
         result = pipeline.submit_cart(mock_cart_summary)
 
         assert result is expected
-        mock_order_cls.return_value.submit_order.assert_called_once_with(
-            mock_cart_summary, allow_review_items=False
-        )
+        mock_submit = mock_order_cls.return_value.submit_order
+        mock_submit.assert_called_once()
+        args, kwargs = mock_submit.call_args
+        assert args == (mock_cart_summary,)
+        assert kwargs["allow_review_items"] is False
+        generated_key = kwargs["idempotency_key"]
+        assert uuid.UUID(generated_key).version == 4
         mock_cart_cls.return_value.build_cart.assert_not_called()
 
 
@@ -478,9 +494,11 @@ class TestSubmitCartReviewGate:
         result = pipeline.submit_cart(mock_cart_summary)
 
         assert result is blocked
-        mock_order_cls.return_value.submit_order.assert_called_once_with(
-            mock_cart_summary, allow_review_items=False
-        )
+        mock_submit = mock_order_cls.return_value.submit_order
+        mock_submit.assert_called_once()
+        args, kwargs = mock_submit.call_args
+        assert args == (mock_cart_summary,)
+        assert kwargs["allow_review_items"] is False
 
     @patch("grocery_butler.safeway_pipeline.RecipeStore")
     @patch("grocery_butler.safeway_pipeline.ProductSearchService")
@@ -517,9 +535,62 @@ class TestSubmitCartReviewGate:
         result = pipeline.submit_cart(mock_cart_summary, allow_review_items=True)
 
         assert result is expected
-        mock_order_cls.return_value.submit_order.assert_called_once_with(
-            mock_cart_summary, allow_review_items=True
+        mock_submit = mock_order_cls.return_value.submit_order
+        mock_submit.assert_called_once()
+        args, kwargs = mock_submit.call_args
+        assert args == (mock_cart_summary,)
+        assert kwargs["allow_review_items"] is True
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_submit_cart_flagged_cart_blocked_before_ledger_write(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+        tmp_path: Path,
+    ) -> None:
+        """Test a flagged cart is review-blocked before any ledger write.
+
+        The review gate (issue #59) must short-circuit in the pipeline
+        itself, ahead of the duplicate-order ledger (Issue #61): a
+        review-blocked attempt never reaches Safeway, so it must not
+        record a ledger row that would spuriously mark the post-review
+        override resubmission of the same cart a duplicate.
+        """
+        from grocery_butler.order_submissions import DUPLICATE_WINDOW, cart_fingerprint
+
+        mock_client_cls.return_value.is_authenticated = True
+
+        flagged_item = mock_cart_summary.items[0].model_copy(
+            update={"needs_review": True, "review_reason": "incomparable_units"}
         )
+        flagged_cart = mock_cart_summary.model_copy(update={"items": [flagged_item]})
+
+        pipeline = SafewayPipeline(safeway_config, str(tmp_path / "orders.db"))
+        result = pipeline.submit_cart(flagged_cart, idempotency_key="key-review")
+
+        assert result.success is False
+        assert "review" in result.error_message.lower()
+        assert "milk (incomparable_units)" in result.error_message
+        mock_order_cls.return_value.submit_order.assert_not_called()
+        row = pipeline._order_submissions._find_recent_blocking(
+            cart_fingerprint(flagged_cart), DUPLICATE_WINDOW
+        )
+        assert row is None
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +646,418 @@ class TestEmptyShoppingList:
 
         assert result.success is False
         assert "empty" in result.error_message.lower()
+
+
+# ---------------------------------------------------------------------------
+# Issue #61: duplicate-order guard
+#
+# These tests exercise the duplicate-submission ledger and the
+# ``idempotency_key`` parameter now accepted by ``submit_cart``/``run``.
+# They were written test-first, before that support existed, which is why
+# OrderOutcome is still imported locally rather than at module scope.
+# Each test uses a real tmp_path SQLite db so the ledger is real while
+# every bootstrapped service (SafewayClient, OrderService, etc.) stays
+# mocked, matching the pattern used throughout this file.
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitCartDuplicateGuard:
+    """Tests for duplicate-order prevention in SafewayPipeline.submit_cart."""
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_unknown_outcome_blocks_resubmission_with_different_key(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+        tmp_path: Path,
+    ) -> None:
+        """Test an UNKNOWN-outcome submission blocks a same-cart resubmission."""
+        from grocery_butler.order_service import OrderOutcome
+
+        mock_client_cls.return_value.is_authenticated = True
+        mock_order_cls.return_value.submit_order.side_effect = [
+            OrderResult(
+                success=False,
+                outcome=OrderOutcome.UNKNOWN,
+                error_message="Order outcome unknown — request timed out",
+            ),
+            OrderResult(success=True, outcome=OrderOutcome.SUCCESS),
+        ]
+
+        pipeline = SafewayPipeline(safeway_config, str(tmp_path / "orders.db"))
+
+        first = pipeline.submit_cart(mock_cart_summary, idempotency_key="key-1")
+        second = pipeline.submit_cart(mock_cart_summary, idempotency_key="key-2")
+
+        assert first.outcome is OrderOutcome.UNKNOWN
+        assert second.success is False
+        assert second.outcome is OrderOutcome.DUPLICATE
+        assert mock_order_cls.return_value.submit_order.call_count == 1
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_success_then_immediate_resubmission_blocked(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+        tmp_path: Path,
+    ) -> None:
+        """Test a successful submission also blocks an immediate resubmission."""
+        from grocery_butler.order_service import OrderOutcome
+
+        mock_client_cls.return_value.is_authenticated = True
+        mock_order_cls.return_value.submit_order.side_effect = [
+            OrderResult(
+                success=True,
+                outcome=OrderOutcome.SUCCESS,
+                confirmation=OrderConfirmation(
+                    order_id="ORD-1",
+                    status="confirmed",
+                    estimated_time="2h",
+                    total=4.99,
+                    fulfillment_type=FulfillmentType.PICKUP,
+                    item_count=1,
+                ),
+            ),
+            OrderResult(success=True, outcome=OrderOutcome.SUCCESS),
+        ]
+
+        pipeline = SafewayPipeline(safeway_config, str(tmp_path / "orders.db"))
+
+        first = pipeline.submit_cart(mock_cart_summary, idempotency_key="key-a")
+        second = pipeline.submit_cart(mock_cart_summary, idempotency_key="key-b")
+
+        assert first.success is True
+        assert second.success is False
+        assert second.outcome is OrderOutcome.DUPLICATE
+        assert mock_order_cls.return_value.submit_order.call_count == 1
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_failed_first_submission_does_not_block_retry(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+        tmp_path: Path,
+    ) -> None:
+        """Test a definitive FAILED first submission does not block a retry."""
+        from grocery_butler.order_service import OrderOutcome
+
+        mock_client_cls.return_value.is_authenticated = True
+        mock_order_cls.return_value.submit_order.side_effect = [
+            OrderResult(
+                success=False,
+                outcome=OrderOutcome.FAILED,
+                error_message="Safeway rejected the order",
+            ),
+            OrderResult(success=True, outcome=OrderOutcome.SUCCESS),
+        ]
+
+        pipeline = SafewayPipeline(safeway_config, str(tmp_path / "orders.db"))
+
+        first = pipeline.submit_cart(mock_cart_summary, idempotency_key="key-1")
+        second = pipeline.submit_cart(mock_cart_summary, idempotency_key="key-2")
+
+        assert first.outcome is OrderOutcome.FAILED
+        assert second.success is True
+        assert mock_order_cls.return_value.submit_order.call_count == 2
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_duplicate_error_message_mentions_duplicate_or_recent(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+        tmp_path: Path,
+    ) -> None:
+        """Test the DUPLICATE error message references duplicate/recent activity."""
+        from grocery_butler.order_service import OrderOutcome
+
+        mock_client_cls.return_value.is_authenticated = True
+        mock_order_cls.return_value.submit_order.side_effect = [
+            OrderResult(success=False, outcome=OrderOutcome.UNKNOWN),
+            OrderResult(success=True, outcome=OrderOutcome.SUCCESS),
+        ]
+
+        pipeline = SafewayPipeline(safeway_config, str(tmp_path / "orders.db"))
+
+        pipeline.submit_cart(mock_cart_summary, idempotency_key="key-1")
+        second = pipeline.submit_cart(mock_cart_summary, idempotency_key="key-2")
+
+        message = second.error_message.lower()
+        assert "duplicate" in message or "recent" in message
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_ledger_write_failure_does_not_mask_successful_order(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+        tmp_path: Path,
+    ) -> None:
+        """Test a ledger write failure never masks a successful order.
+
+        Gate 2.5 review BLOCKER (Issue #61): if
+        ``OrderSubmissionStore.mark`` raises after Safeway has already
+        confirmed and charged the order, that exception must never
+        propagate and hide the real, successful result — the caller
+        would otherwise see an unhandled 500 for an order that actually
+        succeeded, and the confirmation/order_id would be lost.
+        """
+        from grocery_butler.order_service import OrderOutcome
+        from grocery_butler.order_submissions import DUPLICATE_WINDOW, cart_fingerprint
+
+        mock_client_cls.return_value.is_authenticated = True
+        expected = OrderResult(
+            success=True,
+            outcome=OrderOutcome.SUCCESS,
+            confirmation=OrderConfirmation(
+                order_id="ORD-LEDGER-FAIL",
+                status="confirmed",
+                estimated_time="2h",
+                total=4.99,
+                fulfillment_type=FulfillmentType.PICKUP,
+                item_count=1,
+            ),
+        )
+        mock_order_cls.return_value.submit_order.return_value = expected
+
+        pipeline = SafewayPipeline(safeway_config, str(tmp_path / "orders.db"))
+
+        with patch.object(
+            pipeline._order_submissions,
+            "mark",
+            side_effect=RuntimeError("ledger write failed"),
+        ):
+            result = pipeline.submit_cart(mock_cart_summary, idempotency_key="key-1")
+
+        assert result is expected
+        assert result.success is True
+        assert result.confirmation is not None
+        assert result.confirmation.order_id == "ORD-LEDGER-FAIL"
+
+        row = pipeline._order_submissions._find_recent_blocking(
+            cart_fingerprint(mock_cart_summary), DUPLICATE_WINDOW
+        )
+        assert row is not None
+        assert row["status"] == "submitted"
+
+
+class TestRunDuplicateGuard:
+    """Tests for duplicate-order prevention in SafewayPipeline.run."""
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_run_blocks_immediate_duplicate_cart(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        sample_items: list[ShoppingListItem],
+        mock_cart_summary: CartSummary,
+        tmp_path: Path,
+    ) -> None:
+        """Test running the identical cart twice in a row blocks the second submit."""
+        from grocery_butler.order_service import OrderOutcome
+
+        mock_client = mock_client_cls.return_value
+        mock_client.is_authenticated = False
+
+        mock_cart_builder = mock_cart_cls.return_value
+        mock_cart_builder.build_cart.return_value = mock_cart_summary
+
+        mock_order_cls.return_value.submit_order.side_effect = [
+            OrderResult(success=False, outcome=OrderOutcome.UNKNOWN),
+            OrderResult(success=True, outcome=OrderOutcome.SUCCESS),
+        ]
+
+        pipeline = SafewayPipeline(safeway_config, str(tmp_path / "orders.db"))
+
+        first = pipeline.run(sample_items)
+        second = pipeline.run(sample_items)
+
+        assert first.outcome is OrderOutcome.UNKNOWN
+        assert second.outcome is OrderOutcome.DUPLICATE
+        assert mock_order_cls.return_value.submit_order.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #61 (security-review BLOCKER): the duplicate-order guard must be
+# atomic under real concurrency, not just sequential re-calls.
+#
+# _submit_guarded previously did find_recent_blocking() (SELECT, one
+# connection) then record_attempt() (INSERT, a second connection), so two
+# concurrent submissions of an identical cart could both pass the SELECT
+# and both reach OrderService.submit_order — the double-charge Issue #61
+# exists to prevent. The fix switches _submit_guarded to the atomic
+# OrderSubmissionStore.try_record_attempt (added in
+# tests/test_order_submissions.py). This test does not patch the store —
+# it uses the pipeline's real tmp_path-backed OrderSubmissionStore and
+# races two real threads against it via a threading.Barrier placed
+# directly on try_record_attempt. It was written test-first, before that
+# method existed, so it originally failed for the right reason
+# (AttributeError: try_record_attempt did not exist) until both the
+# store method and the pipeline's switch to it were implemented.
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitCartDuplicateGuardConcurrency:
+    """Regression test: concurrent submit_cart calls must not double-submit."""
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_concurrent_submit_cart_only_one_reaches_order_service(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Test two concurrent submit_cart calls for the same cart: one wins.
+
+        A ``threading.Barrier`` lines both threads up immediately before
+        the real ``OrderSubmissionStore.try_record_attempt`` call so they
+        race for real against the tmp_path-backed SQLite ledger. Exactly
+        one thread may proceed to ``OrderService.submit_order``; the
+        other must get back a DUPLICATE outcome.
+        """
+        from grocery_butler.order_service import OrderOutcome
+
+        mock_client_cls.return_value.is_authenticated = True
+        mock_order_cls.return_value.submit_order.return_value = OrderResult(
+            success=True, outcome=OrderOutcome.SUCCESS
+        )
+
+        pipeline = SafewayPipeline(safeway_config, str(tmp_path / "race.db"))
+
+        barrier = threading.Barrier(2)
+        order_submissions_store = pipeline._order_submissions
+        real_try_record_attempt = order_submissions_store.try_record_attempt
+
+        def _guarded_try_record_attempt(*args: object, **kwargs: object) -> object:
+            barrier.wait()
+            return real_try_record_attempt(*args, **kwargs)
+
+        monkeypatch.setattr(
+            order_submissions_store,
+            "try_record_attempt",
+            _guarded_try_record_attempt,
+        )
+
+        results: list[OrderResult | None] = [None, None]
+
+        def _submit(index: int, key: str) -> None:
+            results[index] = pipeline.submit_cart(
+                mock_cart_summary, idempotency_key=key
+            )
+
+        thread_a = threading.Thread(target=_submit, args=(0, "race-key-1"))
+        thread_b = threading.Thread(target=_submit, args=(1, "race-key-2"))
+        thread_a.start()
+        thread_b.start()
+        thread_a.join()
+        thread_b.join()
+
+        assert mock_order_cls.return_value.submit_order.call_count == 1
+        outcomes = [result.outcome for result in results if result is not None]
+        assert outcomes.count(OrderOutcome.DUPLICATE) == 1
 
 
 # ---------------------------------------------------------------------------

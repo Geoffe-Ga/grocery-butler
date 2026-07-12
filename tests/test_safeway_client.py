@@ -573,6 +573,178 @@ class TestConfigSafewayFields:
 
 
 # ---------------------------------------------------------------------------
+# Issue #61: SafewayTimeoutError + retry_on_auth_failure=False
+#
+# These tests exercise API surface (``SafewayTimeoutError``,
+# ``post(..., retry_on_auth_failure=...)``) whose names are imported
+# inside each test body rather than at module scope because these tests
+# were written test-first, before the names existed; the local imports
+# are kept as a historic artifact of that TDD process.
+# ---------------------------------------------------------------------------
+
+
+class _TimeoutTransport(httpx.BaseTransport):
+    """Mock transport that serves queued responses then raises a timeout.
+
+    Attributes:
+        responses: Queued responses returned before the timeout (e.g. the
+            Okta auth flow) in order.
+        requests: Requests received, in order.
+    """
+
+    def __init__(self, responses: list[httpx.Response]) -> None:
+        """Initialize with responses to serve before timing out.
+
+        Args:
+            responses: Queued responses returned in order.
+        """
+        self.responses = list(responses)
+        self.requests: list[httpx.Request] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        """Return the next queued response, or raise once exhausted.
+
+        Args:
+            request: The incoming HTTP request.
+
+        Returns:
+            The next queued response.
+
+        Raises:
+            httpx.ReadTimeout: Once all queued responses have been served.
+        """
+        self.requests.append(request)
+        if not self.responses:
+            raise httpx.ReadTimeout("simulated timeout", request=request)
+        return self.responses.pop(0)
+
+
+class TestSafewayTimeoutError:
+    """Tests for the new SafewayTimeoutError exception (Issue #61)."""
+
+    def test_is_subclass_of_safeway_api_error(self) -> None:
+        """Test SafewayTimeoutError subclasses SafewayAPIError."""
+        from grocery_butler.safeway_client import SafewayTimeoutError
+
+        assert issubclass(SafewayTimeoutError, SafewayAPIError)
+
+    @patch("grocery_butler.safeway_client.time.sleep")
+    def test_post_read_timeout_raises_safeway_timeout_error(
+        self, mock_sleep: object
+    ) -> None:
+        """Test a transport-level ReadTimeout during POST raises SafewayTimeoutError."""
+        from grocery_butler.safeway_client import SafewayTimeoutError
+
+        transport = _TimeoutTransport(
+            [
+                _make_authn_response(),
+                _make_authorize_redirect(),
+            ]
+        )
+        http = httpx.Client(transport=transport)
+        client = SafewayClient("user", "pass", "1234", http_client=http)
+
+        with pytest.raises(SafewayTimeoutError):
+            client.post("/abs/pub/web/orders", json_data={"items": []})
+
+        client.close()
+
+    @patch("grocery_butler.safeway_client.time.sleep")
+    def test_get_read_timeout_raises_safeway_timeout_error(
+        self, mock_sleep: object
+    ) -> None:
+        """Test a transport-level ReadTimeout during GET raises SafewayTimeoutError."""
+        from grocery_butler.safeway_client import SafewayTimeoutError
+
+        transport = _TimeoutTransport(
+            [
+                _make_authn_response(),
+                _make_authorize_redirect(),
+            ]
+        )
+        http = httpx.Client(transport=transport)
+        client = SafewayClient("user", "pass", "1234", http_client=http)
+
+        with pytest.raises(SafewayTimeoutError):
+            client.get("/api/v2/search")
+
+        client.close()
+
+
+class TestPostRetryOnAuthFailureFalse:
+    """Tests for POST with retry_on_auth_failure=False (Issue #61)."""
+
+    @patch("grocery_butler.safeway_client.time.sleep")
+    def test_single_post_no_retry_on_401(self, mock_sleep: object) -> None:
+        """Test 401 with retries disabled re-authenticates but posts only once.
+
+        The client should still refresh its token (so subsequent calls can
+        succeed) but must not resend the original POST body, since retrying
+        a non-idempotent order submission risks a double charge.
+
+        The raised exception must be ``SafewayAuthError`` — not plain
+        ``SafewayAPIError`` — because a 401 with retries disabled means
+        Safeway definitively rejected the request without processing it.
+        ``OrderService.submit_order`` relies on that distinction to classify
+        the outcome as immediately-retryable FAILED rather than UNKNOWN
+        (PR #107 round-2 review, Issue #61).
+        """
+        transport = _MockTransport(
+            [
+                _make_authn_response(),
+                _make_authorize_redirect(),
+                httpx.Response(401, json={"error": "expired"}),
+                _make_authn_response("new-session"),
+                _make_authorize_redirect("new-token"),
+            ]
+        )
+        http = httpx.Client(transport=transport)
+        client = SafewayClient("user", "pass", "1234", http_client=http)
+
+        with pytest.raises(SafewayAuthError):
+            client.post(
+                "/abs/pub/web/orders",
+                json_data={"items": []},
+                retry_on_auth_failure=False,
+            )
+
+        post_requests = [
+            req
+            for req in transport.requests
+            if req.method == "POST" and "/abs/pub/web/orders" in str(req.url)
+        ]
+        assert len(post_requests) == 1
+        client.close()
+
+    @patch("grocery_butler.safeway_client.time.sleep")
+    def test_explicit_retry_on_auth_failure_true_still_retries(
+        self, mock_sleep: object
+    ) -> None:
+        """Test retry_on_auth_failure=True still preserves the retry-once behavior."""
+        transport = _MockTransport(
+            [
+                _make_authn_response(),
+                _make_authorize_redirect(),
+                httpx.Response(401, json={"error": "expired"}),
+                _make_authn_response("new-session"),
+                _make_authorize_redirect("new-token"),
+                _make_api_response({"orderId": "ORD-1"}),
+            ]
+        )
+        http = httpx.Client(transport=transport)
+        client = SafewayClient("user", "pass", "1234", http_client=http)
+
+        result = client.post(
+            "/abs/pub/web/orders",
+            json_data={"items": []},
+            retry_on_auth_failure=True,
+        )
+
+        assert result == {"orderId": "ORD-1"}
+        client.close()
+
+
+# ---------------------------------------------------------------------------
 # Issue #60 — unverified surface must be documented in-module
 # ---------------------------------------------------------------------------
 
