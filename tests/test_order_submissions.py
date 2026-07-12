@@ -10,11 +10,13 @@ protect from that collection failure.
 
 from __future__ import annotations
 
+import threading
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
 
+from grocery_butler import order_submissions
 from grocery_butler.models import (
     CartItem,
     CartSummary,
@@ -27,6 +29,7 @@ from grocery_butler.models import (
 from grocery_butler.order_submissions import OrderSubmissionStore, cart_fingerprint
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -381,4 +384,297 @@ class TestOrderSubmissionStore:
         assert (
             store.find_recent_blocking("fp-no-order-id", within=timedelta(minutes=30))
             is None
+        )
+
+
+# ---------------------------------------------------------------------------
+# Issue #61 (security-review BLOCKER): OrderSubmissionStore.try_record_attempt
+#
+# The original guard did a SELECT (find_recent_blocking) then an INSERT
+# (record_attempt) on two separate connections, so two concurrent
+# submissions of an identical cart could both pass the SELECT and both
+# reach OrderService.submit_order — the exact double-charge Issue #61
+# exists to prevent. try_record_attempt closes that gap with a single
+# atomic ``INSERT ... SELECT ... WHERE NOT EXISTS (...)`` statement on one
+# connection. This class does not exist yet, so every test below is
+# expected to fail with AttributeError until it is implemented.
+# ---------------------------------------------------------------------------
+
+
+class TestTryRecordAttempt:
+    """Tests for OrderSubmissionStore.try_record_attempt's atomicity."""
+
+    def test_returns_id_when_no_blocking_row_exists(self, tmp_path: Path) -> None:
+        """Test an int row id is returned when nothing blocks the fingerprint."""
+        store = OrderSubmissionStore(str(tmp_path / "test.db"))
+
+        submission_id = store.try_record_attempt(
+            "key-1", "fp-fresh-atomic", within=timedelta(minutes=30)
+        )
+
+        assert isinstance(submission_id, int)
+
+    def test_returns_none_when_recent_submitted_row_blocks(
+        self, tmp_path: Path
+    ) -> None:
+        """Test None is returned when a recent 'submitted' row already exists."""
+        store = OrderSubmissionStore(str(tmp_path / "test.db"))
+        first = store.try_record_attempt(
+            "key-1", "fp-dup-submitted", within=timedelta(minutes=30)
+        )
+
+        second = store.try_record_attempt(
+            "key-2", "fp-dup-submitted", within=timedelta(minutes=30)
+        )
+
+        assert isinstance(first, int)
+        assert second is None
+
+    def test_returns_none_when_prior_row_marked_unknown(self, tmp_path: Path) -> None:
+        """Test None is returned when the prior row was marked 'unknown'."""
+        store = OrderSubmissionStore(str(tmp_path / "test.db"))
+        submission_id = store.try_record_attempt(
+            "key-1", "fp-dup-unknown", within=timedelta(minutes=30)
+        )
+        assert isinstance(submission_id, int)
+        store.mark(submission_id, "unknown")
+
+        second = store.try_record_attempt(
+            "key-2", "fp-dup-unknown", within=timedelta(minutes=30)
+        )
+
+        assert second is None
+
+    def test_returns_none_when_prior_row_marked_confirmed(self, tmp_path: Path) -> None:
+        """Test None is returned when the prior row was marked 'confirmed'."""
+        store = OrderSubmissionStore(str(tmp_path / "test.db"))
+        submission_id = store.try_record_attempt(
+            "key-1", "fp-dup-confirmed", within=timedelta(minutes=30)
+        )
+        assert isinstance(submission_id, int)
+        store.mark(submission_id, "confirmed", order_id="ORD-1")
+
+        second = store.try_record_attempt(
+            "key-2", "fp-dup-confirmed", within=timedelta(minutes=30)
+        )
+
+        assert second is None
+
+    def test_returns_id_when_prior_row_marked_failed(self, tmp_path: Path) -> None:
+        """Test an int id is returned when the prior row was marked 'failed'.
+
+        A definitive 'failed' status does not block a retry — only
+        'submitted', 'unknown', and 'confirmed' do.
+        """
+        store = OrderSubmissionStore(str(tmp_path / "test.db"))
+        submission_id = store.try_record_attempt(
+            "key-1", "fp-dup-failed", within=timedelta(minutes=30)
+        )
+        assert isinstance(submission_id, int)
+        store.mark(submission_id, "failed")
+
+        second = store.try_record_attempt(
+            "key-2", "fp-dup-failed", within=timedelta(minutes=30)
+        )
+
+        assert isinstance(second, int)
+
+    def test_returns_id_when_prior_row_outside_window(self, tmp_path: Path) -> None:
+        """Test an int id is returned once the prior blocking row expires.
+
+        Passing ``within=timedelta(seconds=0)`` on the second call makes
+        the cutoff "now", which is always after the first call's
+        ``created_at`` — deterministic without sleeping.
+        """
+        store = OrderSubmissionStore(str(tmp_path / "test.db"))
+        first = store.try_record_attempt(
+            "key-1", "fp-expired", within=timedelta(minutes=30)
+        )
+        assert isinstance(first, int)
+
+        second = store.try_record_attempt(
+            "key-2", "fp-expired", within=timedelta(seconds=0)
+        )
+
+        assert isinstance(second, int)
+
+    def test_concurrent_attempts_for_same_fingerprint_only_one_succeeds(
+        self, tmp_path: Path
+    ) -> None:
+        """Test two concurrent attempts for the same fingerprint: one wins.
+
+        Regression test for the security-review BLOCKER: a
+        SELECT-then-INSERT guard on two connections lets two concurrent
+        submissions of an identical cart both pass. A
+        ``threading.Barrier`` lines up two real threads against a real
+        tmp_path-backed SQLite store so they race for the same row for
+        real; SQLite serializes writers, so exactly one may win.
+        """
+        store = OrderSubmissionStore(str(tmp_path / "concurrent.db"))
+        barrier = threading.Barrier(2)
+        results: list[int | None] = [None, None]
+
+        def _attempt(index: int, key: str) -> None:
+            barrier.wait()
+            results[index] = store.try_record_attempt(
+                key, "fp-race", within=timedelta(minutes=30)
+            )
+
+        thread_a = threading.Thread(target=_attempt, args=(0, "key-race-1"))
+        thread_b = threading.Thread(target=_attempt, args=(1, "key-race-2"))
+        thread_a.start()
+        thread_b.start()
+        thread_a.join()
+        thread_b.join()
+
+        winners = [r for r in results if isinstance(r, int)]
+        losers = [r for r in results if r is None]
+        assert len(winners) == 1
+        assert len(losers) == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #61: PostgreSQL advisory-lock branch of try_record_attempt
+#
+# READ COMMITTED (PostgreSQL's default) can race a bare ``NOT EXISTS``
+# subquery, so try_record_attempt must additionally take a
+# ``pg_advisory_xact_lock(hashtext(?))`` on the fingerprint, on the same
+# connection, before the guarded insert — but only for PostgreSQL URLs;
+# SQLite is single-writer and needs no such lock. These tests fully mock
+# the connection layer (no real PostgreSQL server) so the exact SQL
+# issued can be inspected directly.
+# ---------------------------------------------------------------------------
+
+
+class _FakeCursorResult:
+    """Stub CursorResult reporting a successful single-row insert."""
+
+    def __init__(self, lastrowid: int | None = 1, rowcount: int = 1) -> None:
+        """Initialize with a canned lastrowid/rowcount pair.
+
+        Args:
+            lastrowid: Value to report as the last inserted row id.
+            rowcount: Value to report as the affected row count.
+        """
+        self.lastrowid = lastrowid
+        self.rowcount = rowcount
+
+    def fetchone(self) -> None:
+        """Return None; no test here reads a result row.
+
+        Returns:
+            None, always.
+        """
+        return None
+
+    def fetchall(self) -> list[object]:
+        """Return an empty list; no test here reads result rows.
+
+        Returns:
+            An empty list, always.
+        """
+        return []
+
+
+class _RecordingConnection:
+    """Fake DatabaseConnection recording every executed statement."""
+
+    def __init__(self) -> None:
+        """Initialize with an empty call log."""
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def execute(self, sql: str, params: Sequence[object] = ()) -> _FakeCursorResult:
+        """Record the statement and params, and report a successful insert.
+
+        Args:
+            sql: The SQL statement executed.
+            params: The parameters bound to the statement.
+
+        Returns:
+            A canned successful-insert result.
+        """
+        self.calls.append((sql, tuple(params)))
+        return _FakeCursorResult()
+
+    def executescript(self, sql: str) -> None:
+        """No-op; schema setup is bypassed via a mocked init_db.
+
+        Args:
+            sql: Ignored.
+        """
+
+    def commit(self) -> None:
+        """No-op commit."""
+
+    def close(self) -> None:
+        """No-op close."""
+
+
+class TestTryRecordAttemptPostgresAdvisoryLock:
+    """Tests for the PostgreSQL-only advisory-lock branch."""
+
+    def test_postgres_url_issues_advisory_lock_before_insert_on_same_connection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test a PostgreSQL store locks the fingerprint before inserting.
+
+        No real PostgreSQL server is involved: ``get_connection`` and
+        ``init_db`` are mocked so the exact SQL issued by
+        ``try_record_attempt`` can be inspected. A
+        ``pg_advisory_xact_lock`` statement, keyed by the cart
+        fingerprint, must be executed on the SAME connection used for
+        the guarded insert.
+        """
+        connections: list[_RecordingConnection] = []
+
+        def _fake_get_connection(db_path: str) -> _RecordingConnection:
+            conn = _RecordingConnection()
+            connections.append(conn)
+            return conn
+
+        monkeypatch.setattr(order_submissions, "init_db", lambda db_path: None)
+        monkeypatch.setattr(order_submissions, "get_connection", _fake_get_connection)
+
+        store = OrderSubmissionStore("postgresql://example/db")
+        result = store.try_record_attempt(
+            "key-1", "fp-pg", within=timedelta(minutes=30)
+        )
+
+        assert isinstance(result, int)
+        assert len(connections) == 1
+        lock_calls = [
+            call for call in connections[0].calls if "pg_advisory_xact_lock" in call[0]
+        ]
+        assert len(lock_calls) == 1
+        assert "fp-pg" in lock_calls[0][1]
+
+    def test_sqlite_path_does_not_issue_advisory_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test a plain SQLite store never issues a pg_advisory_xact_lock.
+
+        SQLite is single-writer, so the READ-COMMITTED race that the
+        PostgreSQL advisory lock guards against cannot happen there; the
+        lock statement must not be issued for non-PostgreSQL db paths.
+        """
+        connections: list[_RecordingConnection] = []
+
+        def _fake_get_connection(db_path: str) -> _RecordingConnection:
+            conn = _RecordingConnection()
+            connections.append(conn)
+            return conn
+
+        monkeypatch.setattr(order_submissions, "init_db", lambda db_path: None)
+        monkeypatch.setattr(order_submissions, "get_connection", _fake_get_connection)
+
+        store = OrderSubmissionStore("plain-sqlite.db")
+        result = store.try_record_attempt(
+            "key-1", "fp-sqlite", within=timedelta(minutes=30)
+        )
+
+        assert isinstance(result, int)
+        assert all(
+            "pg_advisory_xact_lock" not in call[0]
+            for conn in connections
+            for call in conn.calls
         )

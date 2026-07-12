@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import uuid
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -741,6 +742,101 @@ class TestRunDuplicateGuard:
         assert first.outcome is OrderOutcome.UNKNOWN
         assert second.outcome is OrderOutcome.DUPLICATE
         assert mock_order_cls.return_value.submit_order.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #61 (security-review BLOCKER): the duplicate-order guard must be
+# atomic under real concurrency, not just sequential re-calls.
+#
+# _submit_guarded previously did find_recent_blocking() (SELECT, one
+# connection) then record_attempt() (INSERT, a second connection), so two
+# concurrent submissions of an identical cart could both pass the SELECT
+# and both reach OrderService.submit_order — the double-charge Issue #61
+# exists to prevent. The fix switches _submit_guarded to the atomic
+# OrderSubmissionStore.try_record_attempt (added in
+# tests/test_order_submissions.py). This test does not patch the store —
+# it uses the pipeline's real tmp_path-backed OrderSubmissionStore and
+# races two real threads against it via a threading.Barrier placed
+# directly on try_record_attempt, so the test fails for the right reason
+# (AttributeError: try_record_attempt does not exist yet) until both the
+# store method and the pipeline's switch to it exist.
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitCartDuplicateGuardConcurrency:
+    """Regression test: concurrent submit_cart calls must not double-submit."""
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_concurrent_submit_cart_only_one_reaches_order_service(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Test two concurrent submit_cart calls for the same cart: one wins.
+
+        A ``threading.Barrier`` lines both threads up immediately before
+        the real ``OrderSubmissionStore.try_record_attempt`` call so they
+        race for real against the tmp_path-backed SQLite ledger. Exactly
+        one thread may proceed to ``OrderService.submit_order``; the
+        other must get back a DUPLICATE outcome.
+        """
+        from grocery_butler.order_service import OrderOutcome
+
+        mock_client_cls.return_value.is_authenticated = True
+        mock_order_cls.return_value.submit_order.return_value = OrderResult(
+            success=True, outcome=OrderOutcome.SUCCESS
+        )
+
+        pipeline = SafewayPipeline(safeway_config, str(tmp_path / "race.db"))
+
+        barrier = threading.Barrier(2)
+        order_submissions_store = pipeline._order_submissions
+        real_try_record_attempt = order_submissions_store.try_record_attempt
+
+        def _guarded_try_record_attempt(*args: object, **kwargs: object) -> object:
+            barrier.wait()
+            return real_try_record_attempt(*args, **kwargs)
+
+        monkeypatch.setattr(
+            order_submissions_store,
+            "try_record_attempt",
+            _guarded_try_record_attempt,
+        )
+
+        results: list[OrderResult | None] = [None, None]
+
+        def _submit(index: int, key: str) -> None:
+            results[index] = pipeline.submit_cart(
+                mock_cart_summary, idempotency_key=key
+            )
+
+        thread_a = threading.Thread(target=_submit, args=(0, "race-key-1"))
+        thread_b = threading.Thread(target=_submit, args=(1, "race-key-2"))
+        thread_a.start()
+        thread_b.start()
+        thread_a.join()
+        thread_b.join()
+
+        assert mock_order_cls.return_value.submit_order.call_count == 1
+        outcomes = [result.outcome for result in results if result is not None]
+        assert outcomes.count(OrderOutcome.DUPLICATE) == 1
 
 
 # ---------------------------------------------------------------------------

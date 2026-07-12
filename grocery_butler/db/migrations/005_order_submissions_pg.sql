@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS order_submissions (
     id SERIAL PRIMARY KEY,
     idempotency_key TEXT NOT NULL,
     cart_fingerprint TEXT NOT NULL,
-    status TEXT NOT NULL,                     -- submitted | confirmed | unknown | failed
+    status TEXT NOT NULL                      -- submitted | confirmed | unknown | failed
+        CHECK (status IN ('submitted', 'confirmed', 'unknown', 'failed')),
     order_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

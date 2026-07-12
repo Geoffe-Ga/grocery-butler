@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import logging
 import tempfile
 import uuid
 from pathlib import Path
@@ -29,6 +30,8 @@ from grocery_butler.db import get_connection, init_db
 if TYPE_CHECKING:
     from grocery_butler.db.adapter import DatabaseConnection, DictRow
     from grocery_butler.models import CartSummary
+
+logger = logging.getLogger(__name__)
 
 #: Statuses that block a resubmission of the same cart fingerprint. A
 #: 'failed' submission is definitive (Safeway rejected it outright) and
@@ -92,7 +95,10 @@ def _resolve_db_path(db_path: str) -> str:
     as a throwaway placeholder in tests (production always supplies a
     real file path or PostgreSQL URL), so each such store instead gets
     its own private on-disk SQLite file, keeping unrelated pipeline
-    instances' ledgers isolated.
+    instances' ledgers isolated. A warning is logged when this fallback
+    is taken, since it means the duplicate-order ledger — the guard
+    against double-charging a real payment method — is being redirected
+    to a throwaway temp file rather than a durable, shared path.
 
     Args:
         db_path: The path or URL passed to the constructor.
@@ -103,8 +109,34 @@ def _resolve_db_path(db_path: str) -> str:
     """
     if db_path != ":memory:":
         return db_path
+    logger.warning(
+        "OrderSubmissionStore(':memory:') is redirecting the "
+        "duplicate-order ledger to a throwaway temp file; production "
+        "must supply a real SQLite file path or PostgreSQL URL."
+    )
     unique_name = f"grocery_butler_order_submissions_{uuid.uuid4().hex}.db"
     return str(Path(tempfile.gettempdir()) / unique_name)
+
+
+def _lock_fingerprint(conn: DatabaseConnection, fingerprint: str) -> None:
+    """Take a PostgreSQL advisory lock scoped to a cart fingerprint.
+
+    PostgreSQL's default READ COMMITTED isolation lets two concurrent
+    transactions both evaluate a guarded insert's ``WHERE NOT EXISTS``
+    subquery as true before either commits, so two racing submissions of
+    an identical cart could otherwise both insert a row (Issue #61
+    security review). Taking a ``pg_advisory_xact_lock`` on the
+    fingerprint first, on the same connection, forces the second
+    transaction to wait until the first commits (and its row becomes
+    visible) or rolls back. The lock is transaction-scoped and is
+    released automatically on commit/rollback.
+
+    Args:
+        conn: The connection to issue the lock on. Must be the same
+            connection subsequently used for the guarded insert.
+        fingerprint: The cart fingerprint to lock.
+    """
+    conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (fingerprint,))
 
 
 class OrderSubmissionStore:
@@ -128,6 +160,7 @@ class OrderSubmissionStore:
             db_path: Path to the SQLite database file, or a PostgreSQL URL.
         """
         self._db_path = _resolve_db_path(db_path)
+        self._is_postgres = self._db_path.startswith(("postgresql://", "postgres://"))
         init_db(self._db_path)
 
     def _connect(self) -> DatabaseConnection:
@@ -224,3 +257,74 @@ class OrderSubmissionStore:
         finally:
             conn.close()
         return row
+
+    def try_record_attempt(
+        self,
+        idempotency_key: str,
+        cart_fingerprint: str,
+        within: dt.timedelta,
+    ) -> int | None:
+        """Atomically record an attempt if no recent one blocks it.
+
+        This is the race-safe variant of the duplicate-order guard that
+        :class:`~grocery_butler.safeway_pipeline.SafewayPipeline` must
+        use (Issue #61 security review): the previous
+        :meth:`find_recent_blocking` + :meth:`record_attempt` pair ran
+        as a SELECT then an INSERT on two separate connections, so two
+        concurrent submissions of an identical cart could both pass the
+        SELECT and both reach ``OrderService.submit_order`` — the exact
+        double-charge this guard exists to prevent. This method instead
+        performs a single guarded ``INSERT ... SELECT ... WHERE NOT
+        EXISTS (...)`` on one connection, so only one of two racing
+        attempts for the same fingerprint can insert a row.
+
+        For a PostgreSQL-backed store, a ``pg_advisory_xact_lock`` on
+        the cart fingerprint is taken first, on that same connection
+        (see :func:`_lock_fingerprint`): PostgreSQL's default READ
+        COMMITTED isolation can otherwise let two concurrent
+        transactions both evaluate the guarded insert's subquery as
+        true before either commits. SQLite is single-writer, so no such
+        lock is needed there.
+
+        Args:
+            idempotency_key: The client order id used for this attempt.
+            cart_fingerprint: Fingerprint of the cart being submitted.
+            within: How far back to look for a blocking submission.
+
+        Returns:
+            The new row's integer id if the insert succeeded, or None
+            if a recent blocking submission already exists for this
+            fingerprint.
+        """
+        created_at = dt.datetime.now(dt.UTC).isoformat()
+        cutoff = (dt.datetime.now(dt.UTC) - within).isoformat()
+        conn = self._connect()
+        try:
+            if self._is_postgres:
+                _lock_fingerprint(conn, cart_fingerprint)
+            result = conn.execute(
+                "INSERT INTO order_submissions "
+                "(idempotency_key, cart_fingerprint, status, created_at) "
+                "SELECT ?, ?, 'submitted', ? "
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM order_submissions "
+                "WHERE cart_fingerprint = ? AND status IN (?, ?, ?) "
+                "AND created_at >= ?"
+                ")",
+                (
+                    idempotency_key,
+                    cart_fingerprint,
+                    created_at,
+                    cart_fingerprint,
+                    *_BLOCKING_STATUSES,
+                    cutoff,
+                ),
+            )
+            submission_id = result.lastrowid
+            rowcount = result.rowcount
+            conn.commit()
+        finally:
+            conn.close()
+        if rowcount == 0 or submission_id is None:
+            return None
+        return int(submission_id)

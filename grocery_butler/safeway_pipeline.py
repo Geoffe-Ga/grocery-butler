@@ -238,10 +238,13 @@ class SafewayPipeline:
         An empty cart bypasses the guard entirely and goes straight to
         :class:`~grocery_butler.order_service.OrderService` (which
         rejects it with its existing "cart is empty" error). Otherwise,
-        a recent submission of an identical cart (by content, not price)
-        blocks this attempt outright; else the attempt is recorded in
-        the ledger *before* the outbound Safeway call (fail-closed) and
-        finalized once the result is known.
+        the attempt is atomically recorded in the ledger — or rejected
+        as a duplicate — via a single call to
+        ``OrderSubmissionStore.try_record_attempt`` (fail-closed, and
+        race-safe: a security review found the prior
+        ``find_recent_blocking`` + ``record_attempt`` pair vulnerable
+        to a check-then-insert race that let two concurrent
+        submissions of an identical cart both reach Safeway).
 
         Args:
             cart: Cart summary to submit.
@@ -254,15 +257,16 @@ class SafewayPipeline:
             return self._order_service.submit_order(cart)
 
         fingerprint = cart_fingerprint(cart)
-        if self._order_submissions.find_recent_blocking(fingerprint, DUPLICATE_WINDOW):
+        key = idempotency_key or str(uuid.uuid4())
+        submission_id = self._order_submissions.try_record_attempt(
+            key, fingerprint, DUPLICATE_WINDOW
+        )
+        if submission_id is None:
             return OrderResult(
                 success=False,
                 outcome=OrderOutcome.DUPLICATE,
                 error_message=_DUPLICATE_ERROR_MESSAGE,
             )
-
-        key = idempotency_key or str(uuid.uuid4())
-        submission_id = self._order_submissions.record_attempt(key, fingerprint)
 
         # Always forward the exact key recorded in the ledger so the
         # clientOrderId sent to Safeway and our ledger row correlate,
