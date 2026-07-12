@@ -468,17 +468,24 @@ class RecipeStore:
     def set_preference(self, key: str, value: str) -> None:
         """Set a preference (upsert).
 
+        Emits an explicit ``RETURNING key`` clause so the PostgreSQL
+        adapter's ``_inject_returning`` does not blindly append
+        ``RETURNING id``; the ``preferences`` table has no ``id`` column,
+        so that injection would raise ``UndefinedColumn`` on Postgres.
+
         Args:
             key: Preference key.
             value: Preference value.
         """
         conn = self._connect()
         try:
-            conn.execute(
+            result = conn.execute(
                 "INSERT INTO preferences (key, value) VALUES (?, ?)"
-                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+                " RETURNING key",
                 (key, value),
             )
+            result.fetchall()  # drain RETURNING so commit sees no open cursor
             conn.commit()
         finally:
             conn.close()
