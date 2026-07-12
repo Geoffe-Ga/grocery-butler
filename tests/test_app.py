@@ -20,6 +20,7 @@ from grocery_butler.models import (
     InventoryItem,
     InventoryStatus,
     ParsedMeal,
+    ShoppingListItem,
 )
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
@@ -1011,81 +1012,140 @@ class TestShoppingListPage:
         assert b"meals" in response.data
 
     def test_shopping_list_has_disabled_order_button_when_items(
-        self, client: FlaskClient
+        self, client: FlaskClient, db_path: str
     ) -> None:
-        """Test shopping list shows disabled order button when items exist."""
-        with client.session_transaction() as sess:
-            sess["shopping_list_items"] = [
-                {
-                    "ingredient": "pasta",
-                    "quantity": 1.0,
-                    "unit": "lb",
-                    "category": "pantry_dry",
-                    "from_meals": ["Test"],
-                }
+        """Test shopping list shows disabled order button when items exist.
+
+        Issue #65: items are now persisted via ShoppingListStore instead of
+        the session cookie, so the page must render them from the DB.
+        """
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        ShoppingListStore(db_path).save_list(
+            [
+                ShoppingListItem(
+                    ingredient="pasta",
+                    quantity=1.0,
+                    unit="lb",
+                    category=IngredientCategory.PANTRY_DRY,
+                    search_term="pasta",
+                    from_meals=["Test"],
+                )
             ]
+        )
         response = client.get("/shopping-list")
         html = response.data.decode()
         assert "Order from Safeway" in html
         assert "Coming Soon" in html
 
-    def test_shopping_list_shows_items_from_session(self, client: FlaskClient) -> None:
-        """Test shopping list renders items from session."""
-        with client.session_transaction() as sess:
-            sess["shopping_list_items"] = [
-                {
-                    "ingredient": "chicken",
-                    "quantity": 2.0,
-                    "unit": "lbs",
-                    "category": "meat",
-                    "from_meals": ["Stir Fry"],
-                }
+    def test_shopping_list_shows_items_from_store(
+        self, client: FlaskClient, db_path: str
+    ) -> None:
+        """Test shopping list renders items persisted via ShoppingListStore.
+
+        Issue #65: previously read from the session; must now read from
+        the DB-backed store so the list is visible across browsers.
+        """
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        ShoppingListStore(db_path).save_list(
+            [
+                ShoppingListItem(
+                    ingredient="chicken",
+                    quantity=2.0,
+                    unit="lbs",
+                    category=IngredientCategory.MEAT,
+                    search_term="chicken",
+                    from_meals=["Stir Fry"],
+                )
             ]
+        )
         response = client.get("/shopping-list")
         assert b"chicken" in response.data
 
-    def test_shopping_list_groups_by_category(self, client: FlaskClient) -> None:
+    def test_shopping_list_groups_by_category(
+        self, client: FlaskClient, db_path: str
+    ) -> None:
         """Test shopping list groups items by category."""
-        with client.session_transaction() as sess:
-            sess["shopping_list_items"] = [
-                {
-                    "ingredient": "chicken",
-                    "quantity": 2.0,
-                    "unit": "lbs",
-                    "category": "meat",
-                    "from_meals": ["Stir Fry"],
-                },
-                {
-                    "ingredient": "broccoli",
-                    "quantity": 1.0,
-                    "unit": "head",
-                    "category": "produce",
-                    "from_meals": ["Stir Fry"],
-                },
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        ShoppingListStore(db_path).save_list(
+            [
+                ShoppingListItem(
+                    ingredient="chicken",
+                    quantity=2.0,
+                    unit="lbs",
+                    category=IngredientCategory.MEAT,
+                    search_term="chicken",
+                    from_meals=["Stir Fry"],
+                ),
+                ShoppingListItem(
+                    ingredient="broccoli",
+                    quantity=1.0,
+                    unit="head",
+                    category=IngredientCategory.PRODUCE,
+                    search_term="broccoli",
+                    from_meals=["Stir Fry"],
+                ),
             ]
+        )
         response = client.get("/shopping-list")
         html = response.data.decode()
         assert "meat" in html
         assert "produce" in html
 
     def test_shopping_list_restock_items_distinguished(
-        self, client: FlaskClient
+        self, client: FlaskClient, db_path: str
     ) -> None:
         """Test restock items are visually distinguished."""
-        with client.session_transaction() as sess:
-            sess["shopping_list_items"] = [
-                {
-                    "ingredient": "milk",
-                    "quantity": 1.0,
-                    "unit": "gallon",
-                    "category": "dairy",
-                    "from_meals": ["restock"],
-                }
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        ShoppingListStore(db_path).save_list(
+            [
+                ShoppingListItem(
+                    ingredient="milk",
+                    quantity=1.0,
+                    unit="gallon",
+                    category=IngredientCategory.DAIRY,
+                    search_term="milk",
+                    from_meals=["restock"],
+                )
             ]
+        )
         response = client.get("/shopping-list")
         html = response.data.decode()
         assert "restock" in html
         assert "shopping-item-restock" in html
+
+    def test_shopping_list_renders_large_persisted_list_completely(
+        self, app: Flask, db_path: str
+    ) -> None:
+        """Test the page renders every item of a 40+ item persisted list.
+
+        Issue #65: a list this size (well past the ~4KB cookie cap) would
+        silently truncate under the old session-based storage. Persisting
+        through ShoppingListStore must render every item regardless of
+        list size.
+        """
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        items = [
+            ShoppingListItem(
+                ingredient=f"ingredient-{i}",
+                quantity=1.0,
+                unit="each",
+                category=IngredientCategory.OTHER,
+                search_term=f"ingredient-{i}",
+                from_meals=["Big Meal"],
+            )
+            for i in range(45)
+        ]
+        ShoppingListStore(db_path).save_list(items)
+
+        response = app.test_client().get("/shopping-list")
+        html = response.data.decode()
+        for i in range(45):
+            assert f"ingredient-{i}" in html
 
 
 # ---------------------------------------------------------------------------
@@ -1133,18 +1193,48 @@ class TestShoppingListGenerate:
         )
         assert b"Generated shopping list from 2 meal(s)" in response.data
 
-    def test_generate_stores_items_in_session(self, client: FlaskClient) -> None:
-        """Test POST stores shopping list in session."""
+    def test_generate_persists_items_to_store(
+        self,
+        client: FlaskClient,
+        recipe_store: RecipeStore,
+        sample_meal: ParsedMeal,
+        db_path: str,
+    ) -> None:
+        """Test POST persists the generated list via ShoppingListStore.
+
+        Issue #65: the list must be readable back from persistent (DB)
+        storage rather than living only in the requesting browser's
+        session cookie.
+        """
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        recipe_store.save_recipe(sample_meal)
+        client.post(
+            "/shopping-list/generate",
+            data={"meals": "Test Pasta"},
+            follow_redirects=True,
+        )
+
+        items = ShoppingListStore(db_path).get_latest_list()
+        assert any(item.ingredient == "pasta" for item in items)
+
+    def test_generate_does_not_store_items_in_session_cookie(
+        self, client: FlaskClient
+    ) -> None:
+        """Test POST no longer writes the generated list into the session.
+
+        Issue #65 (HIGH): storing the list in the Flask session cookie
+        caps it at ~4KB, silently truncating large lists. The list must
+        be persisted server-side instead, and any stale session key must
+        be cleared so old cookies shrink back down.
+        """
         client.post(
             "/shopping-list/generate",
             data={"meals": "Some Meal"},
             follow_redirects=True,
         )
-        # Verify session has items by getting the page
-        response = client.get("/shopping-list")
-        # The page should not show empty state since we generated a list
-        # (even if stub meals, the restock items from seeded data may appear)
-        assert response.status_code == 200
+        with client.session_transaction() as sess:
+            assert "shopping_list_items" not in sess
 
     def test_generate_with_known_recipe(
         self, client: FlaskClient, recipe_store: RecipeStore, sample_meal: ParsedMeal
@@ -1158,6 +1248,48 @@ class TestShoppingListGenerate:
         )
         assert response.status_code == 200
         assert b"Generated shopping list" in response.data
+
+
+# ---------------------------------------------------------------------------
+# TestShoppingListCrossSession
+# ---------------------------------------------------------------------------
+
+
+class TestShoppingListCrossSession:
+    """Tests for cross-browser visibility of the generated shopping list.
+
+    Issue #65 (HIGH): the shopping list was stored in the per-browser
+    session cookie, so it was invisible to other household members and
+    silently truncated once it exceeded the ~4KB cookie cap. These tests
+    reproduce the visibility half of the bug; size-independence is
+    covered by
+    ``TestShoppingListPage.test_shopping_list_renders_large_persisted_list_completely``.
+    """
+
+    def test_list_visible_from_independent_browser_session(
+        self,
+        app: Flask,
+        client: FlaskClient,
+        recipe_store: RecipeStore,
+        sample_meal: ParsedMeal,
+    ) -> None:
+        """Test a list generated by one client is visible from a fresh client.
+
+        ``client`` generates the list; a brand new ``app.test_client()``
+        (its own independent cookie jar, simulating a different household
+        member's browser) must see the same generated items.
+        """
+        recipe_store.save_recipe(sample_meal)
+        client.post(
+            "/shopping-list/generate",
+            data={"meals": "Test Pasta"},
+            follow_redirects=True,
+        )
+
+        fresh_client = app.test_client()
+        response = fresh_client.get("/shopping-list")
+
+        assert b"pasta" in response.data
 
 
 # ---------------------------------------------------------------------------
