@@ -9,17 +9,18 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from flask import Flask, flash, g, jsonify, redirect, render_template, request, url_for
 
+from grocery_butler.claude_utils import make_anthropic_client
 from grocery_butler.db.adapter import IntegrityError
 
 if TYPE_CHECKING:
     from werkzeug.wrappers import Response
 
     from grocery_butler.db.adapter import DatabaseConnection
-    from grocery_butler.models import Ingredient
+    from grocery_butler.models import Ingredient, ParsedMeal
 
 from grocery_butler.db import get_connection, init_db
 from grocery_butler.models import (
@@ -124,6 +125,25 @@ def _warn_if_no_anthropic_key() -> None:
             "ANTHROPIC_API_KEY is not set; Claude-backed meal parsing will "
             "degrade to stub/saved-recipe paths until it is configured."
         )
+
+
+def _web_anthropic_client() -> Any | None:
+    """Return an Anthropic client from the environment, or None.
+
+    Mirrors ``grocery_butler.api._anthropic_client`` for the HTML web
+    app: without a configured key the Claude-backed meal parsing and
+    consolidation pipelines fall back to their pure-Python paths (stub
+    meals, saved recipes, simple dedup consolidation) instead of
+    raising, so the dashboard keeps working offline (Issue #66).
+
+    Returns:
+        An Anthropic SDK client instance, or None when
+        ``ANTHROPIC_API_KEY`` is unset or empty.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None
+    return make_anthropic_client(api_key)
 
 
 def _resolve_database_target(db_path: str | None) -> str:
@@ -751,6 +771,68 @@ def _parse_ingredient_form_rows() -> list[Ingredient]:
     return ingredients
 
 
+def _classify_parsed_meals(
+    parsed_meals: list[ParsedMeal],
+) -> tuple[list[ParsedMeal], list[str]]:
+    """Split parsed meals into resolved meals and unresolved stub names.
+
+    A meal is an unresolved stub iff it is flagged ``needs_confirmation``
+    and is neither a known recipe nor carries any purchase or pantry
+    items -- i.e. the parser (or its Claude-backed decomposition) could
+    not produce anything usable for it. Any other meal counts as
+    resolved, even if it also happens to have ``needs_confirmation`` set
+    (Issue #66).
+
+    Args:
+        parsed_meals: Meals returned by ``MealParser.parse_meals``.
+
+    Returns:
+        Tuple of (resolved meals, names of unresolved meals).
+    """
+    resolved: list[ParsedMeal] = []
+    unresolved_names: list[str] = []
+    for meal in parsed_meals:
+        is_stub = (
+            meal.needs_confirmation
+            and not meal.known_recipe
+            and not meal.purchase_items
+            and not meal.pantry_items
+        )
+        if is_stub:
+            unresolved_names.append(meal.name)
+        else:
+            resolved.append(meal)
+    return resolved, unresolved_names
+
+
+def _flash_generation_result(
+    resolved_count: int,
+    unresolved_names: list[str],
+) -> None:
+    """Flash honest feedback about a shopping list generation attempt.
+
+    Flashes a success message only when at least one meal actually
+    resolved, and a warning naming every unresolved meal when any exist.
+    Both flashes can fire together for a partial success, so the user
+    always knows exactly what worked and what still needs attention
+    (Issue #66).
+
+    Args:
+        resolved_count: Number of meals that resolved to real
+            ingredients.
+        unresolved_names: Names of meals that could not be resolved.
+    """
+    if resolved_count > 0:
+        flash(f"Generated shopping list from {resolved_count} meal(s).", "success")
+    if unresolved_names:
+        flash(
+            "Couldn't recognize: "
+            + ", ".join(unresolved_names)
+            + ". Add each under Recipes first, then regenerate.",
+            "warning",
+        )
+
+
 def _register_shopping_list_routes(app: Flask) -> None:
     """Register shopping list page routes.
 
@@ -793,8 +875,12 @@ def _register_shopping_list_routes(app: Flask) -> None:
     def shopping_list_generate() -> Response:
         """Generate a shopping list from meal names.
 
-        Reads meal names from form input, runs the consolidation
-        pipeline, and stores results in the session.
+        Reads meal names from form input, parses and consolidates them
+        via Claude when ``ANTHROPIC_API_KEY`` is configured (falling
+        back to stub/simple-dedup paths otherwise), and stores results
+        in the session. Flashes success only for meals that actually
+        resolved and a warning naming any that didn't, instead of
+        unconditionally claiming success (Issue #66).
 
         Returns:
             Redirect to the shopping list page.
@@ -820,13 +906,14 @@ def _register_shopping_list_routes(app: Flask) -> None:
         from grocery_butler.consolidator import Consolidator
         from grocery_butler.meal_parser import MealParser
 
-        parser = MealParser(recipe_store)
+        client = _web_anthropic_client()
+        parser = MealParser(recipe_store, client)
         parsed_meals = parser.parse_meals(meal_names)
 
-        consolidator = Consolidator()
+        consolidator = Consolidator(anthropic_client=client)
         pantry_staples = recipe_store.get_pantry_staple_names()
         restock_queue = pantry_mgr.get_restock_queue()
-        shopping_items = consolidator.consolidate_simple(
+        shopping_items = consolidator.consolidate(
             parsed_meals, restock_queue, pantry_staples
         )
 
@@ -841,7 +928,8 @@ def _register_shopping_list_routes(app: Flask) -> None:
             for item in shopping_items
         ]
 
-        flash(f"Generated shopping list from {len(meal_names)} meal(s).", "success")
+        resolved, unresolved_names = _classify_parsed_meals(parsed_meals)
+        _flash_generation_result(len(resolved), unresolved_names)
         return redirect(url_for("shopping_list"))
 
 
