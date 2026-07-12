@@ -88,6 +88,12 @@ def e2e_env(monkeypatch: pytest.MonkeyPatch, db_path: str) -> None:
     monkeypatch.setenv("SAFEWAY_PASSWORD", "e2e-safeway-pass")
     monkeypatch.setenv("SAFEWAY_STORE_ID", "e2e-store-1")
     monkeypatch.setenv("DATABASE_PATH", db_path)
+    # Issue #60: order submission is opted in for this suite's full-chain
+    # tests, which exercise real submission against the mocked transport.
+    # The production default (env var unset) is False -- see
+    # test_api_chain.py::test_disabled_submission_returns_501_default_off
+    # for coverage of the fail-safe default itself.
+    monkeypatch.setenv("SAFEWAY_ORDER_SUBMISSION_ENABLED", "true")
 
 
 @pytest.fixture()

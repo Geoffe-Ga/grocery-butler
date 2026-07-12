@@ -10,7 +10,11 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from grocery_butler.cart_builder import CartBuilder
-from grocery_butler.order_service import OrderResult, OrderService
+from grocery_butler.order_service import (
+    ORDER_SUBMISSION_DISABLED_MESSAGE,
+    OrderResult,
+    OrderService,
+)
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.product_search import ProductSearchService
 from grocery_butler.product_selector import ProductSelector
@@ -27,6 +31,17 @@ logger = logging.getLogger(__name__)
 
 class SafewayPipelineError(Exception):
     """Raised when the pipeline encounters an unrecoverable error."""
+
+
+class OrderSubmissionDisabledError(SafewayPipelineError):
+    """Raised when order submission is attempted while descoped (Issue #60).
+
+    Real order submission is disabled by default because the Safeway
+    checkout API surface is unverified. This is raised as the first
+    action of :meth:`SafewayPipeline.run` and
+    :meth:`SafewayPipeline.submit_cart` when the gate is off, before any
+    authentication or cart-building I/O occurs.
+    """
 
 
 class SafewayPipeline:
@@ -84,8 +99,27 @@ class SafewayPipeline:
             search_service, selector, substitution, self._client
         )
 
+        # Issue #60: fail-safe order-submission gate. Defense in depth —
+        # OrderService also defaults to disabled, and this pipeline
+        # additionally short-circuits run()/submit_cart() before any I/O.
+        self._submission_enabled = config.safeway_order_submission_enabled
+
         pantry_manager = PantryManager(db_path, anthropic_client)
-        self._order_service = OrderService(self._client, pantry_manager)
+        self._order_service = OrderService(
+            self._client,
+            pantry_manager,
+            submission_enabled=self._submission_enabled,
+        )
+
+    @property
+    def order_submission_enabled(self) -> bool:
+        """Whether real order submission is enabled (Issue #60 gate).
+
+        Returns:
+            True if ``SAFEWAY_ORDER_SUBMISSION_ENABLED`` was set truthy
+            when this pipeline's config was loaded, False otherwise.
+        """
+        return self._submission_enabled
 
     def run(
         self,
@@ -102,8 +136,13 @@ class SafewayPipeline:
             OrderResult with confirmation or error details.
 
         Raises:
+            OrderSubmissionDisabledError: If order submission is disabled
+                (Issue #60). Raised before authentication or cart
+                building.
             SafewayPipelineError: If authentication fails.
         """
+        if not self._submission_enabled:
+            raise OrderSubmissionDisabledError(ORDER_SUBMISSION_DISABLED_MESSAGE)
         self._authenticate()
         cart = self._cart_builder.build_cart(items, restock_items)
         return self._order_service.submit_order(cart)
@@ -141,8 +180,12 @@ class SafewayPipeline:
             OrderResult with confirmation or error details.
 
         Raises:
+            OrderSubmissionDisabledError: If order submission is disabled
+                (Issue #60). Raised before authentication.
             SafewayPipelineError: If authentication fails.
         """
+        if not self._submission_enabled:
+            raise OrderSubmissionDisabledError(ORDER_SUBMISSION_DISABLED_MESSAGE)
         self._authenticate()
         return self._order_service.submit_order(cart)
 

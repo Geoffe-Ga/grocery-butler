@@ -35,6 +35,7 @@ from grocery_butler.models import (
     PendingActionStatus,
     ShoppingListItem,
 )
+from grocery_butler.order_service import ORDER_SUBMISSION_DISABLED_MESSAGE
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.pending_actions import PendingActionsStore
 from grocery_butler.recipe_store import RecipeStore
@@ -560,6 +561,12 @@ def _confirm_order_submit(
         # Not claimed yet: the action stays pending so it can be retried
         # (until it expires) once configuration is fixed.
         return jsonify(error=f"safeway pipeline unavailable: {exc}"), 503
+    if not pipeline.order_submission_enabled:
+        # Issue #60: order submission is descoped for v1.0. Not claimed —
+        # the action stays pending so it can be retried once the flag is
+        # flipped on after live verification.
+        pipeline.close()
+        return jsonify(error=ORDER_SUBMISSION_DISABLED_MESSAGE), 501
     _claim_pending(store, action.action_id)
     try:
         result = pipeline.submit_cart(cart)

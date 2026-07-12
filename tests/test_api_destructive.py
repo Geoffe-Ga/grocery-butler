@@ -552,6 +552,42 @@ class TestActionsConfirm:
         assert action is not None
         assert action.status is PendingActionStatus.PENDING
 
+    def test_disabled_submission_returns_501_and_keeps_action_pending(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pending_store: PendingActionsStore,
+    ) -> None:
+        """Issue #60: a disabled pipeline returns 501 and leaves the row pending.
+
+        The pending action must remain retriable (not claimed) so that
+        flipping ``SAFEWAY_ORDER_SUBMISSION_ENABLED`` on later lets the
+        same confirm request succeed.
+        """
+        from grocery_butler.order_service import ORDER_SUBMISSION_DISABLED_MESSAGE
+
+        action_id = _stage_via_api(
+            client, auth_headers, "/api/v1/order/submit", _order_body()
+        )
+        pipeline = MagicMock()
+        pipeline.order_submission_enabled = False
+        pipeline.submit_cart.return_value = _successful_order_result()
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 501
+        assert response.get_json()["error"] == ORDER_SUBMISSION_DISABLED_MESSAGE
+        pipeline.submit_cart.assert_not_called()
+        pipeline.close.assert_called_once()
+
+        action = pending_store.get_pending_action(action_id)
+        assert action is not None
+        assert action.status is PendingActionStatus.PENDING
+
     def test_double_confirm_returns_409(
         self,
         client: FlaskClient,

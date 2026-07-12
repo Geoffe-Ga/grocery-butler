@@ -165,6 +165,51 @@ invoked ad-hoc as a single-shot process (no daemon).
 4. **The Safeway integration is optional.** Removing it leaves a fully usable
    meal-planning + inventory tracking system.
 
+### Safeway Order Submission Status (v1.0)
+
+The Safeway integration's **checkout API surface is unverified** against the
+live Safeway/Albertsons API (Issue #60). Concretely: the Okta auth flow uses
+an `aus`-prefixed `OKTA_CLIENT_ID`, which looks like an authorization-server
+id rather than a client id, and `/abs/pub/web/orders` has no modeled payment
+method or delivery/pickup slot reservation. No real order has ever been
+confirmed to go through this client.
+
+For v1.0, real order submission is **disabled by default** and fails safe:
+
+- **Building and reviewing a cart still works** end-to-end —
+  `SafewayPipeline.build_cart_only` (Python API), CLI
+  `order review`/`order submit --dry-run`, `/order review` (Discord), and
+  the RubotPaul `/order/preview` endpoint all function normally.
+- **Submitting an order does not.** `OrderService.submit_order`,
+  `SafewayPipeline.submit_cart`/`run()`, CLI `order submit`, `/order submit`
+  (Discord), and the RubotPaul `/order/submit` → `/actions/confirm` flow all
+  return a failed result, raise, or respond `501`, with an actionable
+  message pointing at manual checkout — instead of silently pretending to
+  place an order.
+- **Checkout for v1.0 is manual**: build and review the cart in-app, then
+  complete the purchase yourself on safeway.com or in the Safeway app.
+
+Set `SAFEWAY_ORDER_SUBMISSION_ENABLED=true` (see `.env.example`) to lift the
+guard once the checklist below is complete. **Do not enable it in
+production before that.**
+
+**Human verification checklist** (gates enabling the flag — see Issue #60):
+
+- [ ] Verify the Okta `authn`/`authorize` flow against real credentials. The
+      `aus`-prefixed `OKTA_CLIENT_ID` is likely an authorization-server id,
+      not a `0oa` client id — capture the real value from web-app network
+      traffic.
+- [ ] Verify each endpoint against the live API —
+      `/api/v2/grocerystore/search`,
+      `/abs/pub/web/stores/{id}/fulfillment`, `/abs/pub/web/orders` — and
+      check in recorded request/response fixtures for tests.
+- [ ] Model the checkout requirements this client currently omits (payment
+      method selection, delivery/pickup slot reservation, address/contact),
+      or make an explicit decision to keep the descope.
+- [ ] Record one successful end-to-end order against a real account (see
+      the manual verification checklist in #32 and the automated test plan
+      in #31).
+
 ## Code Choices
 
 Each technology choice is deliberate. The shared theme: **boring, well-typed,
@@ -224,8 +269,12 @@ and easy to operate alone.**
 ### HTTP
 
 - **httpx** for the Safeway client — async-capable and gives precise control
-  over cookies, headers, and timeouts. Required because Safeway's web API is
-  cookie-session-based and not officially documented.
+  over headers, timeouts, and bearer-token auth. Safeway's web API is not
+  officially documented; the client authenticates via an Okta-issued bearer
+  token (no cookie session). The full auth flow and every endpoint are
+  **unverified** against the live Safeway/Albertsons API — see
+  [Safeway Order Submission Status (v1.0)](#safeway-order-submission-status-v10)
+  and Issue #60.
 
 ### Quality tooling
 
