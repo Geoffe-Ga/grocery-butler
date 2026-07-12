@@ -325,10 +325,11 @@ $EDITOR .env
 
 | Variable | When required | Purpose |
 |----------|---------------|---------|
-| `ANTHROPIC_API_KEY` | Always | Claude API access for parsing and consolidation. |
-| `RUBOTPAUL_SHARED_SECRET` | RubotPaul API | HMAC secret for `/api/v1` bearer tokens (shared with RubotPaul). |
+| `ANTHROPIC_API_KEY` | Always | Claude API access for parsing and consolidation. Missing key logs a startup warning and degrades to stub/saved-recipe paths rather than blocking boot. |
+| `APP_ENV` | Set by the Docker image | Set to `production` in the runtime image; arms fail-fast startup checks for `FLASK_SECRET_KEY` and `RUBOTPAUL_SHARED_SECRET` (see [Fail-fast startup checks](#fail-fast-startup-checks), issue #64). Leave unset for local dev. |
+| `RUBOTPAUL_SHARED_SECRET` | RubotPaul API | HMAC secret for `/api/v1` bearer tokens (shared with RubotPaul). Required at boot when `APP_ENV=production`; otherwise only enforced per-request (401). |
 | `DISCORD_BOT_TOKEN` | Local bot runs only | Authenticates the (retired-from-production) Discord bot. |
-| `FLASK_SECRET_KEY` | Web (production) | Stable session signing key. |
+| `FLASK_SECRET_KEY` | Web (production) | Stable session signing key. Required at boot when `APP_ENV=production`; in dev, an unset key falls back to a random per-process key (see [Fail-fast startup checks](#fail-fast-startup-checks)). |
 | `DATABASE_PATH` | SQLite (dev) | Path to the local SQLite file. Defaults to `mealbot.db`. |
 | `DATABASE_URL` | Postgres (prod) | Connection URL injected by Railway Postgres. |
 | `SAFEWAY_USERNAME` | Ordering only | Safeway account email. |
@@ -347,7 +348,13 @@ gunicorn 'grocery_butler.app:create_app()' --bind 0.0.0.0:5000
 FLASK_APP='grocery_butler.app:create_app()' flask run --debug
 ```
 
-Open <http://localhost:5000>.
+Open <http://localhost:5000>. `APP_ENV` is unset here, so a missing
+`FLASK_SECRET_KEY` doesn't block boot: the app falls back to a random
+per-process key and logs a warning. That's fine for a single local
+`flask run`/gunicorn worker, but sessions won't survive a restart or be
+shared across multiple workers — see
+[Fail-fast startup checks](#fail-fast-startup-checks) for the production
+behavior.
 
 ### Discord bot (local only — retired from production)
 
@@ -780,7 +787,9 @@ process to deploy alongside the web service.
 
 ### Required environment variables
 
-Set these in your Railway project settings:
+Set these in your Railway project settings. `APP_ENV=production` is baked
+into the `Dockerfile` and doesn't need to be set separately — it's what
+arms the fail-fast checks below.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -887,6 +896,21 @@ require tailnet access, so a limiter would add a dependency without closing
 a live gap — and a naive in-memory limiter is ineffective across
 per-gunicorn-worker processes without a shared store (no Redis is
 provisioned). Revisit if multi-tenant tailnet access is ever introduced.
+
+### Fail-fast startup checks
+
+The Docker image sets `APP_ENV=production` (see the `Dockerfile`), which
+arms startup checks in `create_app()` (issue #64):
+
+- Missing or empty `FLASK_SECRET_KEY` or `RUBOTPAUL_SHARED_SECRET` raises
+  `RuntimeError` and the process refuses to boot — a misconfigured deploy
+  crashes immediately instead of serving requests that later 401/500 or
+  silently generate an unstable session key.
+- Missing `ANTHROPIC_API_KEY` never blocks boot (in any mode); it logs a
+  startup warning since Claude-backed meal parsing degrades to
+  stub/saved-recipe paths without it.
+
+See `.env.example` for the full variable list and comments.
 
 ### Quick start
 

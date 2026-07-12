@@ -25,6 +25,9 @@ RUN chown -R butler:butler /app
 
 USER butler
 
+# Issue #64: arms create_app()'s production fail-fast startup checks
+# (missing FLASK_SECRET_KEY / RUBOTPAUL_SHARED_SECRET refuse to boot).
+ENV APP_ENV=production
 ENV PORT=8000
 EXPOSE $PORT
 
