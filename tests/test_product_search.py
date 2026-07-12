@@ -509,94 +509,226 @@ class TestCacheOperations:
         assert cached is not None
         assert cached.times_selected == 2
 
+    # ------------------------------------------------------------------
+    # Regression guards for issue #71: cached rows must persist the real
+    # product size and stock status instead of being rehydrated with a
+    # hardcoded size="" and a default in_stock=True. Those defaults used
+    # to pin quantity calculations to 1 (unparseable_size) and prevented
+    # the substitution flow from ever triggering for cached items.
+    # ------------------------------------------------------------------
 
-# ------------------------------------------------------------------
-# Tests: search_or_cached
-# ------------------------------------------------------------------
+    def test_save_persists_size(self, db_path: str) -> None:
+        """Test save_mapping persists the product's real size."""
+        service = self._make_service(db_path)
+        product = SafewayProduct(
+            product_id="UPC010", name="Whole Milk", price=4.99, size="1 gal"
+        )
 
+        service.save_mapping("whole milk", product)
+        cached = service.get_cached_mapping("whole milk")
 
-class TestSearchOrCached:
-    """Tests for ProductSearchService.search_or_cached."""
+        assert cached is not None
+        assert cached.product.size == "1 gal"
 
-    @patch("grocery_butler.safeway_client.time.sleep")
-    def test_returns_pinned_without_search(
-        self, mock_sleep: object, db_path: str
+    def test_save_persists_stock(self, db_path: str) -> None:
+        """Test save_mapping persists an out-of-stock product's flag."""
+        service = self._make_service(db_path)
+        product = SafewayProduct(
+            product_id="UPC011",
+            name="Sold Out Milk",
+            price=4.99,
+            size="1 gal",
+            in_stock=False,
+        )
+
+        service.save_mapping("whole milk", product)
+        cached = service.get_cached_mapping("whole milk")
+
+        assert cached is not None
+        assert cached.product.in_stock is False
+
+    def test_pin_persists_size_and_stock(self, db_path: str) -> None:
+        """Test pin_mapping persists size and in_stock like save_mapping."""
+        service = self._make_service(db_path)
+        product = SafewayProduct(
+            product_id="UPC012",
+            name="Pinned Milk",
+            price=5.49,
+            size="2 gal",
+            in_stock=False,
+        )
+
+        service.pin_mapping("whole milk", product)
+        cached = service.get_cached_mapping("whole milk")
+
+        assert cached is not None
+        assert cached.product.size == "2 gal"
+        assert cached.product.in_stock is False
+
+    def test_save_update_path_reflects_latest_size_stock_price(
+        self, db_path: str
     ) -> None:
-        """Test that pinned mappings bypass API search."""
+        """Test saving the same product twice updates size/stock/price.
+
+        The UPDATE branch of save_mapping (same search term + product_id
+        already cached) must refresh size and in_stock alongside price,
+        not just price.
+        """
+        service = self._make_service(db_path)
+        original = SafewayProduct(
+            product_id="UPC013",
+            name="Whole Milk",
+            price=4.99,
+            size="1 gal",
+            in_stock=True,
+        )
+        updated = SafewayProduct(
+            product_id="UPC013",
+            name="Whole Milk",
+            price=5.49,
+            size="0.5 gal",
+            in_stock=False,
+        )
+
+        service.save_mapping("whole milk", original)
+        service.save_mapping("whole milk", updated)
+        cached = service.get_cached_mapping("whole milk")
+
+        assert cached is not None
+        assert cached.product.price == 5.49
+        assert cached.product.size == "0.5 gal"
+        assert cached.product.in_stock is False
+
+    def test_pin_update_path_reflects_latest_size_stock_price(
+        self, db_path: str
+    ) -> None:
+        """Test re-pinning an already-cached product refreshes size/stock/price.
+
+        The UPDATE branch of pin_mapping (same search term + product_id
+        already cached) must refresh size and in_stock alongside price,
+        mirroring the save_mapping update path.
+        """
+        service = self._make_service(db_path)
+        original = SafewayProduct(
+            product_id="UPC014",
+            name="Whole Milk",
+            price=4.99,
+            size="1 gal",
+            in_stock=True,
+        )
+        updated = SafewayProduct(
+            product_id="UPC014",
+            name="Whole Milk",
+            price=5.79,
+            size="0.5 gal",
+            in_stock=False,
+        )
+
+        service.save_mapping("whole milk", original)
+        service.pin_mapping("whole milk", updated)
+        cached = service.get_cached_mapping("whole milk")
+
+        assert cached is not None
+        assert cached.is_pinned is True
+        assert cached.product.price == 5.79
+        assert cached.product.size == "0.5 gal"
+        assert cached.product.in_stock is False
+
+    def test_legacy_row_without_size_stock_columns_rehydrates_defaults(
+        self, db_path: str
+    ) -> None:
+        """Test rows lacking real size/stock data rehydrate to safe defaults.
+
+        Regression guard for issue #71: rows written before migration 007
+        have NULL ``safeway_product_size``/``safeway_in_stock``. Those
+        must rehydrate to ``size == ""`` and ``in_stock is True`` rather
+        than raising.
+        """
+        service = self._make_service(db_path)
+        conn = service._connect()
+        try:
+            conn.execute(
+                "INSERT INTO product_mapping"
+                " (ingredient_description, safeway_product_id,"
+                "  safeway_product_name, safeway_price)"
+                " VALUES (?, ?, ?, ?)",
+                ("legacy item", "LEGACY1", "Legacy Product", 2.99),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        cached = service.get_cached_mapping("legacy item")
+
+        assert cached is not None
+        assert cached.product.size == ""
+        assert cached.product.in_stock is True
+
+
+# ------------------------------------------------------------------
+# Tests: get_cached_product
+# ------------------------------------------------------------------
+
+
+class TestGetCachedProduct:
+    """Tests for ProductSearchService.get_cached_product (issue #71).
+
+    Replaces the cache-hit half of the removed ``search_or_cached``: a
+    pinned or fresh mapping is returned (touching times_selected /
+    last_used) without ever performing a live search; a stale or absent
+    mapping returns None so the caller can fall back to a fresh search.
+    """
+
+    def _make_service(self, db_path: str) -> ProductSearchService:
+        """Create a service with a dummy client for cache-only tests.
+
+        Args:
+            db_path: Database path.
+
+        Returns:
+            ProductSearchService instance.
+        """
         transport = _MockTransport([])
         http = httpx.Client(transport=transport)
         client = SafewayClient("user", "pass", "1234", http_client=http)
-        service = ProductSearchService(client, db_path)
+        return ProductSearchService(client, db_path)
 
+    def test_returns_pinned_without_search(self, db_path: str) -> None:
+        """Test pinned mappings are returned without calling search_products."""
+        service = self._make_service(db_path)
         product = SafewayProduct(
             product_id="PIN1", name="Pinned Milk", price=4.99, size="1 gal"
         )
         service.pin_mapping("milk", product)
 
-        results = service.search_or_cached("milk")
+        with patch.object(service, "search_products") as mock_search:
+            result = service.get_cached_product("milk")
 
-        assert len(results) == 1
-        assert results[0].product_id == "PIN1"
+        mock_search.assert_not_called()
+        assert result is not None
+        assert result.product.product_id == "PIN1"
 
-    @patch("grocery_butler.safeway_client.time.sleep")
-    def test_returns_fresh_cache(self, mock_sleep: object, db_path: str) -> None:
-        """Test that fresh cached mappings are returned without searching."""
-        transport = _MockTransport([])
-        http = httpx.Client(transport=transport)
-        client = SafewayClient("user", "pass", "1234", http_client=http)
-        service = ProductSearchService(client, db_path)
-
+    def test_returns_fresh_cache(self, db_path: str) -> None:
+        """Test a fresh (non-stale, non-pinned) mapping is returned."""
+        service = self._make_service(db_path)
         product = SafewayProduct(
             product_id="CACHE1", name="Cached Milk", price=4.99, size="1 gal"
         )
         service.save_mapping("milk", product)
 
-        results = service.search_or_cached("milk")
+        result = service.get_cached_product("milk")
 
-        assert len(results) == 1
-        assert results[0].product_id == "CACHE1"
+        assert result is not None
+        assert result.product.product_id == "CACHE1"
 
-    @patch("grocery_butler.safeway_client.time.sleep")
-    def test_searches_when_no_cache(self, mock_sleep: object, db_path: str) -> None:
-        """Test that search is performed when no cache exists."""
-        response_data = _make_search_response(
-            [
-                _make_nimbus_product(upc="NEW1", name="Fresh Milk", price=3.99),
-            ]
-        )
-        client, _transport = _make_authenticated_client(
-            [
-                httpx.Response(200, json=response_data),
-            ]
-        )
-        service = ProductSearchService(client, db_path)
+    def test_absent_returns_none(self, db_path: str) -> None:
+        """Test an uncached search term returns None."""
+        service = self._make_service(db_path)
+        assert service.get_cached_product("not cached") is None
 
-        results = service.search_or_cached("milk")
-
-        assert len(results) == 1
-        assert results[0].product_id == "NEW1"
-        # Should also be cached now
-        cached = service.get_cached_mapping("milk")
-        assert cached is not None
-        assert cached.product.product_id == "NEW1"
-        client.close()
-
-    @patch("grocery_butler.safeway_client.time.sleep")
-    def test_searches_when_cache_stale(self, mock_sleep: object, db_path: str) -> None:
-        """Test that stale cache triggers a fresh search."""
-        response_data = _make_search_response(
-            [
-                _make_nimbus_product(upc="FRESH1", name="Fresh Milk"),
-            ]
-        )
-        client, _transport = _make_authenticated_client(
-            [
-                httpx.Response(200, json=response_data),
-            ]
-        )
-        service = ProductSearchService(client, db_path)
-
-        # Save a mapping, then make it stale
+    def test_stale_returns_none(self, db_path: str) -> None:
+        """Test a stale, unpinned mapping is not returned."""
+        service = self._make_service(db_path)
         product = SafewayProduct(
             product_id="OLD1", name="Old Milk", price=3.99, size="1 gal"
         )
@@ -613,11 +745,146 @@ class TestSearchOrCached:
         finally:
             conn.close()
 
-        results = service.search_or_cached("milk")
+        assert service.get_cached_product("milk") is None
 
-        assert len(results) == 1
-        assert results[0].product_id == "FRESH1"
+    def test_hit_touches_mapping(self, db_path: str) -> None:
+        """Test a cache hit increments times_selected via _touch_mapping."""
+        service = self._make_service(db_path)
+        product = SafewayProduct(
+            product_id="CACHE1", name="Cached Milk", price=4.99, size="1 gal"
+        )
+        service.save_mapping("milk", product)
+
+        service.get_cached_product("milk")
+
+        cached = service.get_cached_mapping("milk")
+        assert cached is not None
+        assert cached.times_selected == 2
+
+
+# ------------------------------------------------------------------
+# Tests: reverify_product
+# ------------------------------------------------------------------
+
+
+class TestReverifyProduct:
+    """Tests for ProductSearchService.reverify_product (issue #71).
+
+    A cache hit must not trust the stale cached price/size/stock: it
+    re-runs a live search for the mapping's ingredient description and
+    reconciles the cached product_id against the fresh candidates.
+    """
+
+    def _make_service_no_transport(self, db_path: str) -> ProductSearchService:
+        """Create a service whose client would error on any HTTP call.
+
+        Args:
+            db_path: Database path.
+
+        Returns:
+            ProductSearchService instance.
+        """
+        transport = _MockTransport([])
+        http = httpx.Client(transport=transport)
+        client = SafewayClient("user", "pass", "1234", http_client=http)
+        return ProductSearchService(client, db_path)
+
+    def _cached(self, **overrides: Any) -> CachedMapping:
+        """Build a CachedMapping for reverify_product scenarios.
+
+        Args:
+            overrides: SafewayProduct field overrides.
+
+        Returns:
+            A CachedMapping wrapping the (possibly overridden) product.
+        """
+        product_kwargs: dict[str, Any] = {
+            "product_id": "P1",
+            "name": "Chicken Thighs",
+            "price": 3.99,
+            "size": "1 lb",
+            "in_stock": True,
+        }
+        product_kwargs.update(overrides)
+        return CachedMapping(
+            mapping_id=1,
+            ingredient_description="chicken thighs",
+            product=SafewayProduct(**product_kwargs),
+            is_pinned=False,
+            times_selected=1,
+            last_used=datetime.now(tz=UTC),
+        )
+
+    @patch("grocery_butler.safeway_client.time.sleep")
+    def test_matching_candidate_returns_fresh_values(
+        self, mock_sleep: object, db_path: str
+    ) -> None:
+        """Test a matching product_id in fresh search results wins.
+
+        Fresh price/size/stock must replace the cached values.
+        """
+        cached = self._cached()
+        response_data = _make_search_response(
+            [
+                _make_nimbus_product(
+                    upc="P1", name="Chicken Thighs", price=5.49, size="2 lb"
+                ),
+            ]
+        )
+        client, _transport = _make_authenticated_client(
+            [httpx.Response(200, json=response_data)]
+        )
+        service = ProductSearchService(client, db_path)
+
+        result = service.reverify_product(cached)
+
+        assert result.product_id == "P1"
+        assert result.price == 5.49
+        assert result.size == "2 lb"
+        assert result.in_stock is True
         client.close()
+
+    @patch("grocery_butler.safeway_client.time.sleep")
+    def test_no_matching_candidate_marks_out_of_stock(
+        self, mock_sleep: object, db_path: str
+    ) -> None:
+        """Test no product_id match marks the cached product out of stock.
+
+        Regression guard for issue #71: this is the substitution-trigger
+        path for cached items whose Safeway product has since vanished
+        from search results (delisted or out of stock).
+        """
+        cached = self._cached()
+        response_data = _make_search_response(
+            [
+                _make_nimbus_product(upc="OTHER1", name="Different Product"),
+            ]
+        )
+        client, _transport = _make_authenticated_client(
+            [httpx.Response(200, json=response_data)]
+        )
+        service = ProductSearchService(client, db_path)
+
+        result = service.reverify_product(cached)
+
+        assert result.product_id == "P1"
+        assert result.price == 3.99
+        assert result.size == "1 lb"
+        assert result.in_stock is False
+        client.close()
+
+    def test_search_error_returns_cached_product_unchanged(self, db_path: str) -> None:
+        """Test a search failure falls back to the cached product untouched."""
+        cached = self._cached()
+        service = self._make_service_no_transport(db_path)
+
+        with patch.object(
+            service, "search_products", side_effect=ProductSearchError("down")
+        ):
+            result = service.reverify_product(cached)
+
+        assert result == cached.product
+        assert result.in_stock is True
 
 
 # ------------------------------------------------------------------
@@ -667,7 +934,12 @@ class TestRowToCachedMapping:
     """Tests for _row_to_cached_mapping."""
 
     def test_converts_row(self, db_path: str) -> None:
-        """Test converting a database row to CachedMapping."""
+        """Test converting a database row to CachedMapping.
+
+        Covers the real (post-migration-007) row shape: size and stock
+        columns are populated and must be selected and rehydrated
+        alongside the existing fields (issue #71).
+        """
         from grocery_butler.db import get_connection, init_db
 
         init_db(db_path)
@@ -676,15 +948,16 @@ class TestRowToCachedMapping:
             conn.execute(
                 "INSERT INTO product_mapping"
                 " (ingredient_description, safeway_product_id,"
-                "  safeway_product_name, safeway_price, is_pinned)"
-                " VALUES (?, ?, ?, ?, ?)",
-                ("milk", "UPC1", "Test Milk", 3.99, True),
+                "  safeway_product_name, safeway_price, safeway_product_size,"
+                "  safeway_in_stock, is_pinned)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("milk", "UPC1", "Test Milk", 3.99, "1 gal", False, True),
             )
             conn.commit()
             row = conn.execute(
                 "SELECT id, ingredient_description, safeway_product_id,"
-                " safeway_product_name, safeway_price, last_used,"
-                " times_selected, is_pinned"
+                " safeway_product_name, safeway_price, safeway_product_size,"
+                " safeway_in_stock, last_used, times_selected, is_pinned"
                 " FROM product_mapping LIMIT 1"
             ).fetchone()
             assert row is not None
@@ -696,6 +969,8 @@ class TestRowToCachedMapping:
             assert result.product.product_id == "UPC1"
             assert result.product.name == "Test Milk"
             assert result.product.price == 3.99
+            assert result.product.size == "1 gal"
+            assert result.product.in_stock is False
             assert result.is_pinned is True
             assert result.times_selected == 1
         finally:

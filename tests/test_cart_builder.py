@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 from grocery_butler.cart_builder import (
@@ -27,6 +28,7 @@ from grocery_butler.models import (
     SubstitutionResult,
     SubstitutionSuitability,
 )
+from grocery_butler.product_search import CachedMapping
 
 # ------------------------------------------------------------------
 # Fixtures
@@ -514,7 +516,8 @@ class TestBuildCart:
             CartBuilder with mocked services.
         """
         mock_search = MagicMock()
-        mock_search.search_or_cached.return_value = search_results or []
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = search_results or []
 
         mock_selector = MagicMock()
         item = _make_item()
@@ -606,7 +609,8 @@ class TestBuildCart:
         )
 
         mock_search = MagicMock()
-        mock_search.search_or_cached.return_value = [oos_product]
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = [oos_product]
 
         mock_selector = MagicMock()
         mock_selector.select_product.return_value = _MockSelectionResult(
@@ -751,7 +755,8 @@ class TestBuildCart:
         """
         product = _make_product(price=1.0, size="1 lb")
         mock_search = MagicMock()
-        mock_search.search_or_cached.return_value = [product]
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = [product]
 
         item = _make_item(quantity=100.0, unit="lb")
         mock_selector = MagicMock()
@@ -780,3 +785,235 @@ class TestBuildCart:
         assert cart_item.quantity_to_order == 3
         assert cart_item.needs_review is True
         assert cart_item.review_reason == "quantity_capped"
+
+
+# ------------------------------------------------------------------
+# Tests: CartBuilder cache-hit / cache-miss flow (issue #71)
+# ------------------------------------------------------------------
+#
+# Regression guards for issue #71: the old ``search_or_cached`` cached
+# ``products[0]`` -- the raw pre-selection top hit, not what the selector
+# actually chose -- and rehydrated cache rows with a hardcoded size=""
+# and a default in_stock=True. Consequences: quantity was pinned to 1
+# (unparseable_size) and the substitution flow never triggered for
+# cached items. The fixed flow splits the miss path
+# (search_products -> selector.select_product -> save_mapping(selected))
+# from the hit path (get_cached_product -> reverify_product), and a hit
+# never calls search_products or select_product.
+
+
+def _make_cached_mapping(product: SafewayProduct) -> CachedMapping:
+    """Build a CachedMapping wrapping *product* for cache-hit tests.
+
+    Args:
+        product: The cached SafewayProduct.
+
+    Returns:
+        A CachedMapping resembling what
+        ``ProductSearchService.get_cached_product`` returns on a hit.
+    """
+    return CachedMapping(
+        mapping_id=1,
+        ingredient_description="boneless chicken thighs",
+        product=product,
+        is_pinned=False,
+        times_selected=1,
+        last_used=datetime.now(tz=UTC),
+    )
+
+
+class TestCartBuilderCacheFlow:
+    """Tests for the cache-hit/cache-miss split in CartBuilder._process_item."""
+
+    def _make_dependencies(
+        self,
+    ) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
+        """Create fresh mocks for search, selector, substitution, and client.
+
+        Returns:
+            Tuple of (mock_search, mock_selector, mock_substitution,
+            mock_client).
+        """
+        mock_search = MagicMock()
+        mock_selector = MagicMock()
+        mock_substitution = MagicMock()
+        mock_client = MagicMock()
+        mock_client.store_id = "1234"
+        mock_client.get.return_value = {}
+        return mock_search, mock_selector, mock_substitution, mock_client
+
+    def test_cache_miss_saves_selected_product(self) -> None:
+        """Test a cache miss saves the SELECTED candidate, not candidates[0].
+
+        Regression guard for issue #71: the old code cached
+        ``products[0]`` regardless of which candidate the selector
+        actually chose.
+        """
+        item = _make_item()
+        candidates = [
+            _make_product(product_id="P001"),
+            _make_product(product_id="P002"),
+            _make_product(product_id="P003"),
+        ]
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = candidates
+        mock_selector.select_product.return_value = _MockSelectionResult(
+            item=item, product=candidates[1], reasoning="Best match"
+        )
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        builder.build_cart([item])
+
+        mock_search.save_mapping.assert_called_once_with(
+            item.search_term, candidates[1]
+        )
+
+    def test_cache_hit_skips_search_and_select(self) -> None:
+        """Test a cache hit bypasses search_products and select_product."""
+        item = _make_item()
+        cached_product = _make_product(product_id="CACHED1", size="2 lb")
+        reverified = _make_product(product_id="CACHED1", size="2 lb")
+        cached = _make_cached_mapping(cached_product)
+
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = cached
+        mock_search.reverify_product.return_value = reverified
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([item])
+
+        mock_selector.select_product.assert_not_called()
+        mock_search.search_products.assert_not_called()
+        mock_search.reverify_product.assert_called_once_with(cached)
+        assert len(result.items) == 1
+        assert result.items[0].safeway_product.product_id == "CACHED1"
+
+    def test_cache_hit_uses_reverified_size_for_quantity(self) -> None:
+        """Test quantity calc uses the reverified product's size, not cached.
+
+        Regression guard for issue #71: the cached row's hardcoded
+        size="" used to force ``unparseable_size`` and a quantity of 1
+        for every cache hit, regardless of the item's actual needs.
+        """
+        item = _make_item(quantity=4.0, unit="lb")
+        cached_product = _make_product(product_id="CACHED1", size="1 lb")
+        reverified = _make_product(product_id="CACHED1", size="2 lb")
+        cached = _make_cached_mapping(cached_product)
+
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = cached
+        mock_search.reverify_product.return_value = reverified
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([item])
+
+        assert len(result.items) == 1
+        cart_item = result.items[0]
+        assert cart_item.quantity_to_order == 2
+        assert cart_item.needs_review is False
+
+    def test_cache_hit_out_of_stock_triggers_substitution(self) -> None:
+        """Test an out-of-stock reverified product triggers substitution.
+
+        Regression guard for issue #71: the cached row's default
+        in_stock=True used to prevent the substitution flow from ever
+        triggering for cached items.
+        """
+        item = _make_item()
+        cached_product = _make_product(product_id="CACHED1", in_stock=True)
+        reverified = _make_product(product_id="CACHED1", in_stock=False)
+        cached = _make_cached_mapping(cached_product)
+
+        sub_result = SubstitutionResult(
+            status="no_alternatives",
+            original_item=item,
+            message="No alternatives",
+        )
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = cached
+        mock_search.reverify_product.return_value = reverified
+        mock_substitution.find_substitutions.return_value = sub_result
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([item])
+
+        mock_substitution.find_substitutions.assert_called_once()
+        assert result.substituted_items == [sub_result]
+
+    def test_cache_hit_cost_uses_reverified_price(self) -> None:
+        """Test estimated_cost uses the reverified price, not the cached price."""
+        item = _make_item(quantity=1.0, unit="lb")
+        cached_product = _make_product(product_id="CACHED1", price=3.99, size="1 lb")
+        reverified = _make_product(product_id="CACHED1", price=5.49, size="1 lb")
+        cached = _make_cached_mapping(cached_product)
+
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = cached
+        mock_search.reverify_product.return_value = reverified
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([item])
+
+        assert len(result.items) == 1
+        assert result.items[0].estimated_cost == 5.49
+
+    def test_no_product_selected_returns_failed(self) -> None:
+        """Test a cache miss with no selected product fails without saving."""
+        item = _make_item()
+        candidates = [_make_product(product_id="P001")]
+
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = candidates
+        mock_selector.select_product.return_value = _MockSelectionResult(
+            item=item, product=None, reasoning="No good match"
+        )
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([item])
+
+        assert len(result.failed_items) == 1
+        mock_search.save_mapping.assert_not_called()
