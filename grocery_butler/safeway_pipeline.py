@@ -324,7 +324,7 @@ class SafewayPipeline:
 
         Args:
             submission_id: Row id returned by
-                :meth:`OrderSubmissionStore.record_attempt`.
+                :meth:`OrderSubmissionStore.try_record_attempt`.
             result: The result returned by the order service.
         """
         try:

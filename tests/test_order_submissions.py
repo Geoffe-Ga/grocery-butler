@@ -268,7 +268,7 @@ class TestOrderSubmissionStore:
         """Test record_attempt returns an integer row id."""
         store = OrderSubmissionStore(str(tmp_path / "test.db"))
 
-        submission_id = store.record_attempt("key-1", "fingerprint-abc")
+        submission_id = store._record_attempt("key-1", "fingerprint-abc")
 
         assert isinstance(submission_id, int)
 
@@ -278,7 +278,7 @@ class TestOrderSubmissionStore:
         store = OrderSubmissionStore(db_path)
 
         # Should not raise even though nothing has initialized this db yet.
-        submission_id = store.record_attempt("key-1", "fp-fresh")
+        submission_id = store._record_attempt("key-1", "fp-fresh")
 
         assert submission_id >= 1
 
@@ -316,24 +316,24 @@ class TestOrderSubmissionStore:
         monkeypatch.setattr(store, "_connect", lambda: _FakeConnection())
 
         with pytest.raises(RuntimeError, match="row id"):
-            store.record_attempt("key-1", "fp-no-id")
+            store._record_attempt("key-1", "fp-no-id")
 
     def test_recently_submitted_blocks(self, tmp_path: Path) -> None:
         """Test a just-recorded 'submitted' row blocks within the window."""
         store = OrderSubmissionStore(str(tmp_path / "test.db"))
-        store.record_attempt("key-1", "fp-1")
+        store._record_attempt("key-1", "fp-1")
 
-        blocking = store.find_recent_blocking("fp-1", within=timedelta(minutes=30))
+        blocking = store._find_recent_blocking("fp-1", within=timedelta(minutes=30))
 
         assert blocking is not None
 
     def test_confirmed_status_blocks(self, tmp_path: Path) -> None:
         """Test a row marked 'confirmed' blocks within the window."""
         store = OrderSubmissionStore(str(tmp_path / "test.db"))
-        submission_id = store.record_attempt("key-1", "fp-confirmed")
+        submission_id = store._record_attempt("key-1", "fp-confirmed")
         store.mark(submission_id, "confirmed", order_id="ORD-1")
 
-        blocking = store.find_recent_blocking(
+        blocking = store._find_recent_blocking(
             "fp-confirmed", within=timedelta(minutes=30)
         )
 
@@ -342,10 +342,10 @@ class TestOrderSubmissionStore:
     def test_unknown_status_blocks(self, tmp_path: Path) -> None:
         """Test a row marked 'unknown' blocks within the window."""
         store = OrderSubmissionStore(str(tmp_path / "test.db"))
-        submission_id = store.record_attempt("key-1", "fp-unknown")
+        submission_id = store._record_attempt("key-1", "fp-unknown")
         store.mark(submission_id, "unknown")
 
-        blocking = store.find_recent_blocking(
+        blocking = store._find_recent_blocking(
             "fp-unknown", within=timedelta(minutes=30)
         )
 
@@ -354,19 +354,21 @@ class TestOrderSubmissionStore:
     def test_failed_status_does_not_block(self, tmp_path: Path) -> None:
         """Test a row marked 'failed' does not block resubmission."""
         store = OrderSubmissionStore(str(tmp_path / "test.db"))
-        submission_id = store.record_attempt("key-1", "fp-failed")
+        submission_id = store._record_attempt("key-1", "fp-failed")
         store.mark(submission_id, "failed")
 
-        blocking = store.find_recent_blocking("fp-failed", within=timedelta(minutes=30))
+        blocking = store._find_recent_blocking(
+            "fp-failed", within=timedelta(minutes=30)
+        )
 
         assert blocking is None
 
     def test_different_fingerprint_not_blocked(self, tmp_path: Path) -> None:
         """Test a row for a different cart fingerprint never blocks."""
         store = OrderSubmissionStore(str(tmp_path / "test.db"))
-        store.record_attempt("key-1", "fp-mine")
+        store._record_attempt("key-1", "fp-mine")
 
-        blocking = store.find_recent_blocking(
+        blocking = store._find_recent_blocking(
             "fp-someone-elses", within=timedelta(minutes=30)
         )
 
@@ -375,13 +377,13 @@ class TestOrderSubmissionStore:
     def test_mark_accepts_missing_order_id(self, tmp_path: Path) -> None:
         """Test mark() works without an order_id (e.g. for 'failed' status)."""
         store = OrderSubmissionStore(str(tmp_path / "test.db"))
-        submission_id = store.record_attempt("key-1", "fp-no-order-id")
+        submission_id = store._record_attempt("key-1", "fp-no-order-id")
 
         # Should not raise.
         store.mark(submission_id, "failed")
 
         assert (
-            store.find_recent_blocking("fp-no-order-id", within=timedelta(minutes=30))
+            store._find_recent_blocking("fp-no-order-id", within=timedelta(minutes=30))
             is None
         )
 

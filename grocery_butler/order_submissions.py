@@ -23,7 +23,7 @@ import logging
 import tempfile
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from grocery_butler.db import get_connection, init_db
 
@@ -33,13 +33,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: The only statuses :meth:`OrderSubmissionStore.mark` may write. Narrower
+#: than ``str`` so a typo'd status is a type-checking error rather than a
+#: runtime CHECK-constraint violation (``'submitted'`` is excluded because
+#: it is only ever written by the initial guarded insert, never by mark).
+FinalStatus = Literal["confirmed", "unknown", "failed"]
+
 #: Statuses that block a resubmission of the same cart fingerprint. A
 #: 'failed' submission is definitive (Safeway rejected it outright) and
 #: does not block retries; 'submitted' (in flight), 'unknown' (timed out —
 #: outcome unclear), and 'confirmed' (already placed) all do.
 _BLOCKING_STATUSES = ("submitted", "unknown", "confirmed")
 
-#: How long a submission attempt blocks a same-cart resubmission.
+#: How long a submission attempt blocks a same-cart resubmission. A fixed
+#: constant is deliberate for v1.0: real order submission is descoped and
+#: disabled by default (Issue #60), so there is no production tuning need
+#: yet; revisit as config/env if live ordering is ever enabled.
 DUPLICATE_WINDOW = dt.timedelta(minutes=30)
 
 
@@ -136,6 +145,11 @@ def _lock_fingerprint(conn: DatabaseConnection, fingerprint: str) -> None:
             connection subsequently used for the guarded insert.
         fingerprint: The cart fingerprint to lock.
     """
+    # hashtext() maps the fingerprint to a 32-bit int, so two unrelated
+    # fingerprints can theoretically collide and briefly serialize against
+    # each other. That is a deliberate tradeoff, not a bug: correctness is
+    # unaffected (the guarded insert still filters on the full fingerprint),
+    # and the worst case is a rare, harmless lock-wait.
     conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (fingerprint,))
 
 
@@ -171,7 +185,7 @@ class OrderSubmissionStore:
         """
         return get_connection(self._db_path)
 
-    def record_attempt(self, idempotency_key: str, cart_fingerprint: str) -> int:
+    def _record_attempt(self, idempotency_key: str, cart_fingerprint: str) -> int:
         """Record a new submission attempt before calling Safeway.
 
         Inserted with status ``'submitted'`` so the attempt blocks
@@ -179,8 +193,9 @@ class OrderSubmissionStore:
         completes (fail-closed).
 
         Warning:
-            This is a non-atomic building block, not the duplicate-order
-            guard. Pairing a :meth:`find_recent_blocking` check with a
+            This is a private, non-atomic building block and test seam —
+            not the duplicate-order guard. Pairing a
+            :meth:`_find_recent_blocking` check with a
             subsequent call to this method runs the two as separate
             statements on separate connections, which is vulnerable to a
             check-then-insert (TOCTOU) race: two concurrent submissions
@@ -189,8 +204,10 @@ class OrderSubmissionStore:
             review). The duplicate-order guard MUST use
             :meth:`try_record_attempt` instead, which performs the
             check and insert atomically on one connection. This method
-            (and :meth:`find_recent_blocking`) are kept only for their
-            direct unit tests.
+            (and :meth:`_find_recent_blocking`) are underscore-private so
+            they cannot be mistaken for the guard API; they are used only
+            by their direct unit tests and as test fixtures for seeding
+            ledger rows.
 
         Args:
             idempotency_key: The client order id used for this attempt.
@@ -222,15 +239,15 @@ class OrderSubmissionStore:
     def mark(
         self,
         submission_id: int,
-        status: str,
+        status: FinalStatus,
         order_id: str | None = None,
     ) -> None:
         """Update a submission attempt's final status.
 
         Args:
-            submission_id: Row id returned by :meth:`record_attempt`.
+            submission_id: Row id returned by :meth:`try_record_attempt`.
             status: New status (``'confirmed'``, ``'unknown'``, or
-                ``'failed'``).
+                ``'failed'`` — see :data:`FinalStatus`).
             order_id: Safeway order id, if the submission succeeded.
         """
         conn = self._connect()
@@ -243,7 +260,7 @@ class OrderSubmissionStore:
         finally:
             conn.close()
 
-    def find_recent_blocking(
+    def _find_recent_blocking(
         self,
         cart_fingerprint: str,
         within: dt.timedelta,
@@ -251,18 +268,19 @@ class OrderSubmissionStore:
         """Find a recent submission that should block a new attempt.
 
         Warning:
-            This is a non-atomic building block, not the duplicate-order
-            guard. Pairing this check with a subsequent
-            :meth:`record_attempt` call runs the two as separate
-            statements on separate connections, which is vulnerable to a
-            check-then-insert (TOCTOU) race: two concurrent submissions
-            of an identical cart can both pass this check before either
-            insert commits, defeating the guard (Issue #61 security
-            review). The duplicate-order guard MUST use
-            :meth:`try_record_attempt` instead, which performs the
+            This is a private, non-atomic building block and test seam —
+            not the duplicate-order guard. Pairing this check with a
+            subsequent :meth:`_record_attempt` call runs the two as
+            separate statements on separate connections, which is
+            vulnerable to a check-then-insert (TOCTOU) race: two
+            concurrent submissions of an identical cart can both pass
+            this check before either insert commits, defeating the guard
+            (Issue #61 security review). The duplicate-order guard MUST
+            use :meth:`try_record_attempt` instead, which performs the
             check and insert atomically on one connection. This method
-            (and :meth:`record_attempt`) are kept only for their direct
-            unit tests.
+            (and :meth:`_record_attempt`) are underscore-private so they
+            cannot be mistaken for the guard API; they are used only by
+            their direct unit tests and to assert ledger state in tests.
 
         Args:
             cart_fingerprint: Fingerprint of the cart being submitted.
@@ -297,7 +315,7 @@ class OrderSubmissionStore:
         This is the race-safe variant of the duplicate-order guard that
         :class:`~grocery_butler.safeway_pipeline.SafewayPipeline` must
         use (Issue #61 security review): the previous
-        :meth:`find_recent_blocking` + :meth:`record_attempt` pair ran
+        :meth:`_find_recent_blocking` + :meth:`_record_attempt` pair ran
         as a SELECT then an INSERT on two separate connections, so two
         concurrent submissions of an identical cart could both pass the
         SELECT and both reach ``OrderService.submit_order`` — the exact

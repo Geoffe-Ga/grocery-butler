@@ -587,7 +587,7 @@ class TestSubmitCartReviewGate:
         assert "review" in result.error_message.lower()
         assert "milk (incomparable_units)" in result.error_message
         mock_order_cls.return_value.submit_order.assert_not_called()
-        row = pipeline._order_submissions.find_recent_blocking(
+        row = pipeline._order_submissions._find_recent_blocking(
             cart_fingerprint(flagged_cart), DUPLICATE_WINDOW
         )
         assert row is None
@@ -907,7 +907,7 @@ class TestSubmitCartDuplicateGuard:
         assert result.confirmation is not None
         assert result.confirmation.order_id == "ORD-LEDGER-FAIL"
 
-        row = pipeline._order_submissions.find_recent_blocking(
+        row = pipeline._order_submissions._find_recent_blocking(
             cart_fingerprint(mock_cart_summary), DUPLICATE_WINDOW
         )
         assert row is not None

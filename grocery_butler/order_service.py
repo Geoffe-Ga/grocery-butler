@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from grocery_butler.safeway_client import SafewayTimeoutError
+from grocery_butler.safeway_client import SafewayAuthError, SafewayTimeoutError
 
 if TYPE_CHECKING:
     from grocery_butler.models import CartItem, CartSummary, FulfillmentType
@@ -193,6 +193,26 @@ class OrderService:
                 error_message=(
                     "Order outcome unknown — the request timed out. Do not "
                     "resubmit; verify your recent Safeway orders first."
+                ),
+            )
+        except SafewayAuthError:
+            # An auth failure is definitive, unlike the UNKNOWN cases below:
+            # SafewayClient.post() authenticates *before* sending the order
+            # request, and (with retry_on_auth_failure=False) a 401 response
+            # means Safeway rejected the request without processing it. In
+            # both paths the order can never have been placed or charged, so
+            # this maps to FAILED — an immediately retryable outcome — rather
+            # than UNKNOWN, which would make the duplicate-order guard block
+            # this cart for the full duplicate window over a transient auth
+            # hiccup (Issue #61 review feedback on PR #107).
+            logger.exception("Order submission failed: Safeway authentication error")
+            return OrderResult(
+                success=False,
+                outcome=OrderOutcome.FAILED,
+                error_message=(
+                    "Order not submitted — Safeway authentication failed. "
+                    "The order never reached Safeway, so it is safe to retry "
+                    "once authentication succeeds."
                 ),
             )
         except Exception:

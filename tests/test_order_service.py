@@ -889,6 +889,57 @@ class TestSubmitOrderTimeout:
         assert result.outcome is OrderOutcome.UNKNOWN
 
 
+class TestSubmitOrderAuthFailure:
+    """Tests for OrderService.submit_order handling SafewayAuthError (Issue #61).
+
+    ``SafewayClient.post`` authenticates *before* sending the order
+    request, and (with ``retry_on_auth_failure=False``) a 401 response
+    means Safeway definitively rejected the request without processing
+    it. In both cases the order can never have been placed or charged,
+    so an auth failure must map to a definitive FAILED — not UNKNOWN —
+    otherwise the duplicate-order guard would block resubmission of the
+    cart for the full duplicate window over a transient auth hiccup.
+    """
+
+    def _make_service_with_error(self, error: Exception) -> OrderService:
+        """Create an OrderService whose client.post raises the given error.
+
+        Args:
+            error: Exception the mocked client should raise on post().
+
+        Returns:
+            OrderService wired to a client that always raises ``error``.
+        """
+        mock_client = MagicMock()
+        mock_client.post.side_effect = error
+        mock_pantry = MagicMock()
+        # Issue #60: submission is gated off by default; these tests
+        # exercise the real submission path, so opt in explicitly.
+        return OrderService(mock_client, mock_pantry, submission_enabled=True)
+
+    def test_auth_error_returns_failed_outcome(self) -> None:
+        """Test SafewayAuthError yields a definitive FAILED outcome, not UNKNOWN."""
+        from grocery_butler.order_service import OrderOutcome
+        from grocery_butler.safeway_client import SafewayAuthError
+
+        service = self._make_service_with_error(SafewayAuthError("okta down"))
+        result = service.submit_order(_make_cart())
+
+        assert result.success is False
+        assert result.outcome is OrderOutcome.FAILED
+
+    def test_auth_error_message_mentions_authentication_and_retry(self) -> None:
+        """Test the auth-failure message names authentication and permits retry."""
+        from grocery_butler.safeway_client import SafewayAuthError
+
+        service = self._make_service_with_error(SafewayAuthError("okta down"))
+        result = service.submit_order(_make_cart())
+
+        message = result.error_message.lower()
+        assert "authentication" in message
+        assert "retry" in message
+
+
 class TestSubmitOrderClientOrderId:
     """Tests for clientOrderId plumbing and retry_on_auth_failure (Issue #61)."""
 
