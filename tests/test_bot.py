@@ -1268,6 +1268,81 @@ class TestBrandsCommands:
         call_args = str(mock_interaction.response.send_message.call_args)
         assert "went wrong" in call_args
 
+    @pytest.mark.asyncio()
+    async def test_brands_clear_removes_correct_rows_with_id_gap(
+        self, mock_interaction, tmp_path
+    ):
+        """Test /brands clear removes matching rows even with gapped ids.
+
+        Regression test for issue #63: the clear handler used to delete
+        by ``enumerate`` position instead of the real database id, so a
+        gap in ids (from an earlier deletion) caused it to target the
+        wrong row.
+
+        Uses a dedicated file-backed database (rather than the shared
+        ``bot``/``config`` fixtures, which point at a process-wide
+        ``:memory:`` database) so this test's id numbering is fully
+        isolated from any other test and cannot pass by accidental
+        alignment between enumerate-position and real DB id.
+        """
+        from grocery_butler.recipe_store import RecipeStore
+
+        isolated_config = Config(
+            anthropic_api_key="sk-test",
+            discord_bot_token="test-bot-token",
+            database_path=str(tmp_path / "brands_clear_gap.db"),
+        )
+        isolated_bot = create_bot(isolated_config)
+        store = RecipeStore(isolated_config.database_path)
+        target = "gap-clear-target-63"
+        other_target = "gap-clear-other-63"
+
+        # Seed and delete several filler rows first so the target and
+        # other prefs get ids far from their position in the final
+        # sorted list, regardless of alphabetical ordering.
+        filler_ids = [
+            store.add_brand_preference(
+                BrandPreference(
+                    match_target=f"gap-clear-filler-{i}-63",
+                    match_type=BrandMatchType.INGREDIENT,
+                    brand=f"Filler Brand {i}",
+                    preference_type=BrandPreferenceType.PREFERRED,
+                )
+            )
+            for i in range(5)
+        ]
+        store.add_brand_preference(
+            BrandPreference(
+                match_target=target,
+                match_type=BrandMatchType.INGREDIENT,
+                brand="Match Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        store.add_brand_preference(
+            BrandPreference(
+                match_target=other_target,
+                match_type=BrandMatchType.INGREDIENT,
+                brand="Other Brand",
+                preference_type=BrandPreferenceType.PREFERRED,
+            )
+        )
+        # Force id gaps: deleting the filler rows means the surviving
+        # rows' ids are no longer sequential positions in the sorted list.
+        for filler_id in filler_ids:
+            store.remove_brand_preference(filler_id)
+
+        cmd = self._get_subcommand(isolated_bot, "clear")
+        assert cmd is not None
+        await cmd.callback(mock_interaction, target=target)
+
+        remaining = store.get_brand_preferences()
+        remaining_target_brands = {
+            (pref.match_target, pref.brand) for pref in remaining
+        }
+        assert (target, "Match Brand") not in remaining_target_brands
+        assert (other_target, "Other Brand") in remaining_target_brands
+
 
 class TestRecipesCommands:
     """Tests for the /recipes command group."""

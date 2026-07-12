@@ -896,8 +896,10 @@ def _register_brand_routes(app: Flask) -> None:
         """
         db_path = app.config["DATABASE_PATH"]
         recipe_store = RecipeStore(db_path)
-        recipe_store.remove_brand_preference(pref_id)
-        flash("Brand preference removed.", "success")
+        if recipe_store.remove_brand_preference(pref_id):
+            flash("Brand preference removed.", "success")
+        else:
+            flash("Brand preference not found.", "error")
         return redirect(url_for("brands"))
 
 
