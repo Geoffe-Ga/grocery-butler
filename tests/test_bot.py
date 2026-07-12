@@ -1989,6 +1989,47 @@ class TestFormatCartSummaryBot:
         assert "Organic Chicken Thighs" in result
         assert "?" not in result
 
+    def test_format_unverified_fulfillment_shows_warning(self) -> None:
+        """Test an unverified-fulfillment cart shows a visible warning.
+
+        Regression guard for issue #72: when Safeway's fulfillment fetch
+        failed, the cart previously presented fabricated pickup/delivery
+        options as if they were real, with no indication anything was
+        wrong. The Discord preview must now warn the human that
+        fulfillment could not be confirmed before they ever press
+        Confirm.
+        """
+        from grocery_butler.models import CartSummary, FulfillmentType
+
+        cart = CartSummary(
+            items=[],
+            failed_items=[],
+            substituted_items=[],
+            skipped_items=[],
+            restock_items=[],
+            subtotal=0.0,
+            fulfillment_options=[],
+            recommended_fulfillment=FulfillmentType.PICKUP,
+            estimated_total=0.0,
+            fulfillment_unverified=True,
+        )
+
+        result = _format_cart_summary(cart)
+
+        lowered = result.lower()
+        assert "fulfillment" in lowered
+        assert "unverified" in lowered or "unconfirmed" in lowered
+
+    def test_format_verified_fulfillment_shows_no_warning(self) -> None:
+        """Test a normal (verified) cart shows no unverified-fulfillment warning."""
+        cart = _make_cart_summary()
+
+        result = _format_cart_summary(cart)
+
+        lowered = result.lower()
+        assert "unverified" not in lowered
+        assert "unconfirmed" not in lowered
+
 
 class TestFormatOrderResult:
     """Tests for _format_order_result in bot module."""
@@ -2366,7 +2407,9 @@ class TestOrderConfirmView:
         press is itself the human approval, so it must always forward
         ``allow_review_items=True`` -- the user already saw the flagged
         items and their reason codes in the preview rendered by
-        ``_format_cart_summary`` before pressing Confirm.
+        ``_format_cart_summary`` before pressing Confirm. The same
+        preview also renders the fulfillment warning (issue #72), so
+        confirm must likewise forward ``allow_unverified_fulfillment=True``.
         """
         cart = _make_cart_summary()
         order_result = _make_order_result(success=True, order_id="ORD-99")
@@ -2380,19 +2423,22 @@ class TestOrderConfirmView:
         mock_interaction.followup.send.assert_called_once()
         call_args = str(mock_interaction.followup.send.call_args)
         assert "ORD-99" in call_args
-        mock_pipeline.submit_cart.assert_called_once_with(cart, allow_review_items=True)
+        mock_pipeline.submit_cart.assert_called_once_with(
+            cart, allow_review_items=True, allow_unverified_fulfillment=True
+        )
         mock_pipeline.close.assert_called_once()
         assert view.is_finished() is True
 
     @pytest.mark.asyncio()
     async def test_confirm_forwards_allow_review_items_override(self, mock_interaction):
-        """Test confirm always passes allow_review_items=True to submit_cart.
+        """Test confirm always passes the review and fulfillment overrides.
 
         Dedicated regression guard (separate from the result-reporting
-        test above) for the exact kwarg the confirm button must forward,
+        test above) for the exact kwargs the confirm button must forward,
         per the chief-architect's ruling: the human already reviewed the
-        flagged items and reasons in the rendered preview, so pressing
-        Confirm is the explicit override.
+        flagged items/reasons and any fulfillment warning in the rendered
+        preview, so pressing Confirm is the explicit override of both
+        gates.
         """
         cart = _make_cart_summary()
         mock_pipeline = MagicMock()
@@ -2404,6 +2450,32 @@ class TestOrderConfirmView:
         mock_pipeline.submit_cart.assert_called_once()
         _, kwargs = mock_pipeline.submit_cart.call_args
         assert kwargs.get("allow_review_items") is True
+        assert kwargs.get("allow_unverified_fulfillment") is True
+
+    @pytest.mark.asyncio()
+    async def test_confirm_forwards_allow_unverified_fulfillment_override(
+        self, mock_interaction
+    ):
+        """Test confirming a fulfillment-unverified cart is not a dead end.
+
+        Issue #72 round-2 review finding: the preview shown before the
+        Confirm button already displays the fulfillment warning (via
+        ``_format_fulfillment_warning``), so a user who saw that warning
+        and pressed Confirm must have the override forwarded to
+        ``submit_cart`` rather than being bounced back with an error
+        about a flag Discord users have no way to set.
+        """
+        cart = _make_cart_summary()
+        cart = cart.model_copy(update={"fulfillment_unverified": True})
+        mock_pipeline = MagicMock()
+        mock_pipeline.submit_cart.return_value = _make_order_result(success=True)
+
+        view = _OrderConfirmView(mock_pipeline, cart)
+        await type(view).confirm(view, mock_interaction, MagicMock())
+
+        mock_pipeline.submit_cart.assert_called_once()
+        _, kwargs = mock_pipeline.submit_cart.call_args
+        assert kwargs.get("allow_unverified_fulfillment") is True
 
     @pytest.mark.asyncio()
     async def test_confirm_submission_failure_reports_and_closes(

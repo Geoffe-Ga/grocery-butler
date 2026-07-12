@@ -187,6 +187,18 @@ def _make_cart_with_flagged_item() -> CartSummary:
     )
 
 
+def _make_cart_with_unverified_fulfillment() -> CartSummary:
+    """Return a CartSummary flagged fulfillment_unverified=True (issue #72).
+
+    Mirrors ``_make_cart_with_flagged_item`` but for the fulfillment
+    gate: exercises the staged-message warning and the confirm-time
+    override for a cart whose fulfillment options could not be confirmed
+    with Safeway.
+    """
+    cart = _make_cart({"pasta": 3.50, "sauce": 4.25})
+    return cart.model_copy(update={"fulfillment_unverified": True})
+
+
 def _order_body(costs: dict[str, float] | None = None) -> dict[str, Any]:
     """Return a valid /order/submit request body."""
     cart = _make_cart(costs or {"pasta": 3.50, "sauce": 4.25})
@@ -397,6 +409,27 @@ class TestOrderSubmitStaging:
         assert response.status_code == 200
         message = response.get_json()["message"]
         assert "review" not in message.lower()
+
+    def test_staged_message_includes_unverified_fulfillment_clause(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """The staged message must warn about unverified fulfillment (issue #72).
+
+        Mirrors the needs-review clause: the human must see that
+        fulfillment was never actually confirmed with Safeway before
+        replying "confirm", since that confirm is the explicit override
+        of the fulfillment gate (issue #59 precedent).
+        """
+        cart = _make_cart_with_unverified_fulfillment()
+        response = client.post(
+            "/api/v1/order/submit",
+            json={"cart": cart.model_dump(mode="json")},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        message = response.get_json()["message"].lower()
+        assert "fulfillment" in message
+        assert "unverified" in message or "unconfirmed" in message
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +644,39 @@ class TestActionsConfirm:
         pipeline.submit_cart.assert_called_once()
         _, kwargs = pipeline.submit_cart.call_args
         assert kwargs.get("allow_review_items") is True
+
+    def test_confirm_order_forwards_allow_unverified_fulfillment_override(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Confirming a staged order must override the fulfillment gate.
+
+        Issue #72: the staged message (post_order_submit) already warned
+        that fulfillment was unconfirmed before the human replied
+        "confirm", so that confirm IS the explicit human override
+        (mirrors the issue #59 review-gate precedent). The confirm
+        executor must call ``pipeline.submit_cart`` with
+        ``allow_unverified_fulfillment=True``.
+        """
+        body = {
+            "cart": _make_cart_with_unverified_fulfillment().model_dump(mode="json")
+        }
+        action_id = _stage_via_api(client, auth_headers, "/api/v1/order/submit", body)
+
+        pipeline = MagicMock()
+        pipeline.submit_cart.return_value = _successful_order_result()
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        pipeline.submit_cart.assert_called_once()
+        _, kwargs = pipeline.submit_cart.call_args
+        assert kwargs.get("allow_unverified_fulfillment") is True
 
     def test_failed_order_submission_returns_502(
         self,

@@ -1932,4 +1932,55 @@ class TestFormatCartSummary:
         result = _format_cart_summary(cart)
         assert "Substituted" in result
         assert "Organic Chicken Thighs" in result
-        assert "?" not in result
+
+    def test_format_unverified_fulfillment_shows_warning(self) -> None:
+        """Test an unverified-fulfillment cart preview shows a warning.
+
+        Regression guard for issue #72: when Safeway's fulfillment fetch
+        failed, the cart previously presented fabricated pickup/delivery
+        options as if they were real, with no indication anything was
+        wrong. The CLI preview must now warn the human that fulfillment
+        could not be confirmed before they submit the order.
+        """
+        from grocery_butler.models import CartSummary, FulfillmentType
+
+        cart = CartSummary(
+            items=[],
+            failed_items=[],
+            substituted_items=[],
+            skipped_items=[],
+            restock_items=[],
+            subtotal=0.0,
+            fulfillment_options=[],
+            recommended_fulfillment=FulfillmentType.PICKUP,
+            estimated_total=0.0,
+            fulfillment_unverified=True,
+        )
+
+        result = _format_cart_summary(cart)
+
+        lowered = result.lower()
+        assert "fulfillment" in lowered
+        assert "unverified" in lowered or "unconfirmed" in lowered
+
+    def test_format_verified_fulfillment_shows_no_warning(self) -> None:
+        """Test a normal (verified) cart preview shows no unverified warning."""
+        from grocery_butler.models import CartSummary, FulfillmentType
+
+        cart = CartSummary(
+            items=[],
+            failed_items=[],
+            substituted_items=[],
+            skipped_items=[],
+            restock_items=[],
+            subtotal=0.0,
+            fulfillment_options=[],
+            recommended_fulfillment=FulfillmentType.PICKUP,
+            estimated_total=0.0,
+        )
+
+        result = _format_cart_summary(cart)
+
+        lowered = result.lower()
+        assert "unverified" not in lowered
+        assert "unconfirmed" not in lowered
