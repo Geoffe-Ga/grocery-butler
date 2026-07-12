@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from grocery_butler.models import (
     CartItem,
@@ -933,6 +933,81 @@ class TestSubmitOrderAuthFailure:
         from grocery_butler.safeway_client import SafewayAuthError
 
         service = self._make_service_with_error(SafewayAuthError("okta down"))
+        result = service.submit_order(_make_cart())
+
+        message = result.error_message.lower()
+        assert "authentication" in message
+        assert "retry" in message
+
+
+class TestSubmitOrderStaleToken401RealClient:
+    """Regression tests for a real stale-token 401 on the order POST.
+
+    PR #107 round-2 review found that ``TestSubmitOrderAuthFailure`` only
+    exercised a *mocked* ``client.post`` raising ``SafewayAuthError``
+    directly — a path that did not correspond to real
+    ``SafewayClient.post()`` behavior, which raised plain
+    ``SafewayAPIError`` for a 401 with ``retry_on_auth_failure=False``
+    and was therefore misclassified as UNKNOWN, blocking legitimate
+    resubmission for the full duplicate window. These tests drive
+    ``OrderService.submit_order`` through a **real** ``SafewayClient``
+    (mocked at the HTTP transport layer only): Okta auth succeeds, the
+    order POST is rejected with 401, and the outcome must be the
+    definitive, immediately-retryable FAILED (Issue #61).
+    """
+
+    def _make_service_with_401_on_order_post(self) -> OrderService:
+        """Build an OrderService over a real client whose order POST 401s.
+
+        The transport serves, in order: the Okta authn + authorize
+        responses (initial token), a 401 for the order POST, then a second
+        authn + authorize pair (the client refreshes its token for future
+        calls even when the failed request is not resent).
+
+        Returns:
+            OrderService wired to a real SafewayClient with a mocked
+            HTTP transport.
+        """
+        import httpx
+
+        from grocery_butler.safeway_client import SafewayClient
+        from tests.test_safeway_client import (
+            _make_authn_response,
+            _make_authorize_redirect,
+            _MockTransport,
+        )
+
+        transport = _MockTransport(
+            [
+                _make_authn_response(),
+                _make_authorize_redirect(),
+                httpx.Response(401, json={"error": "expired"}),
+                _make_authn_response("new-session"),
+                _make_authorize_redirect("new-token"),
+            ]
+        )
+        http = httpx.Client(transport=transport)
+        client = SafewayClient("user", "pass", "1234", http_client=http)
+        mock_pantry = MagicMock()
+        # Issue #60: submission is gated off by default; these tests
+        # exercise the real submission path, so opt in explicitly.
+        return OrderService(client, mock_pantry, submission_enabled=True)
+
+    @patch("grocery_butler.safeway_client.time.sleep")
+    def test_401_on_order_post_returns_failed_outcome(self, mock_sleep: object) -> None:
+        """Test a real 401 on the order POST maps to FAILED, not UNKNOWN."""
+        from grocery_butler.order_service import OrderOutcome
+
+        service = self._make_service_with_401_on_order_post()
+        result = service.submit_order(_make_cart())
+
+        assert result.success is False
+        assert result.outcome is OrderOutcome.FAILED
+
+    @patch("grocery_butler.safeway_client.time.sleep")
+    def test_401_on_order_post_message_permits_retry(self, mock_sleep: object) -> None:
+        """Test the real-401 failure message names authentication and retry."""
+        service = self._make_service_with_401_on_order_post()
         result = service.submit_order(_make_cart())
 
         message = result.error_message.lower()

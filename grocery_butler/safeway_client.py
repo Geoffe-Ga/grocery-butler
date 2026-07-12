@@ -313,7 +313,10 @@ class SafewayClient:
             Parsed JSON response dict.
 
         Raises:
-            SafewayAuthError: If authentication fails.
+            SafewayAuthError: If authentication fails, or if a 401 is
+                received with ``retry_on_auth_failure=False`` (the request
+                was definitively rejected without processing; see
+                Issue #61).
             SafewayAPIError: If the API request fails.
             SafewayTimeoutError: If the request times out.
         """
@@ -349,6 +352,11 @@ class SafewayClient:
             Parsed JSON response dict.
 
         Raises:
+            SafewayAuthError: If a 401 is received with
+                ``retry_on_auth_failure=False`` — a definitive "rejected
+                without processing" signal that callers may treat as
+                immediately retryable (Issue #61) — or if the token
+                refresh itself fails.
             SafewayAPIError: If the request fails (after retry, when
                 retrying is enabled).
             SafewayTimeoutError: If the request times out.
@@ -361,8 +369,16 @@ class SafewayClient:
         # 401 received.
         if not retry_on_auth_failure:
             self.authenticate()  # Refresh the token for future calls only.
-            raise SafewayAPIError(
-                f"Safeway API request failed (401, not retried): {method} {path}"
+            # SafewayAuthError (not plain SafewayAPIError) because a 401
+            # here means Safeway rejected the request as unauthenticated
+            # without processing it — a definitive, side-effect-free
+            # failure. OrderService.submit_order relies on this type to
+            # classify the outcome as immediately-retryable FAILED rather
+            # than UNKNOWN, which would spuriously block resubmission for
+            # the full duplicate window (PR #107 round-2 review, Issue #61).
+            raise SafewayAuthError(
+                f"Safeway rejected the request as unauthenticated "
+                f"(401, not retried): {method} {path}"
             )
 
         # 401 — re-authenticate and retry once

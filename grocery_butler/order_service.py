@@ -196,15 +196,21 @@ class OrderService:
                 ),
             )
         except SafewayAuthError:
-            # An auth failure is definitive, unlike the UNKNOWN cases below:
-            # SafewayClient.post() authenticates *before* sending the order
-            # request, and (with retry_on_auth_failure=False) a 401 response
-            # means Safeway rejected the request without processing it. In
-            # both paths the order can never have been placed or charged, so
-            # this maps to FAILED — an immediately retryable outcome — rather
-            # than UNKNOWN, which would make the duplicate-order guard block
-            # this cart for the full duplicate window over a transient auth
-            # hiccup (Issue #61 review feedback on PR #107).
+            # An auth failure is definitive, unlike the UNKNOWN cases below.
+            # SafewayClient raises SafewayAuthError on exactly two paths:
+            # (1) the pre-flight token refresh in _ensure_authenticated()
+            # fails before the order request is ever sent, and (2) the order
+            # POST itself gets a 401 with retry_on_auth_failure=False, which
+            # SafewayClient._request deliberately raises as SafewayAuthError
+            # — not plain SafewayAPIError — because a 401 means Safeway
+            # rejected the request without processing it (PR #107 round-2
+            # review fixed a gap where that path raised SafewayAPIError and
+            # fell through to the UNKNOWN handler below). In both paths the
+            # order can never have been placed or charged, so this maps to
+            # FAILED — an immediately retryable outcome — rather than
+            # UNKNOWN, which would make the duplicate-order guard block this
+            # cart for the full duplicate window over a transient auth
+            # hiccup (Issue #61).
             logger.exception("Order submission failed: Safeway authentication error")
             return OrderResult(
                 success=False,

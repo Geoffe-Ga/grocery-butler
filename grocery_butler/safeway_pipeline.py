@@ -281,6 +281,13 @@ class SafewayPipeline:
 
         fingerprint = cart_fingerprint(cart)
         key = idempotency_key or str(uuid.uuid4())
+        # Deliberately NOT wrapped in try/except, in contrast to
+        # _finalize_submission below: no money has moved yet, so if the
+        # ledger write itself fails (e.g. a transient DB lock) the only
+        # safe response is to fail closed and let the error propagate,
+        # aborting the submission. Swallowing it here would send a
+        # real-money order to Safeway with no duplicate-guard record of
+        # the attempt (PR #107 review feedback, Issue #61).
         submission_id = self._order_submissions.try_record_attempt(
             key, fingerprint, DUPLICATE_WINDOW
         )

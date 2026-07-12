@@ -681,6 +681,13 @@ class TestPostRetryOnAuthFailureFalse:
         The client should still refresh its token (so subsequent calls can
         succeed) but must not resend the original POST body, since retrying
         a non-idempotent order submission risks a double charge.
+
+        The raised exception must be ``SafewayAuthError`` — not plain
+        ``SafewayAPIError`` — because a 401 with retries disabled means
+        Safeway definitively rejected the request without processing it.
+        ``OrderService.submit_order`` relies on that distinction to classify
+        the outcome as immediately-retryable FAILED rather than UNKNOWN
+        (PR #107 round-2 review, Issue #61).
         """
         transport = _MockTransport(
             [
@@ -694,7 +701,7 @@ class TestPostRetryOnAuthFailureFalse:
         http = httpx.Client(transport=transport)
         client = SafewayClient("user", "pass", "1234", http_client=http)
 
-        with pytest.raises(SafewayAPIError):
+        with pytest.raises(SafewayAuthError):
             client.post(
                 "/abs/pub/web/orders",
                 json_data={"items": []},
