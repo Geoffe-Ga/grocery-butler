@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from grocery_butler.models import (
     CartItem,
@@ -380,12 +380,21 @@ class TestSubmitOrder:
         assert "empty" in result.error_message.lower()
 
     def test_api_failure(self) -> None:
-        """Test API exception returns failure."""
+        """Test a non-timeout API exception returns an unknown (not failed) outcome.
+
+        Issue #61: an unclassified exception from the client call (e.g. a
+        5xx or a broken response) is not proof the order wasn't placed, so
+        it must map to UNKNOWN — the same as a timeout — rather than FAILED,
+        which would wrongly unblock an immediate resubmission.
+        """
+        from grocery_butler.order_service import OrderOutcome
+
         service = self._make_service(api_error=True)
         result = service.submit_order(_make_cart())
 
         assert result.success is False
-        assert "failed" in result.error_message.lower()
+        assert result.outcome is OrderOutcome.UNKNOWN
+        assert "unknown" in result.error_message.lower()
 
     def test_error_response(self) -> None:
         """Test error response from API."""
@@ -433,6 +442,37 @@ class TestSubmitOrder:
         result = service.submit_order(cart)
 
         assert result.success is True
+        assert result.items_restocked == 0
+
+    def test_restock_ingredient_collection_failure_doesnt_fail_order(self) -> None:
+        """Test a bug collecting restock ingredients doesn't crash a confirmed order.
+
+        Issue #61: this runs after Safeway has already confirmed the order,
+        so a bug here must never surface as an unhandled exception out of
+        submit_order — that would report a real, already-placed order as an
+        unexplained crash instead of a success.
+        """
+        from unittest.mock import patch
+
+        service = self._make_service(
+            api_response={
+                "orderId": "ORD-123",
+                "status": "confirmed",
+                "total": 5.0,
+            }
+        )
+        restock = [_make_cart_item(ingredient="milk")]
+        cart = _make_cart(restock_items=restock)
+
+        with patch(
+            "grocery_butler.order_service._collect_restock_ingredients",
+            side_effect=AttributeError("malformed cart item"),
+        ):
+            result = service.submit_order(cart)
+
+        assert result.success is True
+        assert result.confirmation is not None
+        assert result.confirmation.order_id == "ORD-123"
         assert result.items_restocked == 0
 
     def test_no_restock_without_restock_items(self) -> None:
@@ -805,3 +845,289 @@ class TestSafeFloat:
     def test_empty_string_returns_fallback(self) -> None:
         """Test empty string returns fallback."""
         assert _safe_float("", 5.0) == 5.0
+
+
+# ------------------------------------------------------------------
+# Issue #61: OrderOutcome, timeout handling, clientOrderId plumbing
+#
+# The new names (OrderOutcome, SafewayTimeoutError, and the
+# idempotency_key/retry_on_auth_failure plumbing) are imported inside
+# each test body rather than at module scope because these tests were
+# written test-first, before the names existed; the local imports are
+# kept as a historic artifact of that TDD process.
+# ------------------------------------------------------------------
+
+
+class TestOrderOutcomeDefaults:
+    """Tests for OrderOutcome derivation on OrderResult (Issue #61)."""
+
+    def test_success_result_defaults_to_success_outcome(self) -> None:
+        """Test a successful OrderResult derives OrderOutcome.SUCCESS."""
+        from grocery_butler.order_service import OrderOutcome, OrderResult
+
+        result = OrderResult(success=True)
+        assert result.outcome is OrderOutcome.SUCCESS
+
+    def test_failed_result_defaults_to_failed_outcome(self) -> None:
+        """Test a failed OrderResult derives OrderOutcome.FAILED."""
+        from grocery_butler.order_service import OrderOutcome, OrderResult
+
+        result = OrderResult(success=False)
+        assert result.outcome is OrderOutcome.FAILED
+
+    def test_explicit_outcome_is_preserved(self) -> None:
+        """Test an explicitly-set outcome is not overridden by success/failed."""
+        from grocery_butler.order_service import OrderOutcome, OrderResult
+
+        result = OrderResult(success=False, outcome=OrderOutcome.DUPLICATE)
+        assert result.outcome is OrderOutcome.DUPLICATE
+
+    def test_explicit_unknown_outcome_preserved_when_success_true(self) -> None:
+        """Test an explicit UNKNOWN outcome is preserved regardless of success."""
+        from grocery_butler.order_service import OrderOutcome, OrderResult
+
+        result = OrderResult(success=True, outcome=OrderOutcome.UNKNOWN)
+        assert result.outcome is OrderOutcome.UNKNOWN
+
+
+class TestSubmitOrderTimeout:
+    """Tests for OrderService.submit_order handling SafewayTimeoutError."""
+
+    def _make_service_with_error(self, error: Exception) -> OrderService:
+        """Create an OrderService whose client.post raises the given error.
+
+        Args:
+            error: Exception the mocked client should raise on post().
+
+        Returns:
+            OrderService wired to a client that always raises ``error``.
+        """
+        mock_client = MagicMock()
+        mock_client.post.side_effect = error
+        mock_pantry = MagicMock()
+        # Issue #60: submission is gated off by default; these tests
+        # exercise the real submission path, so opt in explicitly.
+        return OrderService(mock_client, mock_pantry, submission_enabled=True)
+
+    def test_timeout_returns_unknown_outcome(self) -> None:
+        """Test SafewayTimeoutError yields a failed result with UNKNOWN outcome."""
+        from grocery_butler.order_service import OrderOutcome
+        from grocery_butler.safeway_client import SafewayTimeoutError
+
+        service = self._make_service_with_error(SafewayTimeoutError("timed out"))
+        result = service.submit_order(_make_cart())
+
+        assert result.success is False
+        assert result.outcome is OrderOutcome.UNKNOWN
+
+    def test_timeout_error_message_mentions_unknown_and_timed_out(self) -> None:
+        """Test the timeout error message references an unknown outcome and timeout."""
+        from grocery_butler.safeway_client import SafewayTimeoutError
+
+        service = self._make_service_with_error(SafewayTimeoutError("timed out"))
+        result = service.submit_order(_make_cart())
+
+        message = result.error_message.lower()
+        assert "unknown" in message
+        assert "timed out" in message
+
+    def test_other_exception_returns_unknown_outcome(self) -> None:
+        """Test a non-timeout exception yields UNKNOWN, not FAILED (Issue #61).
+
+        A generic exception from the client call (e.g. a 5xx SafewayAPIError,
+        a non-timeout transport error, or a malformed-response parsing bug)
+        is not a definitive rejection: the request may have already reached
+        and been processed by Safeway. Marking it FAILED would incorrectly
+        unblock an immediate resubmission of a cart that might already be
+        charged, so it must map to UNKNOWN like a timeout does.
+        """
+        from grocery_butler.order_service import OrderOutcome
+
+        service = self._make_service_with_error(Exception("boom"))
+        result = service.submit_order(_make_cart())
+
+        assert result.success is False
+        assert result.outcome is OrderOutcome.UNKNOWN
+
+
+class TestSubmitOrderAuthFailure:
+    """Tests for OrderService.submit_order handling SafewayAuthError (Issue #61).
+
+    ``SafewayClient.post`` authenticates *before* sending the order
+    request, and (with ``retry_on_auth_failure=False``) a 401 response
+    means Safeway definitively rejected the request without processing
+    it. In both cases the order can never have been placed or charged,
+    so an auth failure must map to a definitive FAILED — not UNKNOWN —
+    otherwise the duplicate-order guard would block resubmission of the
+    cart for the full duplicate window over a transient auth hiccup.
+    """
+
+    def _make_service_with_error(self, error: Exception) -> OrderService:
+        """Create an OrderService whose client.post raises the given error.
+
+        Args:
+            error: Exception the mocked client should raise on post().
+
+        Returns:
+            OrderService wired to a client that always raises ``error``.
+        """
+        mock_client = MagicMock()
+        mock_client.post.side_effect = error
+        mock_pantry = MagicMock()
+        # Issue #60: submission is gated off by default; these tests
+        # exercise the real submission path, so opt in explicitly.
+        return OrderService(mock_client, mock_pantry, submission_enabled=True)
+
+    def test_auth_error_returns_failed_outcome(self) -> None:
+        """Test SafewayAuthError yields a definitive FAILED outcome, not UNKNOWN."""
+        from grocery_butler.order_service import OrderOutcome
+        from grocery_butler.safeway_client import SafewayAuthError
+
+        service = self._make_service_with_error(SafewayAuthError("okta down"))
+        result = service.submit_order(_make_cart())
+
+        assert result.success is False
+        assert result.outcome is OrderOutcome.FAILED
+
+    def test_auth_error_message_mentions_authentication_and_retry(self) -> None:
+        """Test the auth-failure message names authentication and permits retry."""
+        from grocery_butler.safeway_client import SafewayAuthError
+
+        service = self._make_service_with_error(SafewayAuthError("okta down"))
+        result = service.submit_order(_make_cart())
+
+        message = result.error_message.lower()
+        assert "authentication" in message
+        assert "retry" in message
+
+
+class TestSubmitOrderStaleToken401RealClient:
+    """Regression tests for a real stale-token 401 on the order POST.
+
+    PR #107 round-2 review found that ``TestSubmitOrderAuthFailure`` only
+    exercised a *mocked* ``client.post`` raising ``SafewayAuthError``
+    directly — a path that did not correspond to real
+    ``SafewayClient.post()`` behavior, which raised plain
+    ``SafewayAPIError`` for a 401 with ``retry_on_auth_failure=False``
+    and was therefore misclassified as UNKNOWN, blocking legitimate
+    resubmission for the full duplicate window. These tests drive
+    ``OrderService.submit_order`` through a **real** ``SafewayClient``
+    (mocked at the HTTP transport layer only): Okta auth succeeds, the
+    order POST is rejected with 401, and the outcome must be the
+    definitive, immediately-retryable FAILED (Issue #61).
+    """
+
+    def _make_service_with_401_on_order_post(self) -> OrderService:
+        """Build an OrderService over a real client whose order POST 401s.
+
+        The transport serves, in order: the Okta authn + authorize
+        responses (initial token), a 401 for the order POST, then a second
+        authn + authorize pair (the client refreshes its token for future
+        calls even when the failed request is not resent).
+
+        Returns:
+            OrderService wired to a real SafewayClient with a mocked
+            HTTP transport.
+        """
+        import httpx
+
+        from grocery_butler.safeway_client import SafewayClient
+        from tests.test_safeway_client import (
+            _make_authn_response,
+            _make_authorize_redirect,
+            _MockTransport,
+        )
+
+        transport = _MockTransport(
+            [
+                _make_authn_response(),
+                _make_authorize_redirect(),
+                httpx.Response(401, json={"error": "expired"}),
+                _make_authn_response("new-session"),
+                _make_authorize_redirect("new-token"),
+            ]
+        )
+        http = httpx.Client(transport=transport)
+        client = SafewayClient("user", "pass", "1234", http_client=http)
+        mock_pantry = MagicMock()
+        # Issue #60: submission is gated off by default; these tests
+        # exercise the real submission path, so opt in explicitly.
+        return OrderService(client, mock_pantry, submission_enabled=True)
+
+    @patch("grocery_butler.safeway_client.time.sleep")
+    def test_401_on_order_post_returns_failed_outcome(self, mock_sleep: object) -> None:
+        """Test a real 401 on the order POST maps to FAILED, not UNKNOWN."""
+        from grocery_butler.order_service import OrderOutcome
+
+        service = self._make_service_with_401_on_order_post()
+        result = service.submit_order(_make_cart())
+
+        assert result.success is False
+        assert result.outcome is OrderOutcome.FAILED
+
+    @patch("grocery_butler.safeway_client.time.sleep")
+    def test_401_on_order_post_message_permits_retry(self, mock_sleep: object) -> None:
+        """Test the real-401 failure message names authentication and retry."""
+        service = self._make_service_with_401_on_order_post()
+        result = service.submit_order(_make_cart())
+
+        message = result.error_message.lower()
+        assert "authentication" in message
+        assert "retry" in message
+
+
+class TestSubmitOrderClientOrderId:
+    """Tests for clientOrderId plumbing and retry_on_auth_failure (Issue #61)."""
+
+    def _make_service(self) -> tuple[OrderService, MagicMock]:
+        """Create an OrderService with a mock client returning a success payload.
+
+        Returns:
+            Tuple of (service, mock_client) so tests can inspect call args.
+        """
+        mock_client = MagicMock()
+        mock_client.post.return_value = {
+            "orderId": "ORD-1",
+            "status": "confirmed",
+            "total": 8.99,
+        }
+        mock_pantry = MagicMock()
+        mock_pantry.mark_restocked.return_value = 0
+        # Issue #60: submission is gated off by default; these tests
+        # exercise the real submission path, so opt in explicitly.
+        service = OrderService(mock_client, mock_pantry, submission_enabled=True)
+        return service, mock_client
+
+    def test_explicit_idempotency_key_becomes_client_order_id(self) -> None:
+        """Test a passed idempotency_key is used as clientOrderId in the payload."""
+        service, mock_client = self._make_service()
+
+        service.submit_order(_make_cart(), idempotency_key="key-123")
+
+        _args, kwargs = mock_client.post.call_args
+        payload = kwargs.get("json_data") or _args[1]
+        assert payload["clientOrderId"] == "key-123"
+
+    def test_generated_client_order_id_is_a_uuid(self) -> None:
+        """Test a generated clientOrderId parses as a UUID when none is given."""
+        import uuid
+
+        service, mock_client = self._make_service()
+
+        service.submit_order(_make_cart())
+
+        _args, kwargs = mock_client.post.call_args
+        payload = kwargs.get("json_data") or _args[1]
+        client_order_id = payload["clientOrderId"]
+        assert isinstance(client_order_id, str)
+        assert client_order_id
+        uuid.UUID(client_order_id)  # raises ValueError if not a valid UUID
+
+    def test_post_called_with_retry_on_auth_failure_false(self) -> None:
+        """Test submit_order disables the client's automatic 401-retry-and-resend."""
+        service, mock_client = self._make_service()
+
+        service.submit_order(_make_cart())
+
+        _args, kwargs = mock_client.post.call_args
+        assert kwargs.get("retry_on_auth_failure") is False

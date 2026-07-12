@@ -36,7 +36,10 @@ from grocery_butler.models import (
     PendingActionStatus,
     ShoppingListItem,
 )
-from grocery_butler.order_service import ORDER_SUBMISSION_DISABLED_MESSAGE
+from grocery_butler.order_service import (
+    ORDER_SUBMISSION_DISABLED_MESSAGE,
+    OrderOutcome,
+)
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.pending_actions import PendingActionsStore
 from grocery_butler.recipe_store import RecipeStore
@@ -579,6 +582,38 @@ def _approved(action: PendingAction, result: dict[str, Any]) -> Response:
     )
 
 
+#: Maps a non-success OrderOutcome to its HTTP status and response status
+#: string. Outcomes not listed here (FAILED) fall back to the existing
+#: 502 "order submission failed" response in ``_order_failure_response``.
+_OUTCOME_RESPONSES: dict[OrderOutcome, tuple[str, int]] = {
+    OrderOutcome.UNKNOWN: ("unknown", 504),
+    OrderOutcome.DUPLICATE: ("duplicate_prevented", 409),
+}
+
+
+def _order_failure_response(
+    action: PendingAction, error_message: str, outcome: OrderOutcome | None
+) -> tuple[Response, int]:
+    """Render the appropriate error response for a failed order submission.
+
+    Args:
+        action: The staged (already-claimed) pending action.
+        error_message: Error message from the OrderResult.
+        outcome: The order's OrderOutcome, if known.
+
+    Returns:
+        A (Response, status_code) tuple: 504 for an unknown (timed-out)
+        outcome, 409 for a blocked duplicate, or 502 for any other
+        failure.
+    """
+    mapped = _OUTCOME_RESPONSES.get(outcome) if outcome is not None else None
+    if mapped is None:
+        return jsonify(error=error_message), 502
+    status, code = mapped
+    response = jsonify(status=status, action_id=action.action_id, error=error_message)
+    return response, code
+
+
 def _confirm_order_submit(
     action: PendingAction, store: PendingActionsStore
 ) -> Response | tuple[Response, int]:
@@ -601,14 +636,20 @@ def _confirm_order_submit(
         # The staged message (post_order_submit) already named every
         # flagged item and its reason code, so replying "confirm" IS the
         # human's explicit override of the review gate (chief-architect
-        # ruling, issue #59 round 3).
-        result = pipeline.submit_cart(cart, allow_review_items=True)
+        # ruling, issue #59 round 3). The action_id doubles as the
+        # idempotency key so the duplicate-order ledger and Safeway's
+        # clientOrderId correlate with the staged action (Issue #61).
+        result = pipeline.submit_cart(
+            cart,
+            idempotency_key=action.action_id,
+            allow_review_items=True,
+        )
     except SafewayPipelineError as exc:
         return jsonify(error=f"order submission failed: {exc}"), 502
     finally:
         pipeline.close()
     if not result.success:
-        return jsonify(error=result.error_message), 502
+        return _order_failure_response(action, result.error_message, result.outcome)
     confirmation = (
         dataclasses.asdict(result.confirmation) if result.confirmation else {}
     )

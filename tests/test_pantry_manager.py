@@ -20,6 +20,7 @@ from grocery_butler.pantry_manager import (
     PantryManager,
     _format_inventory_context,
     _parse_claude_response,
+    _row_to_item,
 )
 
 # ---------------------------------------------------------------------------
@@ -779,6 +780,60 @@ class TestParseInventoryIntent:
         messages = call_args.kwargs["messages"]
         prompt_text = messages[0]["content"]
         assert "Milk" in prompt_text
+
+
+# ---------------------------------------------------------------------------
+# TestRowToItem
+# ---------------------------------------------------------------------------
+
+
+class TestRowToItem:
+    """Tests for the _row_to_item helper (Issue #68).
+
+    Legacy or malformed ``category`` values stored in the database (e.g.
+    from an older schema, or a category IngredientCategory has since
+    dropped) must not crash inventory reads with a pydantic
+    ``ValidationError``. ``_row_to_item`` should degrade unknown category
+    strings to ``OTHER`` while preserving ``None`` as ``None``.
+    """
+
+    def test_invalid_category_falls_back_to_other(self) -> None:
+        """Test an unrecognized category string degrades to OTHER."""
+        row = {
+            "ingredient": "legacy stuff",
+            "display_name": "Legacy Stuff",
+            "category": "legacy_snacks",
+            "status": "on_hand",
+            "current_quantity": None,
+            "current_unit": None,
+            "default_quantity": None,
+            "default_unit": None,
+            "default_search_term": None,
+            "notes": None,
+        }
+
+        item = _row_to_item(row)
+
+        assert item.category == IngredientCategory.OTHER
+
+    def test_null_category_preserved_as_none(self) -> None:
+        """Regression guard: a null category row stays None (not OTHER)."""
+        row = {
+            "ingredient": "mystery spice",
+            "display_name": "Mystery Spice",
+            "category": None,
+            "status": "on_hand",
+            "current_quantity": None,
+            "current_unit": None,
+            "default_quantity": None,
+            "default_unit": None,
+            "default_search_term": None,
+            "notes": None,
+        }
+
+        item = _row_to_item(row)
+
+        assert item.category is None
 
 
 # ---------------------------------------------------------------------------

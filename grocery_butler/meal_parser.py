@@ -12,7 +12,12 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from grocery_butler.claude_utils import extract_json_text
-from grocery_butler.models import Ingredient, IngredientCategory, ParsedMeal, parse_unit
+from grocery_butler.models import (
+    Ingredient,
+    ParsedMeal,
+    coerce_category,
+    parse_unit,
+)
 from grocery_butler.prompt_loader import load_prompt
 from grocery_butler.recipe_store import RecipeStore, normalize_recipe_name
 
@@ -59,7 +64,7 @@ def _parse_ingredient(data: dict[str, object]) -> Ingredient:
         ingredient=str(data.get("ingredient", "")),
         quantity=quantity,
         unit=parse_unit(str(data.get("unit", ""))),
-        category=IngredientCategory(str(data.get("category", "other"))),
+        category=coerce_category(data.get("category", "other")),
         notes=str(data.get("notes", "")),
         is_pantry_item=bool(data.get("is_pantry_item", False)),
     )
@@ -272,7 +277,10 @@ class MealParser:
             return None
 
         match_name = data.get("match")
-        confidence = float(data.get("confidence", 0))
+        raw_confidence = data.get("confidence", 0)
+        confidence = (
+            float(raw_confidence) if isinstance(raw_confidence, (int, float)) else 0.0
+        )
 
         if match_name is None or confidence < _MATCH_CONFIDENCE_THRESHOLD:
             return None

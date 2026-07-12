@@ -8,8 +8,12 @@ for successfully ordered items.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
+
+from grocery_butler.safeway_client import SafewayAuthError, SafewayTimeoutError
 
 if TYPE_CHECKING:
     from grocery_butler.models import CartItem, CartSummary, FulfillmentType
@@ -30,6 +34,24 @@ ORDER_SUBMISSION_DISABLED_MESSAGE = (
     "flow has been verified end-to-end, set "
     "SAFEWAY_ORDER_SUBMISSION_ENABLED=true to enable real submissions."
 )
+
+
+class OrderOutcome(StrEnum):
+    """The definitive outcome of an order-submission attempt.
+
+    Distinguishes a clean success/failure from the two cases that matter
+    for the duplicate-order guard (Issue #61):
+
+    * ``UNKNOWN`` — the request timed out, so we can't tell whether
+      Safeway received it. Must not be silently retried.
+    * ``DUPLICATE`` — a matching cart was already submitted recently and
+      this attempt was blocked before ever reaching Safeway.
+    """
+
+    SUCCESS = "success"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+    DUPLICATE = "duplicate"
 
 
 @dataclass
@@ -62,12 +84,22 @@ class OrderResult:
         confirmation: Order confirmation if successful.
         error_message: Error description if failed.
         items_restocked: Number of inventory items updated.
+        outcome: Definitive outcome of the attempt. If not given
+            explicitly, derived from ``success`` (SUCCESS/FAILED); pass it
+            explicitly for the UNKNOWN (timeout) and DUPLICATE (blocked
+            resubmission) cases.
     """
 
     success: bool
     confirmation: OrderConfirmation | None = None
     error_message: str = ""
     items_restocked: int = 0
+    outcome: OrderOutcome | None = None
+
+    def __post_init__(self) -> None:
+        """Derive ``outcome`` from ``success`` when not given explicitly."""
+        if self.outcome is None:
+            self.outcome = OrderOutcome.SUCCESS if self.success else OrderOutcome.FAILED
 
 
 class OrderService:
@@ -105,6 +137,7 @@ class OrderService:
     def submit_order(
         self,
         cart: CartSummary,
+        idempotency_key: str | None = None,
         *,
         allow_review_items: bool = False,
     ) -> OrderResult:
@@ -115,8 +148,19 @@ class OrderService:
         Flagged items block submission unless ``allow_review_items`` is
         set, which represents an explicit human override after review.
 
+        Sends a ``clientOrderId`` (the given ``idempotency_key``, or a
+        freshly generated UUID4 if none is given) with the order so
+        repeated attempts can be correlated. The request disables the
+        client's automatic 401-retry-and-resend
+        (``retry_on_auth_failure=False``): resending a non-idempotent
+        order submission after a token refresh risks a double charge, so
+        on a stale-token 401 this call fails outright rather than
+        silently resending.
+
         Args:
             cart: The built cart summary to submit.
+            idempotency_key: Client order id to send with the request. A
+                UUID4 is generated when not given.
             allow_review_items: If True, bypass the review gate and
                 submit even if items are flagged as ``needs_review``.
                 Defaults to False (safe/blocking).
@@ -127,39 +171,75 @@ class OrderService:
             with :data:`ORDER_SUBMISSION_DISABLED_MESSAGE` before any
             other validation or API call.
         """
-        if not self._submission_enabled:
-            return OrderResult(
-                success=False,
-                error_message=ORDER_SUBMISSION_DISABLED_MESSAGE,
-            )
+        blocked = self._preflight_block(cart, allow_review_items=allow_review_items)
+        if blocked is not None:
+            return blocked
 
-        if not allow_review_items:
-            flagged = _collect_review_items(cart)
-            if flagged:
-                return OrderResult(
-                    success=False,
-                    error_message=_format_review_block_message(flagged),
-                )
-
-        if not cart.items and not cart.restock_items:
-            return OrderResult(
-                success=False,
-                error_message="Cart is empty — nothing to order",
-            )
-
-        payload = _build_order_payload(cart)
+        client_order_id = idempotency_key or str(uuid.uuid4())
+        payload = _build_order_payload(cart, client_order_id)
 
         try:
             response = self._client.post(
                 "/abs/pub/web/orders",
                 json_data=payload,
+                retry_on_auth_failure=False,
             )
             confirmation = _parse_order_response(response, cart)
-        except Exception:
-            logger.exception("Order submission failed")
+        except SafewayTimeoutError:
+            logger.exception("Order submission timed out — outcome unknown")
             return OrderResult(
                 success=False,
-                error_message="Order submission failed — check logs",
+                outcome=OrderOutcome.UNKNOWN,
+                error_message=(
+                    "Order outcome unknown — the request timed out. Do not "
+                    "resubmit; verify your recent Safeway orders first."
+                ),
+            )
+        except SafewayAuthError:
+            # An auth failure is definitive, unlike the UNKNOWN cases below.
+            # SafewayClient raises SafewayAuthError on exactly two paths:
+            # (1) the pre-flight token refresh in _ensure_authenticated()
+            # fails before the order request is ever sent, and (2) the order
+            # POST itself gets a 401 with retry_on_auth_failure=False, which
+            # SafewayClient._request deliberately raises as SafewayAuthError
+            # — not plain SafewayAPIError — because a 401 means Safeway
+            # rejected the request without processing it (PR #107 round-2
+            # review fixed a gap where that path raised SafewayAPIError and
+            # fell through to the UNKNOWN handler below). In both paths the
+            # order can never have been placed or charged, so this maps to
+            # FAILED — an immediately retryable outcome — rather than
+            # UNKNOWN, which would make the duplicate-order guard block this
+            # cart for the full duplicate window over a transient auth
+            # hiccup (Issue #61).
+            logger.exception("Order submission failed: Safeway authentication error")
+            return OrderResult(
+                success=False,
+                outcome=OrderOutcome.FAILED,
+                error_message=(
+                    "Order not submitted — Safeway authentication failed. "
+                    "The order never reached Safeway, so it is safe to retry "
+                    "once authentication succeeds."
+                ),
+            )
+        except Exception:
+            # Any other exception here (a non-401 HTTP error such as a 5xx,
+            # a non-timeout transport error, or an unexpected response shape
+            # that breaks _parse_order_response) is *not* proof Safeway
+            # rejected the order — the request may have reached Safeway and
+            # been processed before the error surfaced on our end. Treating
+            # this as a definitive FAILED (as a plain non-2xx business
+            # rejection is, below) would let the duplicate-order guard
+            # unblock an immediate resubmission of a cart that might already
+            # be charged (Issue #61). Since we cannot tell, this is UNKNOWN,
+            # exactly like a timeout.
+            logger.exception("Order submission failed — outcome unknown")
+            return OrderResult(
+                success=False,
+                outcome=OrderOutcome.UNKNOWN,
+                error_message=(
+                    "Order outcome unknown — the request failed unexpectedly. "
+                    "Do not resubmit; verify your recent Safeway orders first."
+                ),
             )
 
         if confirmation is None:
@@ -178,20 +258,67 @@ class OrderService:
             items_restocked=restocked,
         )
 
+    def _preflight_block(
+        self,
+        cart: CartSummary,
+        *,
+        allow_review_items: bool,
+    ) -> OrderResult | None:
+        """Run the pre-flight gates that block a submission before any I/O.
+
+        Gates run in a deliberate order: the Issue #60 descope gate
+        short-circuits first (before any other validation), then the
+        Issue #59 review gate (unless overridden), then the empty-cart
+        check — all before any HTTP call or ledger write.
+
+        Args:
+            cart: The built cart summary to validate.
+            allow_review_items: If True, skip the review gate (explicit
+                human override).
+
+        Returns:
+            A failed OrderResult describing the first gate that blocks
+            this submission, or None when the order may proceed.
+        """
+        if not self._submission_enabled:
+            return OrderResult(
+                success=False,
+                error_message=ORDER_SUBMISSION_DISABLED_MESSAGE,
+            )
+
+        if not allow_review_items:
+            blocked = review_block_result(cart)
+            if blocked is not None:
+                return blocked
+
+        if not cart.items and not cart.restock_items:
+            return OrderResult(
+                success=False,
+                error_message="Cart is empty — nothing to order",
+            )
+        return None
+
     def _restock_ordered_items(self, cart: CartSummary) -> int:
         """Mark ordered restock items as back in stock.
+
+        Called only after Safeway has already confirmed the order, so any
+        failure here — including in collecting the ingredient list itself —
+        must never propagate: raising at this point would surface a
+        successfully-placed, real-money order as an unhandled exception to
+        the caller (Issue #61's ledger would then never learn the order
+        succeeded, and the API layer has no handler for it besides a bare
+        500).
 
         Args:
             cart: The submitted cart.
 
         Returns:
-            Number of items restocked.
+            Number of items restocked, or 0 if inventory update failed.
         """
-        ingredients = _collect_restock_ingredients(cart)
-        if not ingredients:
-            return 0
-
         try:
+            ingredients = _collect_restock_ingredients(cart)
+            if not ingredients:
+                return 0
             return self._pantry.mark_restocked(ingredients)
         except Exception:
             logger.exception("Failed to update inventory after order")
@@ -203,11 +330,17 @@ class OrderService:
 # ------------------------------------------------------------------
 
 
-def _build_order_payload(cart: CartSummary) -> dict[str, Any]:
+def _build_order_payload(
+    cart: CartSummary,
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
     """Build the API payload for order submission.
 
     Args:
         cart: Cart summary to convert.
+        idempotency_key: Client order id to include as ``clientOrderId``
+            (Issue #61 duplicate-order guard), so Safeway and our own
+            ledger can correlate repeated attempts.
 
     Returns:
         Dict suitable for JSON submission.
@@ -217,6 +350,7 @@ def _build_order_payload(cart: CartSummary) -> dict[str, Any]:
         "items": items,
         "fulfillmentType": cart.recommended_fulfillment.value,
         "estimatedTotal": cart.estimated_total,
+        "clientOrderId": idempotency_key,
     }
 
 
@@ -287,6 +421,31 @@ def _safe_float(value: Any, fallback: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def review_block_result(cart: CartSummary) -> OrderResult | None:
+    """Return the blocking result for a cart pending review, if any.
+
+    Shared by :meth:`OrderService.submit_order` and the pipeline's
+    duplicate-order guard so the review gate (Issue #59) is enforced
+    once, consistently, *before* any ledger write or HTTP call — a
+    review-blocked attempt must never record a duplicate-guard ledger
+    row, because it never reaches Safeway (Issue #61).
+
+    Args:
+        cart: Cart summary to inspect for ``needs_review`` items.
+
+    Returns:
+        A failed :class:`OrderResult` naming every flagged item if any
+        item needs review, or None when nothing blocks submission.
+    """
+    flagged = _collect_review_items(cart)
+    if not flagged:
+        return None
+    return OrderResult(
+        success=False,
+        error_message=_format_review_block_message(flagged),
+    )
 
 
 def _collect_review_items(cart: CartSummary) -> list[CartItem]:

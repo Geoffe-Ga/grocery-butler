@@ -156,6 +156,23 @@ class TestDiscoverMigrations:
         for _, _, path in migrations:
             assert path.name.endswith("_pg.sql")
 
+    @pytest.mark.parametrize("is_pg", [False, True])
+    def test_no_duplicate_migration_versions(self, is_pg: bool) -> None:
+        """Test every migration version number maps to exactly one file.
+
+        ``schema_migrations`` tracks applied migrations by
+        ``version INTEGER PRIMARY KEY``, so two files sharing a number
+        would silently skip whichever sorts second (``migrate`` treats
+        the version as already applied) and violate the primary key if
+        both ever ran. Regression guard for the merge collision between
+        ``005_shopping_lists`` and the order-submissions ledger
+        migration (renumbered to 006, Issue #61 / PR #107).
+        """
+        migrations = _discover_migrations(is_pg=is_pg)
+        versions = [v for v, _, _ in migrations]
+        duplicates = {v for v in versions if versions.count(v) > 1}
+        assert not duplicates, f"duplicate migration versions: {sorted(duplicates)}"
+
 
 # ---------------------------------------------------------------------------
 # _record_migration
