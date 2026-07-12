@@ -91,10 +91,27 @@ def create_app(db_path: str | None = None) -> Flask:
     _register_teardown(app)
     _register_error_handlers(app)
     _register_context_processors(app)
+    _register_network_guard(app)
     _register_routes(app)
     _register_api(app)
 
     return app
+
+
+def _register_network_guard(app: Flask) -> None:
+    """Register the tailnet-only boundary guard before request routing.
+
+    Registered before ``_register_routes``/``_register_api`` so the
+    guard's ``before_request`` hook is installed ahead of any
+    route-specific logic and applies uniformly to HTML routes and the
+    ``/api/v1`` blueprint alike.
+
+    Args:
+        app: Flask application instance.
+    """
+    from grocery_butler.network_guard import register_network_guard
+
+    register_network_guard(app)
 
 
 def _register_api(app: Flask) -> None:

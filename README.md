@@ -448,8 +448,10 @@ unchanged. The blueprint lives in `grocery_butler/api.py` and is registered by
 `create_app()`.
 
 - **Base URL:** `https://grocery-butler.tailnet.ts.net/api/v1` — reached over
-  the Tailscale tailnet; the API is not meant to be exposed on the public
-  Railway domain.
+  the Tailscale tailnet. The tailnet-only boundary is enforced in code, not
+  just by network configuration: see
+  [Network boundary guard](#network-boundary-guard-tailnet-only) for how
+  requests from outside the allow-list are rejected.
 - **Auth:** every `/api/v1` route requires a bearer token in the
   `<caller_id>.<timestamp>.<hmac_hex>` format, signed with
   `RUBOTPAUL_SHARED_SECRET` (HMAC-SHA256, 5-minute TTL). Mint with
@@ -790,6 +792,50 @@ Set these in your Railway project settings:
 | `SAFEWAY_PASSWORD` | Yes (ordering) | Safeway account password. |
 | `SAFEWAY_STORE_ID` | Yes (ordering) | Safeway store ID for product searches. |
 | `PORT` | Auto | Injected by Railway for the web process. |
+| `TAILNET_GUARD_ENABLED` | No (defaults secure) | Kill switch for the network boundary guard (below); the guard is active unless explicitly set to `false`/`0`/`no` (case-insensitive). |
+| `TAILNET_GUARD_ALLOWED_CIDRS` | No (defaults secure) | Comma-separated CIDR allow-list for the network boundary guard (below); replaces (does not extend) the default `127.0.0.0/8,::1/128,100.64.0.0/10`. |
+
+### Network boundary guard (tailnet-only)
+
+Grocery Butler is meant to be reached only over the Tailscale tailnet (or
+loopback, locally). A fail-closed `app.before_request` hook, registered by
+`create_app()` in `grocery_butler/network_guard.py`, rejects any request
+whose **socket peer address** (`request.remote_addr`) falls outside an
+allow-list of CIDR ranges.
+
+- **No forwarded-header trust.** Admission is keyed only on
+  `request.remote_addr`; the guard never trusts `X-Forwarded-For` (or any
+  other client-supplied header), and Werkzeug's `ProxyFix` must never be
+  added. Railway's edge is a shared, multi-tenant proxy, so any header it
+  forwards from the original client is attacker-controlled input — trusting
+  it would let a public request simply set `X-Forwarded-For: 127.0.0.1` and
+  walk back through the hole this guard exists to close.
+- **`TAILNET_GUARD_ENABLED`** — kill switch, read once at app-creation time.
+  The guard is active unless explicitly set to `false`/`0`/`no`
+  (case-insensitive); unset means enabled (fail-closed by default).
+- **`TAILNET_GUARD_ALLOWED_CIDRS`** — comma-separated CIDR allow-list, read
+  once at app-creation time. Defaults to
+  `127.0.0.0/8,::1/128,100.64.0.0/10` (loopback + IPv6 loopback + the
+  Tailscale CGNAT range). Setting this variable **replaces** the default
+  list; it does not extend it. RFC1918 private ranges are deliberately
+  excluded from the default so a misconfigured office/home LAN is never
+  accidentally trusted.
+- **Health check exemption.** `/health` and `/healthz` are always exempt
+  (matched by Flask endpoint name, not path) so Railway's own health
+  checks — which arrive from Railway's infrastructure, not the tailnet —
+  keep working. This is intentional: both endpoints expose only
+  status/DB-connectivity information.
+- **Rejection behavior.** Requests from outside the allow-list receive a
+  `403`: a JSON `{"error": "forbidden"}` body for `/api/*` paths, an HTML
+  error page otherwise.
+
+**Rate limiting:** flask-limiter is deliberately deferred. With the
+fail-closed tailnet boundary above, public HMAC brute-forcing of `/api/v1`
+and abuse of paid Claude endpoints (e.g. `/api/v1/meals/parse`) already
+require tailnet access, so a limiter would add a dependency without closing
+a live gap — and a naive in-memory limiter is ineffective across
+per-gunicorn-worker processes without a shared store (no Redis is
+provisioned). Revisit if multi-tenant tailnet access is ever introduced.
 
 ### Quick start
 
@@ -801,6 +847,10 @@ Set these in your Railway project settings:
    schema before serving traffic (see above).
 5. Attach the Railway service to your Tailscale tailnet so RubotPaul can reach
    `/api/v1` privately.
+6. In the Railway service's Settings -> Networking, remove the default
+   public domain so the app is reachable only through the Tailscale
+   sidecar/tailnet. The in-code network boundary guard above is
+   defense-in-depth, not a substitute for removing the public domain.
 
 ## License
 
