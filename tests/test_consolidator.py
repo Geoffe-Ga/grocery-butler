@@ -25,6 +25,7 @@ from grocery_butler.models import (
     InventoryStatus,
     ParsedMeal,
     ShoppingListItem,
+    Unit,
 )
 
 # ---------------------------------------------------------------------------
@@ -1062,18 +1063,27 @@ class TestMergeAndBuildHelpers:
         sample_tacos_meal: ParsedMeal,
         sample_tikka_meal: ParsedMeal,
     ):
-        """Test _merge_meal_ingredients deduplicates same ingredient."""
+        """Test _merge_meal_ingredients deduplicates same ingredient+unit group.
+
+        Post-fix, merged keys are composite ``(ingredient_lower, group_token)``
+        tuples rather than plain ingredient-name strings (issue #69).
+        """
         merged = Consolidator._merge_meal_ingredients(
             [sample_tacos_meal, sample_tikka_meal],
             set(),
         )
-        assert "lime" in merged
-        raw_qty = merged["lime"].get("quantity", 0.0)
+        key = ("lime", "dim:count")
+        assert key in merged
+        raw_qty = merged[key].get("quantity", 0.0)
         qty = float(raw_qty) if isinstance(raw_qty, (int, float)) else 0.0
         assert qty == 3.0
 
     def test_merge_excludes_pantry(self, sample_tacos_meal: ParsedMeal):
-        """Test pantry items excluded from merged result."""
+        """Test pantry items excluded from merged result via composite key.
+
+        Post-fix, membership must be checked via the ingredient-name element
+        of the composite ``(ingredient_lower, group_token)`` key (issue #69).
+        """
         # "olive oil" is in purchase_items but we pass it as pantry
         meal = ParsedMeal(
             name="Test",
@@ -1100,8 +1110,8 @@ class TestMergeAndBuildHelpers:
             [meal],
             {"olive oil"},
         )
-        assert "olive oil" not in merged
-        assert "chicken" in merged
+        assert not any(k[0] == "olive oil" for k in merged)
+        assert any(k[0] == "chicken" for k in merged)
 
     def test_build_items_from_merged(self):
         """Test _build_items_from_merged produces ShoppingListItem list."""
@@ -1124,3 +1134,340 @@ class TestMergeAndBuildHelpers:
         result = Consolidator._build_restock_items(sample_restock_queue)
         assert len(result) == 2
         assert all("restock" in i.from_meals for i in result)
+
+
+# ---------------------------------------------------------------------------
+# Unit-aware merge tests (issue #69: dimensional-quantity consolidation bug)
+#
+# Current buggy behavior: _merge_meal_ingredients sums raw quantities across
+# ALL units for a given ingredient name and keeps whichever unit was seen
+# first, producing nonsensical totals (e.g. "milk 1 cup + 1 gal" -> "2 cup").
+# These tests assert the post-fix, dimension-aware behavior and are expected
+# to FAIL against the current implementation.
+# ---------------------------------------------------------------------------
+
+
+class TestConsolidateSimpleUnitAwareMerging:
+    """Tests for dimension-aware quantity merging (issue #69 regression)."""
+
+    def test_volume_units_converted_and_summed(self) -> None:
+        """Test milk 1 cup + 1 gal merges to 17 cups (not naive sum of 2)."""
+        meal_a = ParsedMeal(
+            name="Cereal",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="milk",
+                    quantity=1.0,
+                    unit="cup",
+                    category=IngredientCategory.DAIRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        meal_b = ParsedMeal(
+            name="Milkshake",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="milk",
+                    quantity=1.0,
+                    unit="gal",
+                    category=IngredientCategory.DAIRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        consolidator = Consolidator()
+        result = consolidator.consolidate_simple([meal_a, meal_b], [], [])
+        milk_items = [i for i in result if i.ingredient == "milk"]
+        assert len(milk_items) == 1
+        assert milk_items[0].quantity == pytest.approx(17.0)
+        assert milk_items[0].unit == Unit.CUP
+
+    def test_mass_units_converted_and_summed(self) -> None:
+        """Test chicken 1 lb + 8 oz merges to 1.5 lb (canonical first-seen unit)."""
+        meal_a = ParsedMeal(
+            name="Grilled Chicken",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="chicken",
+                    quantity=1.0,
+                    unit="lb",
+                    category=IngredientCategory.MEAT,
+                ),
+            ],
+            pantry_items=[],
+        )
+        meal_b = ParsedMeal(
+            name="Chicken Soup",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="chicken",
+                    quantity=8.0,
+                    unit="oz",
+                    category=IngredientCategory.MEAT,
+                ),
+            ],
+            pantry_items=[],
+        )
+        consolidator = Consolidator()
+        result = consolidator.consolidate_simple([meal_a, meal_b], [], [])
+        chicken_items = [i for i in result if i.ingredient == "chicken"]
+        assert len(chicken_items) == 1
+        assert chicken_items[0].quantity == pytest.approx(1.5)
+        assert chicken_items[0].unit == Unit.LB
+
+    def test_count_units_converted_and_summed(self) -> None:
+        """Test eggs 1 dozen + 6 each merges to 1.5 dozen (first-seen unit)."""
+        meal_a = ParsedMeal(
+            name="Omelette",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="eggs",
+                    quantity=1.0,
+                    unit="dozen",
+                    category=IngredientCategory.DAIRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        meal_b = ParsedMeal(
+            name="Baking",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="eggs",
+                    quantity=6.0,
+                    unit="each",
+                    category=IngredientCategory.DAIRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        consolidator = Consolidator()
+        result = consolidator.consolidate_simple([meal_a, meal_b], [], [])
+        egg_items = [i for i in result if i.ingredient == "eggs"]
+        assert len(egg_items) == 1
+        assert egg_items[0].quantity == pytest.approx(1.5)
+        assert egg_items[0].unit == Unit.DOZEN
+
+    def test_packaging_same_unit_merges(self) -> None:
+        """Test sauce 1 jar + 1 jar merges into a single 2-jar line item.
+
+        This is a same-unit merge that should hold both before and after
+        the fix -- included as a regression guard alongside the new
+        dimension-aware split behavior.
+        """
+        meal_a = ParsedMeal(
+            name="Pasta Night",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="sauce",
+                    quantity=1.0,
+                    unit="jar",
+                    category=IngredientCategory.PANTRY_DRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        meal_b = ParsedMeal(
+            name="Pizza Night",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="sauce",
+                    quantity=1.0,
+                    unit="jar",
+                    category=IngredientCategory.PANTRY_DRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        consolidator = Consolidator()
+        result = consolidator.consolidate_simple([meal_a, meal_b], [], [])
+        sauce_items = [i for i in result if i.ingredient == "sauce"]
+        assert len(sauce_items) == 1
+        assert sauce_items[0].quantity == 2.0
+        assert sauce_items[0].unit == Unit.JAR
+
+    def test_packaging_different_units_stay_separate(self) -> None:
+        """Test sauce 1 jar + 1 can stay as two distinct line items."""
+        meal_a = ParsedMeal(
+            name="Pasta Night",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="sauce",
+                    quantity=1.0,
+                    unit="jar",
+                    category=IngredientCategory.PANTRY_DRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        meal_b = ParsedMeal(
+            name="Soup Night",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="sauce",
+                    quantity=1.0,
+                    unit="can",
+                    category=IngredientCategory.PANTRY_DRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        consolidator = Consolidator()
+        result = consolidator.consolidate_simple([meal_a, meal_b], [], [])
+        sauce_items = [i for i in result if i.ingredient == "sauce"]
+        assert len(sauce_items) == 2
+
+    def test_dimensioned_vs_packaging_unit_stays_separate(self) -> None:
+        """Test milk 1 cup + milk 1 jar stay as two distinct line items."""
+        meal_a = ParsedMeal(
+            name="Cereal",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="milk",
+                    quantity=1.0,
+                    unit="cup",
+                    category=IngredientCategory.DAIRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        meal_b = ParsedMeal(
+            name="Sauce Base",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="milk",
+                    quantity=1.0,
+                    unit="jar",
+                    category=IngredientCategory.DAIRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        consolidator = Consolidator()
+        result = consolidator.consolidate_simple([meal_a, meal_b], [], [])
+        milk_items = [i for i in result if i.ingredient == "milk"]
+        assert len(milk_items) == 2
+
+    def test_from_meals_tracked_per_split_line(self) -> None:
+        """Test from_meals is scoped per split line, not merged globally.
+
+        Meal A contributes milk in cups, meal B contributes milk in jars.
+        Post-fix these are two distinct line items, each with only its
+        contributing meal in ``from_meals``.
+        """
+        meal_a = ParsedMeal(
+            name="Cereal",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="milk",
+                    quantity=1.0,
+                    unit="cup",
+                    category=IngredientCategory.DAIRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        meal_b = ParsedMeal(
+            name="Sauce Base",
+            servings=2,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="milk",
+                    quantity=1.0,
+                    unit="jar",
+                    category=IngredientCategory.DAIRY,
+                ),
+            ],
+            pantry_items=[],
+        )
+        consolidator = Consolidator()
+        result = consolidator.consolidate_simple([meal_a, meal_b], [], [])
+        cup_items = [i for i in result if i.ingredient == "milk" and i.unit == Unit.CUP]
+        jar_items = [i for i in result if i.ingredient == "milk" and i.unit == Unit.JAR]
+        assert len(cup_items) == 1
+        assert len(jar_items) == 1
+        assert cup_items[0].from_meals == ["Cereal"]
+        assert jar_items[0].from_meals == ["Sauce Base"]
+
+
+class TestMergeHelperDirect:
+    """Direct tests for the planned unit-aware merge helper methods.
+
+    ``_ingredient_group_key`` and ``_merge_quantity`` do not exist yet on
+    the current ``Consolidator`` implementation, so these tests are
+    expected to fail with ``AttributeError`` until issue #69 is fixed.
+    """
+
+    def test_ingredient_group_key_dimensioned_unit(self) -> None:
+        """Test _ingredient_group_key groups dimensioned units by dimension."""
+        assert Consolidator._ingredient_group_key("Milk", Unit.CUP) == (
+            "milk",
+            "dim:volume",
+        )
+
+    def test_ingredient_group_key_packaging_unit(self) -> None:
+        """Test _ingredient_group_key groups packaging units by exact unit."""
+        assert Consolidator._ingredient_group_key("Sauce", Unit.JAR) == (
+            "sauce",
+            "unit:jar",
+        )
+
+    def test_merge_quantity_incomparable_units_falls_back_to_raw_sum(self) -> None:
+        """Test _merge_quantity falls back to raw addition when convert() is None."""
+        entry: dict[str, object] = {
+            "ingredient": "mystery",
+            "quantity": 1.0,
+            "unit": Unit.CUP,
+            "category": "other",
+            "from_meals": ["Meal A"],
+        }
+        item = Ingredient(
+            ingredient="mystery",
+            quantity=2.0,
+            unit="bag",
+            category=IngredientCategory.OTHER,
+        )
+        Consolidator._merge_quantity(entry, item)
+        assert entry["quantity"] == pytest.approx(3.0)
