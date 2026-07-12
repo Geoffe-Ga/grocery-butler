@@ -455,8 +455,10 @@ unchanged. The blueprint lives in `grocery_butler/api.py` and is registered by
 `create_app()`.
 
 - **Base URL:** `https://grocery-butler.tailnet.ts.net/api/v1` — reached over
-  the Tailscale tailnet; the API is not meant to be exposed on the public
-  Railway domain.
+  the Tailscale tailnet. The tailnet-only boundary is enforced in code, not
+  just by network configuration: see
+  [Network boundary guard](#network-boundary-guard-tailnet-only) for how
+  requests from outside the allow-list are rejected.
 - **Auth:** every `/api/v1` route requires a bearer token in the
   `<caller_id>.<timestamp>.<hmac_hex>` format, signed with
   `RUBOTPAUL_SHARED_SECRET` (HMAC-SHA256, 5-minute TTL). Mint with
@@ -799,6 +801,101 @@ arms the fail-fast checks below.
 | `SAFEWAY_PASSWORD` | Yes (ordering) | Safeway account password. |
 | `SAFEWAY_STORE_ID` | Yes (ordering) | Safeway store ID for product searches. |
 | `PORT` | Auto | Injected by Railway for the web process. |
+| `TAILNET_GUARD_ENABLED` | No (defaults secure) | Kill switch for the network boundary guard (below); the guard is active unless explicitly set to `false`/`0`/`no` (case-insensitive). |
+| `TAILNET_GUARD_ALLOWED_CIDRS` | No (defaults secure) | Comma-separated CIDR allow-list for the network boundary guard (below); replaces (does not extend) the default `127.0.0.0/8,::1/128,100.64.0.0/10`. An explicitly-empty value trusts nothing (full lockout, logged at startup) — delete the variable to restore defaults. |
+
+### Network boundary guard (tailnet-only)
+
+Grocery Butler is meant to be reached only over the Tailscale tailnet (or
+loopback, locally). A fail-closed `app.before_request` hook, registered by
+`create_app()` in `grocery_butler/network_guard.py`, rejects any request
+whose **socket peer address** (`request.remote_addr`) falls outside an
+allow-list of CIDR ranges.
+
+- **No forwarded-header trust.** Admission is keyed only on
+  `request.remote_addr`; the guard never trusts `X-Forwarded-For` (or any
+  other client-supplied header), and Werkzeug's `ProxyFix` must never be
+  added. Railway's edge is a shared, multi-tenant proxy, so any header it
+  forwards from the original client is attacker-controlled input — trusting
+  it would let a public request simply set `X-Forwarded-For: 127.0.0.1` and
+  walk back through the hole this guard exists to close.
+- **`TAILNET_GUARD_ENABLED`** — kill switch, read once at app-creation time.
+  The guard is active unless explicitly set to `false`/`0`/`no`
+  (case-insensitive); unset means enabled (fail-closed by default).
+- **`TAILNET_GUARD_ALLOWED_CIDRS`** — comma-separated CIDR allow-list, read
+  once at app-creation time. Defaults to
+  `127.0.0.0/8,::1/128,100.64.0.0/10` (loopback + IPv6 loopback + the
+  Tailscale CGNAT range). Setting this variable **replaces** the default
+  list; it does not extend it. RFC1918 private ranges are deliberately
+  excluded from the default so a misconfigured office/home LAN is never
+  accidentally trusted.
+  - **Blank is not unset.** Setting the variable to an *empty string*
+    (e.g. clearing the value in the Railway UI instead of deleting the
+    variable) is a legitimate "trust nothing" configuration: every
+    non-health request is rejected, including loopback and the tailnet.
+    This fails closed, and the app logs a startup warning
+    (`network_guard_empty_allowlist`) so the lockout is loud rather than
+    silent — but to restore the defaults, *delete* the variable, don't
+    blank it.
+  - **Entries are parsed strictly.** A CIDR entry with host bits set
+    (e.g. `100.64.1.5/24` instead of `100.64.1.0/24`) or any other
+    malformed entry raises `ValueError` at startup rather than being
+    silently corrected or dropped — misconfiguration fails loud, at
+    deploy time.
+  - **IPv4-mapped IPv6 peers are normalized.** If the WSGI server ever
+    listens dual-stack, an IPv4 peer can be reported as
+    `::ffff:100.64.1.2`; the guard also checks the unmapped IPv4 form so
+    such peers get IPv4 CIDR semantics (this widens availability only —
+    a mapped public address is still rejected).
+- **Health check exemption.** `/health` and `/healthz` are always exempt
+  (matched by Flask endpoint name, not path) so Railway's own health
+  checks — which arrive from Railway's infrastructure, not the tailnet —
+  keep working. This is intentional: both endpoints expose only
+  status/DB-connectivity information.
+- **Rejection behavior.** Requests from outside the allow-list receive a
+  `403`: a JSON `{"error": "forbidden"}` body for `/api/*` paths, an HTML
+  error page otherwise.
+- **Observability.** At startup the guard logs the resolved allow-list
+  (`network_guard_enabled allowed_cidrs=...`), or
+  `network_guard_disabled` if the kill switch is set, or
+  `network_guard_empty_allowlist` (warning) if the resolved list is
+  empty. Every rejection logs
+  `network_guard_rejected path=... remote_addr=...` at warning level —
+  path and peer address only, never headers or bodies.
+
+#### Verifying the boundary on the live deployment
+
+The guard's correctness rests on one assumption unit tests cannot prove:
+that `request.remote_addr`, as seen by gunicorn on Railway's specific
+proxy/sidecar topology, actually distinguishes tailnet peers from
+public-edge traffic. **Verify this once against the real deployment
+before relying on the guard:**
+
+1. Deploy and check the deploy logs for the startup line
+   `network_guard_enabled allowed_cidrs=127.0.0.0/8,::1/128,100.64.0.0/10`
+   (confirms which allow-list the running process resolved).
+2. From a device on the tailnet, load the dashboard and hit
+   `/api/v1/inventory` with a valid bearer token — both must succeed. If
+   they 403 instead, check the logs for `network_guard_rejected` lines:
+   the logged `remote_addr` tells you what address the Tailscale
+   sidecar/tailnet hop actually presents (e.g. loopback if the sidecar
+   proxies via localhost, or a `100.64.0.0/10` address) so you can
+   confirm or correct the allow-list.
+3. While the Railway public domain is still attached, request the
+   dashboard from a non-tailnet network — it must return 403, and the
+   logs must show `network_guard_rejected` with the public-edge
+   `remote_addr`. If public traffic is *not* rejected, the logged
+   address reveals which allowed range it incidentally lands in.
+4. Then remove the public domain (Quick start step 6 below) so the
+   guard is defense-in-depth rather than the only line.
+
+**Rate limiting:** flask-limiter is deliberately deferred. With the
+fail-closed tailnet boundary above, public HMAC brute-forcing of `/api/v1`
+and abuse of paid Claude endpoints (e.g. `/api/v1/meals/parse`) already
+require tailnet access, so a limiter would add a dependency without closing
+a live gap — and a naive in-memory limiter is ineffective across
+per-gunicorn-worker processes without a shared store (no Redis is
+provisioned). Revisit if multi-tenant tailnet access is ever introduced.
 
 ### Fail-fast startup checks
 
@@ -825,6 +922,10 @@ See `.env.example` for the full variable list and comments.
    schema before serving traffic (see above).
 5. Attach the Railway service to your Tailscale tailnet so RubotPaul can reach
    `/api/v1` privately.
+6. In the Railway service's Settings -> Networking, remove the default
+   public domain so the app is reachable only through the Tailscale
+   sidecar/tailnet. The in-code network boundary guard above is
+   defense-in-depth, not a substitute for removing the public domain.
 
 ## License
 
