@@ -47,6 +47,11 @@ class Config:
     safeway_password: str = ""
     safeway_store_id: str = ""
 
+    # Issue #60: order submission is descoped for v1.0 (unverified checkout
+    # API surface). Fail-safe default is off; opt in explicitly once the
+    # live Safeway checkout flow has been verified.
+    safeway_order_submission_enabled: bool = False
+
 
 def load_config(env_path: str | Path | None = None) -> Config:
     """Load and validate configuration from environment / .env file.
@@ -99,4 +104,8 @@ def load_config(env_path: str | Path | None = None) -> Config:
         safeway_username=os.getenv("SAFEWAY_USERNAME", ""),
         safeway_password=os.getenv("SAFEWAY_PASSWORD", ""),
         safeway_store_id=os.getenv("SAFEWAY_STORE_ID", ""),
+        safeway_order_submission_enabled=os.getenv(
+            "SAFEWAY_ORDER_SUBMISSION_ENABLED", "false"
+        ).lower()
+        in ("true", "1", "yes"),
     )

@@ -735,3 +735,19 @@ class TestPostRetryOnAuthFailureFalse:
 
         assert result == {"orderId": "ORD-1"}
         client.close()
+
+
+# ---------------------------------------------------------------------------
+# Issue #60 — unverified surface must be documented in-module
+# ---------------------------------------------------------------------------
+
+
+class TestModuleDocumentsUnverifiedSurface:
+    """Tests that this module flags itself as an unverified real-money surface."""
+
+    def test_module_docstring_references_issue_60(self) -> None:
+        """Test the module docstring flags Issue #60 as unverified."""
+        import grocery_butler.safeway_client as safeway_client_module
+
+        assert safeway_client_module.__doc__ is not None
+        assert "Issue #60" in safeway_client_module.__doc__

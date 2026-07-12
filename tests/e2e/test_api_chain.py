@@ -143,6 +143,47 @@ def test_full_chain_meal_to_confirmed_order(
     assert "/abs/pub/web/orders" in safeway_mock.requested_paths
 
 
+def test_disabled_submission_returns_501_default_off(
+    client: FlaskClient,
+    signed_headers: Callable[..., dict[str, str]],
+    seed_recipe: ParsedMeal,
+    no_claude: None,
+    safeway_mock: SafewayMockState,
+    db_path: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #60: with the flag unset (the production default), confirm returns 501.
+
+    ``e2e_env`` opts this suite's full-chain tests into submission via
+    ``SAFEWAY_ORDER_SUBMISSION_ENABLED=true`` (see conftest.py); this test
+    reverts to the real, unset production default to prove the fail-safe
+    gate blocks a live submission end-to-end -- through the real
+    ``SafewayPipeline`` and Flask confirm endpoint, not just unit mocks --
+    and that the mocked Safeway order endpoint is never hit.
+    """
+    from grocery_butler.order_service import ORDER_SUBMISSION_DISABLED_MESSAGE
+
+    monkeypatch.delenv("SAFEWAY_ORDER_SUBMISSION_ENABLED", raising=False)
+    headers = signed_headers()
+    action_id = _stage_order(client, headers, seed_recipe.name)
+
+    confirmed = client.post(
+        "/api/v1/actions/confirm",
+        json={"action_id": action_id},
+        headers=headers,
+    )
+
+    assert confirmed.status_code == 501
+    assert confirmed.get_json()["error"] == ORDER_SUBMISSION_DISABLED_MESSAGE
+
+    pending = PendingActionsStore(db_path).get_pending_action(action_id)
+    assert pending is not None
+    assert pending.status is PendingActionStatus.PENDING
+
+    # The disabled gate must fire before any network call reaches Safeway.
+    assert "/abs/pub/web/orders" not in safeway_mock.requested_paths
+
+
 def test_confirming_same_action_twice_returns_409(
     client: FlaskClient,
     signed_headers: Callable[..., dict[str, str]],

@@ -11,7 +11,12 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from grocery_butler.cart_builder import CartBuilder
-from grocery_butler.order_service import OrderOutcome, OrderResult, OrderService
+from grocery_butler.order_service import (
+    ORDER_SUBMISSION_DISABLED_MESSAGE,
+    OrderOutcome,
+    OrderResult,
+    OrderService,
+)
 from grocery_butler.order_submissions import (
     DUPLICATE_WINDOW,
     OrderSubmissionStore,
@@ -38,6 +43,17 @@ _DUPLICATE_ERROR_MESSAGE = (
 
 class SafewayPipelineError(Exception):
     """Raised when the pipeline encounters an unrecoverable error."""
+
+
+class OrderSubmissionDisabledError(SafewayPipelineError):
+    """Raised when order submission is attempted while descoped (Issue #60).
+
+    Real order submission is disabled by default because the Safeway
+    checkout API surface is unverified. This is raised as the first
+    action of :meth:`SafewayPipeline.run` and
+    :meth:`SafewayPipeline.submit_cart` when the gate is off, before any
+    authentication or cart-building I/O occurs.
+    """
 
 
 class SafewayPipeline:
@@ -95,9 +111,28 @@ class SafewayPipeline:
             search_service, selector, substitution, self._client
         )
 
+        # Issue #60: fail-safe order-submission gate. Defense in depth —
+        # OrderService also defaults to disabled, and this pipeline
+        # additionally short-circuits run()/submit_cart() before any I/O.
+        self._submission_enabled = config.safeway_order_submission_enabled
+
         pantry_manager = PantryManager(db_path, anthropic_client)
-        self._order_service = OrderService(self._client, pantry_manager)
+        self._order_service = OrderService(
+            self._client,
+            pantry_manager,
+            submission_enabled=self._submission_enabled,
+        )
         self._order_submissions = OrderSubmissionStore(db_path)
+
+    @property
+    def order_submission_enabled(self) -> bool:
+        """Whether real order submission is enabled (Issue #60 gate).
+
+        Returns:
+            True if ``SAFEWAY_ORDER_SUBMISSION_ENABLED`` was set truthy
+            when this pipeline's config was loaded, False otherwise.
+        """
+        return self._submission_enabled
 
     def run(
         self,
@@ -117,8 +152,13 @@ class SafewayPipeline:
             OrderResult with confirmation or error details.
 
         Raises:
+            OrderSubmissionDisabledError: If order submission is disabled
+                (Issue #60). Raised before authentication or cart
+                building.
             SafewayPipelineError: If authentication fails.
         """
+        if not self._submission_enabled:
+            raise OrderSubmissionDisabledError(ORDER_SUBMISSION_DISABLED_MESSAGE)
         self._authenticate()
         cart = self._cart_builder.build_cart(items, restock_items)
         return self._submit_guarded(cart, idempotency_key)
@@ -162,8 +202,12 @@ class SafewayPipeline:
             OrderResult with confirmation or error details.
 
         Raises:
+            OrderSubmissionDisabledError: If order submission is disabled
+                (Issue #60). Raised before authentication.
             SafewayPipelineError: If authentication fails.
         """
+        if not self._submission_enabled:
+            raise OrderSubmissionDisabledError(ORDER_SUBMISSION_DISABLED_MESSAGE)
         self._authenticate()
         return self._submit_guarded(cart, idempotency_key)
 
@@ -220,11 +264,10 @@ class SafewayPipeline:
         key = idempotency_key or str(uuid.uuid4())
         submission_id = self._order_submissions.record_attempt(key, fingerprint)
 
-        result = (
-            self._order_service.submit_order(cart, idempotency_key=key)
-            if idempotency_key is not None
-            else self._order_service.submit_order(cart)
-        )
+        # Always forward the exact key recorded in the ledger so the
+        # clientOrderId sent to Safeway and our ledger row correlate,
+        # even when the key was generated here rather than supplied.
+        result = self._order_service.submit_order(cart, idempotency_key=key)
 
         self._finalize_submission(submission_id, result)
         return result

@@ -1,13 +1,20 @@
-"""Tests for the production process wiring (issue #49).
+"""Tests for the production process wiring (issues #49, #57, and #58).
 
 One gunicorn web process serves both the HTML dashboard and the /api/v1
 blueprint; the Discord worker process is retired from the Procfile (RubotPaul
-is the Discord interface after cutover).
+is the Discord interface after cutover). The Dockerfile is the single
+canonical deploy path (issue #58): a `docker-entrypoint.sh` wrapper runs
+database migrations before `exec`-ing into the gunicorn server, and the
+Heroku-only Procfile is deleted entirely. The `create_app()` factory itself
+resolves the `DATABASE_URL`/`DATABASE_PATH` environment variables so the
+no-argument gunicorn invocation targets the persistent database (issue #57).
 """
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,6 +31,8 @@ TEST_SECRET = "test-shared-secret"
 
 PROCFILE = Path(__file__).resolve().parent.parent / "Procfile"
 DOCKERFILE = Path(__file__).resolve().parent.parent / "Dockerfile"
+ENTRYPOINT_SCRIPT = Path(__file__).resolve().parent.parent / "docker-entrypoint.sh"
+MIGRATE_COMMAND = "python -m grocery_butler.db.migrate"
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -90,35 +99,16 @@ class TestSingleProcessServesBothSurfaces:
 
 
 # ---------------------------------------------------------------------------
-# Procfile topology
+# Single canonical deploy path (issue #58)
 # ---------------------------------------------------------------------------
 
 
-class TestProcfileTopology:
-    """The Procfile deploys release + web only; the Discord worker retired."""
+class TestSingleCanonicalDeployPath:
+    """The Dockerfile is the only deploy path; the Heroku Procfile is gone."""
 
-    def test_procfile_has_no_worker_process(self) -> None:
-        """RubotPaul owns Discord after cutover; no bot process deploys."""
-        processes = _procfile_processes()
-        assert "worker" not in processes
-
-    def test_procfile_keeps_release_and_web(self) -> None:
-        """Migrations still run on deploy and gunicorn serves the app."""
-        processes = _procfile_processes()
-        assert processes["release"] == "python -m grocery_butler.db.migrate"
-        assert "gunicorn 'grocery_butler.app:create_app()'" in processes["web"]
-
-
-def _procfile_processes() -> dict[str, str]:
-    """Parse the Procfile into a {process_name: command} mapping."""
-    processes: dict[str, str] = {}
-    for line in PROCFILE.read_text().splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        name, _, command = stripped.partition(":")
-        processes[name.strip()] = command.strip()
-    return processes
+    def test_procfile_absent(self) -> None:
+        """Procfile is deleted; Railway never reads it, so it must not exist."""
+        assert not PROCFILE.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +158,175 @@ def _dockerfile_cmd() -> str:
         if stripped.startswith("CMD "):
             command = stripped.removeprefix("CMD ")
     return command
+
+
+# ---------------------------------------------------------------------------
+# Dockerfile wires in docker-entrypoint.sh (issue #58)
+# ---------------------------------------------------------------------------
+
+
+class TestDockerfileEntrypointWiring:
+    """The image COPYs docker-entrypoint.sh in and declares it ENTRYPOINT."""
+
+    def test_dockerfile_declares_entrypoint(self) -> None:
+        """An ENTRYPOINT instruction must invoke docker-entrypoint.sh."""
+        entrypoint_line = _dockerfile_entrypoint_line()
+        assert "docker-entrypoint.sh" in entrypoint_line
+
+    def test_dockerfile_copies_entrypoint_executable(self) -> None:
+        """docker-entrypoint.sh is COPYed in and made executable."""
+        text = DOCKERFILE.read_text()
+        copies_script = any(
+            line.strip().startswith("COPY") and "docker-entrypoint.sh" in line
+            for line in text.splitlines()
+        )
+        assert copies_script, "Dockerfile must COPY docker-entrypoint.sh"
+        assert _dockerfile_makes_entrypoint_executable(text)
+
+
+def _dockerfile_entrypoint_line() -> str:
+    """Return the Dockerfile's `ENTRYPOINT` instruction line, if present.
+
+    Returns:
+        The stripped text of the line starting with `ENTRYPOINT `, or an
+        empty string if the Dockerfile declares no ENTRYPOINT.
+    """
+    for line in DOCKERFILE.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("ENTRYPOINT "):
+            return stripped
+    return ""
+
+
+def _dockerfile_makes_entrypoint_executable(text: str) -> bool:
+    """Return whether the Dockerfile marks docker-entrypoint.sh executable.
+
+    Args:
+        text: Full contents of the Dockerfile.
+
+    Returns:
+        True if a `COPY --chmod=0755` clause targets the entrypoint script,
+        or a separate `RUN` instruction `chmod +x`s it; False otherwise.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if "docker-entrypoint.sh" not in stripped:
+            continue
+        if stripped.startswith("COPY") and "--chmod=0755" in stripped:
+            return True
+        if stripped.startswith("RUN") and "chmod" in stripped and "+x" in stripped:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# docker-entrypoint.sh contents (issue #58)
+# ---------------------------------------------------------------------------
+
+
+class TestEntrypointScriptContents:
+    """Static checks on the text of docker-entrypoint.sh."""
+
+    def test_entrypoint_invokes_migration_runner(self) -> None:
+        """The script must run the migration module before serving."""
+        text = ENTRYPOINT_SCRIPT.read_text()
+        assert MIGRATE_COMMAND in text
+
+    def test_entrypoint_execs_cmd_last(self) -> None:
+        """`exec "$@"` must appear, and only after the migration command."""
+        text = ENTRYPOINT_SCRIPT.read_text()
+        exec_snippet = 'exec "$@"'
+        assert exec_snippet in text
+        assert text.index(MIGRATE_COMMAND) < text.index(exec_snippet)
+
+    def test_entrypoint_fails_fast(self) -> None:
+        """`set -e` (or `-eu`) must appear near the top so failures abort."""
+        non_comment_lines = [
+            line.strip()
+            for line in ENTRYPOINT_SCRIPT.read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ][:5]
+        assert any(line.startswith("set -e") for line in non_comment_lines)
+
+
+# ---------------------------------------------------------------------------
+# docker-entrypoint.sh behavior (issue #58)
+# ---------------------------------------------------------------------------
+
+
+class TestEntrypointBehavior:
+    """Runs docker-entrypoint.sh against fake `python`/server shims."""
+
+    def test_entrypoint_runs_migrations_before_server(self, tmp_path: Path) -> None:
+        """Migrations run, then the wrapped server command execs, in order."""
+        log_path = tmp_path / "log.txt"
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_shim(bin_dir / "python", log_path, "migrate", exit_code=0)
+        server_shim = bin_dir / "server"
+        _write_shim(server_shim, log_path, "server", exit_code=0)
+
+        result = _run_entrypoint(bin_dir, [str(server_shim)])
+
+        assert result.returncode == 0
+        assert log_path.read_text().splitlines() == ["migrate", "server"]
+
+    def test_entrypoint_aborts_server_when_migration_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """A failing migration must abort before the server ever runs."""
+        log_path = tmp_path / "log.txt"
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _write_shim(bin_dir / "python", log_path, "migrate", exit_code=1)
+        server_shim = bin_dir / "server"
+        _write_shim(server_shim, log_path, "server", exit_code=0)
+
+        result = _run_entrypoint(bin_dir, [str(server_shim)])
+
+        assert result.returncode != 0
+        log_contents = log_path.read_text() if log_path.exists() else ""
+        assert "migrate" in log_contents.splitlines()
+        assert "server" not in log_contents.splitlines()
+
+
+def _write_shim(path: Path, log_path: Path, label: str, *, exit_code: int) -> None:
+    """Write an executable POSIX shell shim that logs one line and exits.
+
+    Args:
+        path: Filesystem path at which to create the shim script.
+        log_path: File the shim appends `label` to when invoked.
+        label: Line appended to `log_path` on invocation.
+        exit_code: Process exit status the shim returns.
+    """
+    path.write_text(f'#!/bin/sh\necho "{label}" >> "{log_path}"\nexit {exit_code}\n')
+    path.chmod(0o755)
+
+
+def _run_entrypoint(
+    bin_dir: Path, server_argv: list[str]
+) -> subprocess.CompletedProcess[str]:
+    """Run docker-entrypoint.sh with a fake `python` shim ahead on PATH.
+
+    Args:
+        bin_dir: Directory containing the fake `python` shim, prepended to
+            `PATH` so the script's migration step invokes the shim.
+        server_argv: Argv passed to the script, standing in for the real
+            gunicorn `CMD` that `exec "$@"` should hand off to.
+
+    Returns:
+        The completed subprocess, including its captured exit code.
+    """
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    return subprocess.run(
+        ["sh", str(ENTRYPOINT_SCRIPT), *server_argv],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
 
 
 # ---------------------------------------------------------------------------

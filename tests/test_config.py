@@ -27,6 +27,8 @@ class TestConfig:
         assert cfg.flask_debug is False
         assert cfg.default_servings == 4
         assert cfg.default_units == "imperial"
+        # Issue #60: order submission must be off by default (fail-safe gate).
+        assert cfg.safeway_order_submission_enabled is False
 
     def test_config_all_fields(self) -> None:
         """Test Config accepts all fields."""
@@ -38,6 +40,7 @@ class TestConfig:
             flask_debug=True,
             default_servings=2,
             default_units="metric",
+            safeway_order_submission_enabled=True,
         )
         assert cfg.anthropic_api_key == "sk-test"
         assert cfg.discord_bot_token == "tok-123"
@@ -46,6 +49,7 @@ class TestConfig:
         assert cfg.flask_debug is True
         assert cfg.default_servings == 2
         assert cfg.default_units == "metric"
+        assert cfg.safeway_order_submission_enabled is True
 
     def test_config_is_frozen(self) -> None:
         """Test Config is immutable (frozen dataclass)."""
@@ -203,3 +207,39 @@ class TestLoadConfig:
         """Test database_url defaults to empty string when not set."""
         cfg = load_config()
         assert cfg.database_url == ""
+
+    @patch.dict(
+        os.environ,
+        {"ANTHROPIC_API_KEY": "sk-test"},
+        clear=True,
+    )
+    def test_load_config_safeway_order_submission_unset_defaults_false(self) -> None:
+        """Test Issue #60 gate defaults to False when the env var is unset."""
+        cfg = load_config()
+        assert cfg.safeway_order_submission_enabled is False
+
+    @pytest.mark.parametrize(
+        ("raw_value", "expected"),
+        [
+            ("true", True),
+            ("1", True),
+            ("yes", True),
+            ("TRUE", True),
+            ("Yes", True),
+            ("false", False),
+            ("0", False),
+            ("garbage", False),
+            ("", False),
+        ],
+    )
+    def test_load_config_safeway_order_submission_enabled_parsing(
+        self, raw_value: str, expected: bool
+    ) -> None:
+        """Test SAFEWAY_ORDER_SUBMISSION_ENABLED uses the flask_debug truthy parse."""
+        env = {
+            "ANTHROPIC_API_KEY": "sk-test",
+            "SAFEWAY_ORDER_SUBMISSION_ENABLED": raw_value,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = load_config()
+        assert cfg.safeway_order_submission_enabled is expected
