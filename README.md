@@ -137,20 +137,26 @@ on Railway Postgres. Schema is defined declaratively in `db/schema.sql` and
 
 ### Process Topology
 
-In production (Railway), the system runs as **one long-lived web process** plus
-a one-shot release step:
+In production (Railway), the system builds and runs from the `Dockerfile` —
+there's no separate build/release configuration to keep in sync. The image
+boots into `docker-entrypoint.sh`, which applies any pending schema
+migrations (`python -m grocery_butler.db.migrate`, reading `DATABASE_URL`)
+before anything else starts. If a migration fails, `set -eu` aborts the boot
+immediately, so gunicorn never starts and no request is ever served against
+an unmigrated schema. Once migrations succeed, the entrypoint `exec`s
+straight into gunicorn (`grocery_butler.app:create_app()`), which becomes
+the container's only long-lived process, serving both the kitchen-phone HTML
+UI and the HMAC-authenticated `/api/v1` blueprint.
 
-| Process | Command | Role |
-|---------|---------|------|
-| `release` | `python -m grocery_butler.db.migrate` | Run schema migrations on every deploy. |
-| `web` | `gunicorn 'grocery_butler.app:create_app()'` | Flask dashboard + the `/api/v1` JSON API for RubotPaul. |
+There is no separate worker process in production. The Discord bot
+(`python -m grocery_butler.bot`) is retired from deployment — RubotPaul is
+the household's Discord interface now, and it drives grocery-butler through
+`/api/v1` instead. The bot module stays in the codebase and can still be run
+locally (see [Discord bot (local only)](#discord-bot-local-only--retired-from-production)).
+The CLI is invoked ad-hoc as a single-shot process (no daemon).
 
-The single web process serves both the kitchen-phone HTML UI and the
-HMAC-authenticated `/api/v1` blueprint. The former `worker` process
-(`python -m grocery_butler.bot`) is retired from deployment: RubotPaul is the
-household's Discord interface and drives grocery-butler through `/api/v1`. The
-bot module stays in the codebase and can still be run locally. The CLI is
-invoked ad-hoc as a single-shot process (no daemon).
+See [Deploying to Railway](#deploying-to-railway) for the environment
+variables and setup steps that go with this topology.
 
 ### Key Design Rules
 
@@ -180,13 +186,15 @@ and easy to operate alone.**
 
 ### Web
 
-- **Flask 3** — small, explicit, and fits on a single Railway dyno without
-  ceremony. The app is constructed by a `create_app(db_path=None)` factory so
-  tests can spin up isolated instances against a tmpfile database.
+- **Flask 3** — small, explicit, and fits in a single Railway container
+  without ceremony. The app is constructed by a `create_app(db_path=None)`
+  factory so tests can spin up isolated instances against a tmpfile
+  database.
 - **Jinja2 templates + Pico CSS** — server-rendered HTML, no SPA, no build
   step. The dashboard is meant to be operated from a phone in the kitchen,
   not from a workstation.
-- **Gunicorn** — production WSGI server, configured in the `Procfile`.
+- **Gunicorn** — production WSGI server, launched by the `Dockerfile`'s
+  `CMD` (after `docker-entrypoint.sh` runs migrations).
 
 ### Chat
 
@@ -688,7 +696,8 @@ grocery-butler/
 ├── .github/workflows/          # CI/CD pipelines
 ├── .claude/                    # AI subagents and skills
 ├── pyproject.toml              # Tool configuration
-├── Procfile                    # Railway process definitions
+├── Dockerfile                  # Railway build + runtime image
+├── docker-entrypoint.sh        # Runs migrations, then execs gunicorn
 ├── requirements.txt            # Runtime dependencies
 └── requirements-dev.txt        # Development dependencies
 ```
@@ -708,17 +717,15 @@ See `CLAUDE.md` for the full engineering culture document.
 
 ## Deploying to Railway
 
-The project includes a `Procfile` for [Railway](https://railway.app/) deployment
-with two processes:
+Railway builds and runs the project's `Dockerfile` directly. See
+[Process Topology](#process-topology) for how the container boots — in
+short, `docker-entrypoint.sh` migrates the database before gunicorn ever
+starts, and a migration failure aborts the deploy rather than serving
+requests against a stale schema.
 
-| Process | Command | Description |
-|---------|---------|-------------|
-| `release` | `python -m grocery_butler.db.migrate` | Schema migrations on every deploy. |
-| `web` | `gunicorn 'grocery_butler.app:create_app()'` | Flask web app + `/api/v1` RubotPaul API. |
-
-The former `worker` process (Discord bot) is retired; RubotPaul reaches the
-`/api/v1` blueprint over Tailscale at
-`https://grocery-butler.tailnet.ts.net/api/v1`.
+RubotPaul reaches the `/api/v1` blueprint over Tailscale at
+`https://grocery-butler.tailnet.ts.net/api/v1`; there's no standalone worker
+process to deploy alongside the web service.
 
 ### Required environment variables
 
@@ -737,11 +744,12 @@ Set these in your Railway project settings:
 
 ### Quick start
 
-1. Connect your Railway project to this GitHub repo.
+1. Connect your Railway project to this GitHub repo (Railway detects and
+   builds the `Dockerfile` automatically).
 2. Add a PostgreSQL plugin (provides `DATABASE_URL` automatically).
 3. Set the required environment variables above.
-4. Railway auto-deploys on push to `main`; the `release` step runs migrations
-   before `web` starts.
+4. Railway auto-deploys on push to `main`; each deploy migrates the
+   schema before serving traffic (see above).
 5. Attach the Railway service to your Tailscale tailnet so RubotPaul can reach
    `/api/v1` privately.
 
