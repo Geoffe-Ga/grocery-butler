@@ -905,6 +905,8 @@ def create_bot(config: Config) -> discord.Client:
             removed = 0
             for pref in prefs:
                 matches = pref.match_target.lower() == target.lower()
+                # pref.id is always populated by get_brand_preferences(); the
+                # None check only narrows the Optional type for mypy.
                 if matches and pref.id is not None:
                     await asyncio.to_thread(
                         recipe_store.remove_brand_preference, pref.id

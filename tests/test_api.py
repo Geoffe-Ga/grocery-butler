@@ -265,7 +265,7 @@ class TestBrandsEndpoint:
         recipe_store: RecipeStore,
     ) -> None:
         """Seeded brand preferences come back with full field shape."""
-        recipe_store.add_brand_preference(
+        pref_id = recipe_store.add_brand_preference(
             BrandPreference(
                 match_target="milk",
                 match_type=BrandMatchType.INGREDIENT,
@@ -278,6 +278,7 @@ class TestBrandsEndpoint:
         assert response.status_code == 200
         brands = response.get_json()["brands"]
         assert len(brands) == 1
+        assert brands[0]["id"] == pref_id
         assert brands[0]["match_target"] == "milk"
         assert brands[0]["match_type"] == "ingredient"
         assert brands[0]["brand"] == "Clover"
