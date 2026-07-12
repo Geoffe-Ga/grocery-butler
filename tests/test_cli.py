@@ -1632,6 +1632,60 @@ class TestHandleOrder:
         captured = capsys.readouterr()
         assert "Payment declined" in captured.err
 
+    def test_submit_blocked_by_flagged_cart_surfaces_reasons_and_exits_1(self, capsys):
+        """Test a non-dry-run order with a flagged cart stays blocked.
+
+        Per the chief-architect's ruling for issue #59 round 3: the CLI
+        gets NO change -- non-dry-run flagged carts still hit
+        ``pipeline.run`` on its safe default (``allow_review_items``
+        stays False), so ``OrderService.submit_order`` hard-blocks and
+        ``pipeline.run`` returns the failed OrderResult produced by
+        ``_format_review_block_message`` (naming the flagged ingredient
+        and its reason code). The CLI must surface that message on
+        stderr and exit nonzero -- exactly like any other order failure.
+        """
+        from grocery_butler.order_service import OrderResult
+
+        result = OrderResult(
+            success=False,
+            error_message=(
+                "Order blocked pending review: the following items need "
+                "manual review before ordering: spaghetti "
+                "(incomparable_units). Re-submit with "
+                "allow_review_items=True after confirming quantities."
+            ),
+        )
+
+        cfg = MagicMock()
+        cfg.anthropic_api_key = "sk-test"
+        cfg.safeway_username = "user"
+        cfg.safeway_password = "pass"
+        cfg.safeway_store_id = "1234"
+        cfg.database_path = ":memory:"
+
+        with (
+            patch("grocery_butler.cli._load_config_safe", return_value=cfg),
+            patch("grocery_butler.cli._make_anthropic_client", return_value=None),
+            patch("grocery_butler.cli.SafewayPipeline") as mock_pipeline_cls,
+        ):
+            mock_pipeline = MagicMock()
+            mock_pipeline.run.return_value = result
+            mock_pipeline_cls.return_value = mock_pipeline
+
+            parser = _build_parser()
+            args = parser.parse_args(["order", "--items", "spaghetti"])
+            code = _handle_order(args)
+
+        assert code == 1
+        captured = capsys.readouterr()
+        assert "spaghetti" in captured.err
+        assert "incomparable_units" in captured.err
+        mock_pipeline.run.assert_called_once()
+        # No override: the CLI never opts into allow_review_items — the
+        # block must be the default, safe outcome for a flagged cart.
+        _, kwargs = mock_pipeline.run.call_args
+        assert "allow_review_items" not in kwargs
+
     def test_parser_accepts_order_flags(self):
         """Test argparse wiring for order subcommand."""
         parser = _build_parser()
@@ -1762,6 +1816,73 @@ class TestFormatCartSummary:
         assert "Eggs" in result
         assert "$3.49" in result
         assert "pickup" in result.lower()
+
+    def test_format_flagged_item_shows_review_marker(self) -> None:
+        """Test needs_review items get a '(review)' marker on their line.
+
+        Regression guard for issue #59: quantity decisions that require
+        human review (unparseable size, incomparable units, or a capped
+        quantity) must be visibly flagged in the CLI cart summary.
+        """
+        from grocery_butler.models import (
+            CartItem,
+            CartSummary,
+            FulfillmentType,
+            SafewayProduct,
+        )
+
+        flagged_product = SafewayProduct(
+            product_id="P1", name="Mystery Item", price=4.99, size=""
+        )
+        flagged_item = CartItem(
+            shopping_list_item=ShoppingListItem(
+                ingredient="mystery item",
+                quantity=1.0,
+                unit="each",
+                category=IngredientCategory.OTHER,
+                search_term="mystery item",
+                from_meals=["manual"],
+            ),
+            safeway_product=flagged_product,
+            quantity_to_order=1,
+            estimated_cost=4.99,
+            needs_review=True,
+            review_reason="unparseable_size",
+        )
+        unflagged_product = SafewayProduct(
+            product_id="P2", name="Milk", price=3.99, size="1 gal"
+        )
+        unflagged_item = CartItem(
+            shopping_list_item=ShoppingListItem(
+                ingredient="milk",
+                quantity=1.0,
+                unit="gal",
+                category=IngredientCategory.DAIRY,
+                search_term="milk",
+                from_meals=["manual"],
+            ),
+            safeway_product=unflagged_product,
+            quantity_to_order=1,
+            estimated_cost=3.99,
+        )
+        cart = CartSummary(
+            items=[flagged_item, unflagged_item],
+            failed_items=[],
+            substituted_items=[],
+            skipped_items=[],
+            restock_items=[],
+            subtotal=8.98,
+            fulfillment_options=[],
+            recommended_fulfillment=FulfillmentType.PICKUP,
+            estimated_total=8.98,
+        )
+
+        result = _format_cart_summary(cart)
+        lines = result.splitlines()
+        mystery_line = next(line for line in lines if "Mystery Item" in line)
+        milk_line = next(line for line in lines if "Milk" in line)
+        assert "(review)" in mystery_line
+        assert "(review)" not in milk_line
 
     def test_format_with_substitution_shows_name(self) -> None:
         """Test substituted items show the selected product name."""
