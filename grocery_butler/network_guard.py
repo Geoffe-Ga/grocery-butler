@@ -112,6 +112,14 @@ def is_trusted_source(remote_addr: str | None, allowed: Sequence[IPNetwork]) -> 
     Fails closed: a missing address, a malformed address string, or an
     empty allow-list are all treated as untrusted rather than raising.
 
+    IPv4-mapped IPv6 addresses (``::ffff:a.b.c.d``, as reported by a
+    dual-stack listener for an IPv4 peer) are additionally checked in
+    their unmapped IPv4 form, so a legitimate ``::ffff:100.64.1.2``
+    tailnet peer is not false-rejected by the exact-version CIDR match.
+    This only widens availability, never trust: the unmapped form is
+    the *same* socket peer, and a mapped public address stays outside
+    the allow-list either way.
+
     Args:
         remote_addr: The socket peer address to check, or ``None`` if
             unavailable.
@@ -119,7 +127,8 @@ def is_trusted_source(remote_addr: str | None, allowed: Sequence[IPNetwork]) -> 
 
     Returns:
         ``True`` if ``remote_addr`` is a valid address contained in at
-        least one network in ``allowed``, ``False`` otherwise.
+        least one network in ``allowed`` (directly, or via its unmapped
+        IPv4 form for IPv4-mapped IPv6 addresses), ``False`` otherwise.
     """
     if remote_addr is None:
         return False
@@ -127,7 +136,10 @@ def is_trusted_source(remote_addr: str | None, allowed: Sequence[IPNetwork]) -> 
         address = ipaddress.ip_address(remote_addr)
     except ValueError:
         return False
-    return any(address in network for network in allowed)
+    candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [address]
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        candidates.append(address.ipv4_mapped)
+    return any(candidate in network for candidate in candidates for network in allowed)
 
 
 def _is_guard_enabled() -> bool:
@@ -169,6 +181,14 @@ def register_network_guard(app: Flask) -> None:
     everywhere else. Every rejection is logged at warning level with the
     request path and remote address (no headers, no bodies, no secrets).
 
+    Startup observability: when active, the resolved allow-list CIDRs
+    are logged at info level (``network_guard_enabled``) so operators
+    can verify the live configuration from the deploy logs. If the
+    resolved allow-list is *empty* (an explicitly-blank
+    ``TAILNET_GUARD_ALLOWED_CIDRS``), a warning
+    (``network_guard_empty_allowlist``) is logged instead, since that
+    trust-nothing configuration locks out every non-health request.
+
     Args:
         app: Flask application instance to guard.
     """
@@ -177,6 +197,19 @@ def register_network_guard(app: Flask) -> None:
         return
 
     allowed = _resolve_allowed_networks()
+    if allowed:
+        LOG.info(
+            "network_guard_enabled allowed_cidrs=%s",
+            ",".join(str(network) for network in allowed),
+        )
+    else:
+        LOG.warning(
+            "network_guard_empty_allowlist -- resolved allow-list is empty; "
+            "every non-health request will be rejected (403). If this is "
+            "not intentional, unset %s entirely (do not set it to an empty "
+            "string) to restore the default allow-list.",
+            ALLOWED_CIDRS_ENV_VAR,
+        )
 
     from flask import jsonify, render_template, request
 

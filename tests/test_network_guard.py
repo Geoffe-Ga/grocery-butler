@@ -173,3 +173,44 @@ class TestIsTrustedSource:
     def test_is_trusted_source_empty_allowed_list_false(self) -> None:
         """Test any address is rejected when the allowed list is empty."""
         assert is_trusted_source("127.0.0.1", []) is False
+
+    def test_is_trusted_source_ipv4_mapped_cgnat_true(
+        self, allowed: list[ipaddress.IPv4Network | ipaddress.IPv6Network]
+    ) -> None:
+        """Test an IPv4-mapped IPv6 CGNAT peer is trusted under the default.
+
+        A dual-stack listener (bound to ``::`` with ``IPV6_V6ONLY`` off)
+        reports IPv4 peers as IPv4-mapped IPv6 strings like
+        ``::ffff:100.64.1.2``. The mapped form must be normalized to its
+        IPv4 equivalent before the CIDR check, or legitimate tailnet
+        peers would be false-rejected.
+        """
+        assert is_trusted_source("::ffff:100.64.1.2", allowed) is True
+
+    def test_is_trusted_source_ipv4_mapped_loopback_true(
+        self, allowed: list[ipaddress.IPv4Network | ipaddress.IPv6Network]
+    ) -> None:
+        """Test an IPv4-mapped IPv6 loopback peer is trusted under the default."""
+        assert is_trusted_source("::ffff:127.0.0.1", allowed) is True
+
+    def test_is_trusted_source_ipv4_mapped_public_false(
+        self, allowed: list[ipaddress.IPv4Network | ipaddress.IPv6Network]
+    ) -> None:
+        """Test an IPv4-mapped IPv6 *public* peer is still rejected.
+
+        Normalization must widen only availability (mapped trusted
+        peers admitted), never trust (mapped public peers stay out).
+        """
+        assert is_trusted_source("::ffff:8.8.8.8", allowed) is False
+
+    def test_is_trusted_source_ipv4_mapped_just_past_cgnat_false(
+        self, allowed: list[ipaddress.IPv4Network | ipaddress.IPv6Network]
+    ) -> None:
+        """Test the mapped form of the first post-CGNAT address is rejected."""
+        assert is_trusted_source("::ffff:100.128.0.0", allowed) is False
+
+    def test_is_trusted_source_plain_ipv6_non_loopback_false(
+        self, allowed: list[ipaddress.IPv4Network | ipaddress.IPv6Network]
+    ) -> None:
+        """Test a non-mapped, non-loopback IPv6 address is still rejected."""
+        assert is_trusted_source("2001:db8::1", allowed) is False

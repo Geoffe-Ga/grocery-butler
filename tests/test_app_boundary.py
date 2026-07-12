@@ -26,6 +26,7 @@ design.
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING
 
 import pytest
@@ -53,6 +54,10 @@ LOOPBACK_ADDR = "127.0.0.1"
 
 #: Inside a custom override range used by the CIDR-override tests below.
 CUSTOM_RANGE_ADDR = "192.0.2.10"
+
+#: IPv4-mapped IPv6 form of a CGNAT address, as reported by a dual-stack
+#: listener (bound to ``::`` with ``IPV6_V6ONLY`` off) for an IPv4 peer.
+MAPPED_CGNAT_ADDR = "::ffff:100.64.1.2"
 
 #: Shared HMAC secret for this module's bearer-token tests.
 TEST_SECRET = "test-shared-secret-boundary"
@@ -478,6 +483,156 @@ class TestCustomCidrOverride:
     ) -> None:
         """Test an address outside the custom range is still rejected."""
         response = custom_client.get("/", environ_base={"REMOTE_ADDR": PUBLIC_ADDR})
+        assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Explicitly-empty CIDR override: loud, fail-closed lockout
+# ---------------------------------------------------------------------------
+
+
+class TestExplicitlyEmptyCidrOverride:
+    """TAILNET_GUARD_ALLOWED_CIDRS="" trusts nothing -- and says so loudly."""
+
+    def test_empty_override_rejects_loopback(
+        self, make_app: Callable[[dict[str, str] | None], Flask]
+    ) -> None:
+        """Test an explicitly-empty allow-list locks out even loopback."""
+        application = make_app({"TAILNET_GUARD_ALLOWED_CIDRS": ""})
+        client = application.test_client()
+
+        response = client.get("/", environ_base={"REMOTE_ADDR": LOOPBACK_ADDR})
+
+        assert response.status_code == 403
+
+    def test_empty_override_health_still_exempt(
+        self, make_app: Callable[[dict[str, str] | None], Flask]
+    ) -> None:
+        """Test /health stays reachable even under a trust-nothing list."""
+        application = make_app({"TAILNET_GUARD_ALLOWED_CIDRS": ""})
+        client = application.test_client()
+
+        response = client.get("/health", environ_base={"REMOTE_ADDR": PUBLIC_ADDR})
+
+        assert response.status_code == 200
+
+    def test_empty_override_logs_startup_warning(
+        self,
+        make_app: Callable[[dict[str, str] | None], Flask],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Test a blanked-out CIDR env var produces a loud startup warning.
+
+        A stray empty-string value in a platform UI (e.g. Railway) must
+        not cause a *silent* full lockout: the guard warns at startup so
+        the misconfiguration is visible in the deploy logs.
+        """
+        with caplog.at_level(logging.WARNING, logger="network_guard"):
+            make_app({"TAILNET_GUARD_ALLOWED_CIDRS": ""})
+
+        warnings = [
+            record
+            for record in caplog.records
+            if record.name == "network_guard" and record.levelno == logging.WARNING
+        ]
+        assert any("network_guard_empty_allowlist" in r.getMessage() for r in warnings)
+        assert any("TAILNET_GUARD_ALLOWED_CIDRS" in r.getMessage() for r in warnings)
+
+
+# ---------------------------------------------------------------------------
+# Startup and rejection observability (supports live-deployment verification)
+# ---------------------------------------------------------------------------
+
+
+class TestGuardObservability:
+    """The guard logs its resolved config at startup and every rejection."""
+
+    def test_startup_logs_resolved_allowlist(
+        self,
+        make_app: Callable[[dict[str, str] | None], Flask],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Test the resolved allow-list CIDRs are logged at startup.
+
+        Operators verifying the guard against the live deployment need
+        to see, in the deploy logs, exactly which CIDRs the running
+        process resolved -- without reverse-engineering env precedence.
+        """
+        with caplog.at_level(logging.INFO, logger="network_guard"):
+            make_app(None)
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "network_guard"
+        ]
+        enabled_lines = [m for m in messages if "network_guard_enabled" in m]
+        assert enabled_lines
+        assert any(
+            "127.0.0.0/8" in m and "::1/128" in m and "100.64.0.0/10" in m
+            for m in enabled_lines
+        )
+
+    def test_startup_logs_custom_override_cidrs(
+        self,
+        make_app: Callable[[dict[str, str] | None], Flask],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Test a custom CIDR override is reflected in the startup log."""
+        with caplog.at_level(logging.INFO, logger="network_guard"):
+            make_app({"TAILNET_GUARD_ALLOWED_CIDRS": "192.0.2.0/24"})
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "network_guard"
+        ]
+        assert any(
+            "network_guard_enabled" in m and "192.0.2.0/24" in m for m in messages
+        )
+
+    def test_rejection_logs_path_and_remote_addr(
+        self,
+        client: FlaskClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Test each rejection logs the request path and observed peer.
+
+        This is the log line operators use to confirm what
+        ``request.remote_addr`` Railway's edge actually hands the app
+        for public-domain traffic (see README "Verifying the boundary
+        on the live deployment").
+        """
+        with caplog.at_level(logging.WARNING, logger="network_guard"):
+            client.get("/", environ_base={"REMOTE_ADDR": PUBLIC_ADDR})
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "network_guard"
+        ]
+        assert any(
+            "network_guard_rejected" in m and "path=/" in m and PUBLIC_ADDR in m
+            for m in messages
+        )
+
+
+# ---------------------------------------------------------------------------
+# IPv4-mapped IPv6 peers (dual-stack listener) are normalized, not rejected
+# ---------------------------------------------------------------------------
+
+
+class TestIpv4MappedPeers:
+    """A dual-stack listener's ::ffff:a.b.c.d peers get IPv4 semantics."""
+
+    def test_mapped_cgnat_source_allowed(self, client: FlaskClient) -> None:
+        """Test an IPv4-mapped CGNAT peer reaches the dashboard normally."""
+        response = client.get("/", environ_base={"REMOTE_ADDR": MAPPED_CGNAT_ADDR})
+        assert response.status_code == 200
+
+    def test_mapped_public_source_still_forbidden(self, client: FlaskClient) -> None:
+        """Test an IPv4-mapped *public* peer is still rejected (403)."""
+        response = client.get("/", environ_base={"REMOTE_ADDR": "::ffff:203.0.113.7"})
         assert response.status_code == 403
 
 
