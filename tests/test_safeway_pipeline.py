@@ -594,6 +594,121 @@ class TestSubmitCartReviewGate:
 
 
 # ---------------------------------------------------------------------------
+# Submit cart fulfillment-gate tests (issue #72)
+# ---------------------------------------------------------------------------
+#
+# Issue #72 (HIGH): CartBuilder._get_fulfillment_options previously
+# swallowed a fulfillment-fetch failure and substituted fabricated
+# defaults (free pickup, $9.95 delivery, both available=True), so orders
+# proceeded as if fulfillment had been confirmed. SafewayPipeline.submit_cart
+# and _submit_guarded must block a fulfillment_unverified cart before any
+# duplicate-ledger write, mirroring the review-gate placement (issue #59),
+# and must accept allow_unverified_fulfillment=True as the explicit human
+# override.
+
+
+class TestSubmitCartFulfillmentGate:
+    """Tests for SafewayPipeline.submit_cart blocking unverified fulfillment."""
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_submit_cart_blocks_unverified_fulfillment_before_ledger_write(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+        tmp_path: Path,
+    ) -> None:
+        """Test an unverified-fulfillment cart is blocked before any ledger write.
+
+        Mirrors the review-gate placement (issue #59): a fulfillment-
+        unverified cart must be blocked in the pipeline itself, ahead of
+        the duplicate-order ledger (Issue #61), so a blocked attempt
+        (which never reaches Safeway) never leaves behind a ledger row
+        that would spuriously mark a post-override resubmission of the
+        same cart a duplicate.
+        """
+        from grocery_butler.order_submissions import DUPLICATE_WINDOW, cart_fingerprint
+
+        mock_client_cls.return_value.is_authenticated = True
+        unverified_cart = mock_cart_summary.model_copy(
+            update={"fulfillment_unverified": True}
+        )
+
+        pipeline = SafewayPipeline(safeway_config, str(tmp_path / "orders.db"))
+        result = pipeline.submit_cart(
+            unverified_cart, idempotency_key="key-fulfillment"
+        )
+
+        assert result.success is False
+        assert "fulfillment" in result.error_message.lower()
+        mock_order_cls.return_value.submit_order.assert_not_called()
+        row = pipeline._order_submissions._find_recent_blocking(
+            cart_fingerprint(unverified_cart), DUPLICATE_WINDOW
+        )
+        assert row is None
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_submit_cart_forwards_allow_unverified_fulfillment_true(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+    ) -> None:
+        """Test submit_cart forwards an explicit fulfillment-gate override.
+
+        Callers (bot confirm view, API confirm endpoint) must be able to
+        pass allow_unverified_fulfillment=True through submit_cart to
+        proceed with an unverified-fulfillment cart after explicit human
+        confirmation.
+        """
+        mock_client_cls.return_value.is_authenticated = True
+        expected = OrderResult(success=True)
+        mock_order_cls.return_value.submit_order.return_value = expected
+        unverified_cart = mock_cart_summary.model_copy(
+            update={"fulfillment_unverified": True}
+        )
+
+        pipeline = SafewayPipeline(safeway_config, ":memory:")
+        result = pipeline.submit_cart(
+            unverified_cart, allow_unverified_fulfillment=True
+        )
+
+        assert result is expected
+        mock_submit = mock_order_cls.return_value.submit_order
+        mock_submit.assert_called_once()
+        _, kwargs = mock_submit.call_args
+        assert kwargs.get("allow_unverified_fulfillment") is True
+
+
+# ---------------------------------------------------------------------------
 # Empty shopping list tests
 # ---------------------------------------------------------------------------
 

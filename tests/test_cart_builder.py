@@ -12,7 +12,6 @@ from grocery_butler.cart_builder import (
     QuantityDecision,
     _calculate_quantity,
     _calculate_subtotal,
-    _default_fulfillment_options,
     _get_fulfillment_fee,
     _parse_fulfillment_response,
     _recommend_fulfillment,
@@ -469,29 +468,6 @@ class TestParseFulfillmentResponse:
 
 
 # ------------------------------------------------------------------
-# Tests: _default_fulfillment_options
-# ------------------------------------------------------------------
-
-
-class TestDefaultFulfillmentOptions:
-    """Tests for _default_fulfillment_options."""
-
-    def test_returns_two_options(self) -> None:
-        """Test defaults include pickup and delivery."""
-        result = _default_fulfillment_options()
-        assert len(result) == 2
-        types = {o.type for o in result}
-        assert FulfillmentType.PICKUP in types
-        assert FulfillmentType.DELIVERY in types
-
-    def test_pickup_is_free(self) -> None:
-        """Test default pickup fee is 0."""
-        result = _default_fulfillment_options()
-        pickup = next(o for o in result if o.type == FulfillmentType.PICKUP)
-        assert pickup.fee == 0.0
-
-
-# ------------------------------------------------------------------
 # Tests: CartBuilder.build_cart
 # ------------------------------------------------------------------
 
@@ -690,8 +666,22 @@ class TestBuildCart:
 
         assert result.estimated_total == 10.0
 
-    def test_fulfillment_api_failure_uses_defaults(self) -> None:
-        """Test default fulfillment options on API failure."""
+    def test_fulfillment_api_failure_marks_cart_unverified_no_fabricated_options(
+        self,
+    ) -> None:
+        """Test a fulfillment-fetch failure marks the cart unverified (issue #72).
+
+        Regression guard for issue #72 (HIGH): previously any exception
+        raised while fetching fulfillment options was swallowed by
+        ``_get_fulfillment_options`` and replaced with fabricated
+        defaults (free pickup, $9.95 delivery, both marked
+        ``available=True``) via the now-deleted
+        ``_default_fulfillment_options`` helper -- presenting invented
+        availability and fees as real. On failure, ``build_cart`` must
+        instead return an empty ``fulfillment_options`` list and flag
+        ``fulfillment_unverified=True`` so callers know fulfillment was
+        never actually confirmed with Safeway.
+        """
         product = _make_product(price=5.0, size="1 lb")
         builder = self._make_builder(
             search_results=[product],
@@ -700,8 +690,60 @@ class TestBuildCart:
         builder._client.get.side_effect = Exception("API down")
         result = builder.build_cart([_make_item(quantity=1.0)])
 
-        assert len(result.fulfillment_options) == 2
+        assert result.fulfillment_options == []
+        assert result.fulfillment_unverified is True
+
+    def test_fulfillment_api_failure_estimated_total_has_no_fabricated_fee(
+        self,
+    ) -> None:
+        """Test a fulfillment-fetch failure never adds the fabricated $9.95 fee.
+
+        With no fulfillment options available, ``_recommend_fulfillment``
+        falls back to ``PICKUP`` and ``_get_fulfillment_fee`` returns
+        ``0.0``, so the estimated total on an unverified cart must equal
+        the subtotal exactly -- never the subtotal plus an invented
+        delivery fee (issue #72). ``fulfillment_options`` recommending
+        free pickup alone can't distinguish this fix from the old
+        fabricated-defaults behavior (which also recommended free
+        pickup), so this also asserts the options list is empty --
+        i.e. no fabricated delivery option carrying the $9.95 fee is
+        present anywhere in it.
+        """
+        product = _make_product(price=5.0, size="1 lb")
+        builder = self._make_builder(
+            search_results=[product],
+            selection_product=product,
+        )
+        builder._client.get.side_effect = Exception("API down")
+        result = builder.build_cart([_make_item(quantity=1.0)])
+
+        assert result.estimated_total == result.subtotal
         assert result.recommended_fulfillment == FulfillmentType.PICKUP
+        assert result.fulfillment_options == []
+
+    def test_fulfillment_api_success_marks_cart_verified(self) -> None:
+        """Test a successful fulfillment fetch leaves the cart verified.
+
+        On the happy path -- fulfillment options fetched without error --
+        ``fulfillment_unverified`` must be ``False`` and the parsed
+        options from the API response must be used as before (issue #72).
+        """
+        product = _make_product(price=5.0, size="1 lb")
+        fulfillment = {
+            "fulfillmentOptions": [
+                {"type": "pickup", "available": True, "fee": 0.0, "windows": []},
+            ]
+        }
+        builder = self._make_builder(
+            search_results=[product],
+            selection_product=product,
+            fulfillment_response=fulfillment,
+        )
+        result = builder.build_cart([_make_item(quantity=1.0)])
+
+        assert result.fulfillment_unverified is False
+        assert len(result.fulfillment_options) == 1
+        assert result.fulfillment_options[0].type == FulfillmentType.PICKUP
 
     def test_empty_cart(self) -> None:
         """Test building cart with no items."""
