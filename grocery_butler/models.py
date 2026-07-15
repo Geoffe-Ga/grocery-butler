@@ -511,6 +511,7 @@ class PendingActionStatus(StrEnum):
     APPROVED = "approved"
     DENIED = "denied"
     EXPIRED = "expired"
+    FAILED = "failed"
 
 
 class PendingAction(BaseModel):
@@ -518,7 +519,13 @@ class PendingAction(BaseModel):
 
     Rows live in the ``pending_actions`` table and record every staged
     Safeway submission or preference change, whether it was ultimately
-    approved, denied, or expired.
+    approved, denied, expired, or (after being claimed) failed.
+
+    Attributes:
+        requester: The caller_id that staged this action.
+        resolver: The caller_id that resolved this action (approved or
+            denied it), or None for a system-initiated resolution such
+            as TTL expiry, which has no resolving caller.
     """
 
     action_id: str
@@ -526,6 +533,7 @@ class PendingAction(BaseModel):
     payload: dict[str, Any]
     status: PendingActionStatus = PendingActionStatus.PENDING
     requester: str = "rubotpaul"
+    resolver: str | None = None
     expires_at: dt.datetime
     created_at: dt.datetime | None = None
     resolved_at: dt.datetime | None = None

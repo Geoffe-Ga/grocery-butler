@@ -10,6 +10,7 @@ client — the pipeline factory is mocked everywhere it could execute.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import os
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 from grocery_butler.app import create_app
 from grocery_butler.auth_middleware import SECRET_ENV_VAR, mint_token
 from grocery_butler.config import ConfigError
+from grocery_butler.db import get_connection
 from grocery_butler.models import (
     BrandMatchType,
     BrandPreference,
@@ -42,6 +44,7 @@ from grocery_butler.models import (
 from grocery_butler.order_service import OrderConfirmation, OrderResult
 from grocery_butler.pending_actions import PendingActionsStore
 from grocery_butler.recipe_store import RecipeStore
+from grocery_butler.safeway_pipeline import SafewayPipelineError
 
 TEST_SECRET = "test-shared-secret"
 SECRET_ENV = {SECRET_ENV_VAR: TEST_SECRET}
@@ -97,6 +100,18 @@ def auth_headers() -> dict[str, str]:
     """Return a valid Authorization header minted with the test secret."""
     with patch.dict(os.environ, SECRET_ENV):
         token = mint_token("rubotpaul")
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _headers_for(caller_id: str) -> dict[str, str]:
+    """Return a valid Authorization header minted for a specific caller.
+
+    Used to distinguish the staging caller (requester) from the
+    confirming/denying caller (resolver) in W1 audit-trail tests
+    (issue #75).
+    """
+    with patch.dict(os.environ, SECRET_ENV):
+        token = mint_token(caller_id)
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -247,6 +262,293 @@ def _stage_via_api(
 
 
 # ---------------------------------------------------------------------------
+# W1 (issue #75): requester/resolver recorded from the real caller_id
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestRequesterAndResolverAtRoutes:
+    """Every staged/resolved action records the real caller (W1, issue #75).
+
+    Two distinct callers are minted so requester (the staging caller) and
+    resolver (the confirming/denying caller) can be told apart in the
+    audit trail -- neither should ever fall back to the old
+    "rubotpaul"-only default.
+    """
+
+    def test_order_submit_records_requester_as_caller_id(
+        self, client: FlaskClient, pending_store: PendingActionsStore
+    ) -> None:
+        """Staging an order records the token's caller_id as requester."""
+        headers = _headers_for("alice")
+        response = client.post(
+            "/api/v1/order/submit", json=_order_body(), headers=headers
+        )
+        assert response.status_code == 200
+        action = pending_store.get_pending_action(response.get_json()["action_id"])
+        assert action is not None
+        assert action.requester == "alice"
+
+    def test_brands_set_records_requester_as_caller_id(
+        self, client: FlaskClient, pending_store: PendingActionsStore
+    ) -> None:
+        """Staging a brand rule records the token's caller_id as requester."""
+        headers = _headers_for("bob")
+        response = client.post(
+            "/api/v1/brands/set", json=_brand_body(), headers=headers
+        )
+        assert response.status_code == 200
+        action = pending_store.get_pending_action(response.get_json()["action_id"])
+        assert action is not None
+        assert action.requester == "bob"
+
+    def test_preferences_set_records_requester_as_caller_id(
+        self, client: FlaskClient, pending_store: PendingActionsStore
+    ) -> None:
+        """Staging preferences records the token's caller_id as requester."""
+        headers = _headers_for("carol")
+        body = {"preferences": {"fulfillment": "pickup"}}
+        response = client.post("/api/v1/preferences/set", json=body, headers=headers)
+        assert response.status_code == 200
+        action = pending_store.get_pending_action(response.get_json()["action_id"])
+        assert action is not None
+        assert action.requester == "carol"
+
+    def test_confirm_records_resolver_as_confirming_caller_id(
+        self,
+        client: FlaskClient,
+        pending_store: PendingActionsStore,
+    ) -> None:
+        """Confirming stamps resolver with the CONFIRMING caller, not requester."""
+        stage_headers = _headers_for("alice")
+        confirm_headers = _headers_for("bob")
+        action_id = _stage_via_api(
+            client, stage_headers, "/api/v1/brands/set", _brand_body()
+        )
+        response = client.post(
+            "/api/v1/actions/confirm",
+            json={"action_id": action_id},
+            headers=confirm_headers,
+        )
+        assert response.status_code == 200
+        action = pending_store.get_pending_action(action_id)
+        assert action is not None
+        assert action.requester == "alice"
+        assert action.resolver == "bob"
+
+    def test_deny_records_resolver_as_denying_caller_id(
+        self,
+        client: FlaskClient,
+        pending_store: PendingActionsStore,
+    ) -> None:
+        """Denying stamps the resolver with the DENYING caller."""
+        stage_headers = _headers_for("alice")
+        deny_headers = _headers_for("dave")
+        action_id = _stage_via_api(
+            client, stage_headers, "/api/v1/brands/set", _brand_body()
+        )
+        response = client.post(
+            "/api/v1/actions/deny",
+            json={"action_id": action_id},
+            headers=deny_headers,
+        )
+        assert response.status_code == 200
+        action = pending_store.get_pending_action(action_id)
+        assert action is not None
+        assert action.resolver == "dave"
+
+    def test_system_expiry_via_confirm_leaves_resolver_none(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pending_store: PendingActionsStore,
+    ) -> None:
+        """Confirming an expired action resolves it as expired, no resolver.
+
+        Expiry is a system-initiated resolution (the human never actually
+        confirmed anything -- the TTL did), so the resolver must stay
+        NULL even though a caller made the doomed confirm request.
+        """
+        action_id = str(uuid.uuid4())
+        pending_store.insert_pending_action(
+            action_id=action_id,
+            kind="preferences_set",
+            payload={"preferences": {"fulfillment": "pickup"}},
+            expires_at=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1),
+        )
+        response = client.post(
+            "/api/v1/actions/confirm",
+            json={"action_id": action_id},
+            headers=auth_headers,
+        )
+        assert response.status_code == 410
+        action = pending_store.get_pending_action(action_id)
+        assert action is not None
+        assert action.status is PendingActionStatus.EXPIRED
+        assert action.resolver is None
+
+
+# ---------------------------------------------------------------------------
+# W2 (issue #75): every transition logs INFO with action_id/kind, never
+# payload contents
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestActionAuditLogging:
+    """Every staged-action transition is logged at INFO (W2, issue #75).
+
+    Uses a distinctive ingredient name as a payload-content marker: none
+    of the captured log messages may ever contain it, proving the audit
+    trail logs metadata (action_id, kind) and never the payload itself.
+    """
+
+    _MARKER_INGREDIENT = "unobtainium-marker-item"
+
+    def _order_body_with_marker(self) -> dict[str, Any]:
+        """Return an /order/submit body containing the payload marker."""
+        return _order_body({self._MARKER_INGREDIENT: 9.99})
+
+    def test_staging_order_logs_info_with_action_id_and_total(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Staging an order logs an INFO line naming the action and kind."""
+        with caplog.at_level(logging.INFO, logger="api"):
+            response = client.post(
+                "/api/v1/order/submit",
+                json=self._order_body_with_marker(),
+                headers=auth_headers,
+            )
+        assert response.status_code == 200
+        action_id = response.get_json()["action_id"]
+        messages = [r.getMessage() for r in caplog.records if r.name == "api"]
+        assert any(action_id in m for m in messages)
+        assert any("safeway_order_submit" in m for m in messages)
+        assert not any(self._MARKER_INGREDIENT in m for m in messages)
+
+    def test_staging_brands_logs_info_with_action_id_and_kind(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Staging a brand rule logs an INFO line, never the brand name."""
+        with caplog.at_level(logging.INFO, logger="api"):
+            response = client.post(
+                "/api/v1/brands/set", json=_brand_body(), headers=auth_headers
+            )
+        assert response.status_code == 200
+        action_id = response.get_json()["action_id"]
+        messages = [r.getMessage() for r in caplog.records if r.name == "api"]
+        assert any(action_id in m and "brands_set" in m for m in messages)
+        assert not any("Clover" in m for m in messages)
+
+    def test_confirm_logs_info_with_action_id_and_kind(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Confirming a staged action logs a transition INFO line."""
+        action_id = _stage_via_api(
+            client, auth_headers, "/api/v1/brands/set", _brand_body()
+        )
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="api"):
+            response = client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+        assert response.status_code == 200
+        messages = [r.getMessage() for r in caplog.records if r.name == "api"]
+        assert any(action_id in m and "brands_set" in m for m in messages)
+        assert not any("Clover" in m for m in messages)
+
+    def test_confirm_failure_logs_failed_transition(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A failed order submission logs a 'failed' transition line."""
+        action_id = _stage_via_api(
+            client,
+            auth_headers,
+            "/api/v1/order/submit",
+            self._order_body_with_marker(),
+        )
+        pipeline = MagicMock()
+        pipeline.submit_cart.return_value = OrderResult(
+            success=False, error_message="Safeway is down"
+        )
+        caplog.clear()
+        with (
+            patch("grocery_butler.api._safeway_pipeline", return_value=pipeline),
+            caplog.at_level(logging.INFO, logger="api"),
+        ):
+            response = client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+        assert response.status_code == 502
+        messages = [r.getMessage() for r in caplog.records if r.name == "api"]
+        assert any(action_id in m and "failed" in m.lower() for m in messages)
+        assert not any(self._MARKER_INGREDIENT in m for m in messages)
+
+    def test_deny_logs_info_with_action_id_and_kind(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Denying a staged action logs a 'denied' transition line."""
+        action_id = _stage_via_api(
+            client, auth_headers, "/api/v1/brands/set", _brand_body()
+        )
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="api"):
+            response = client.post(
+                "/api/v1/actions/deny",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+        assert response.status_code == 200
+        messages = [r.getMessage() for r in caplog.records if r.name == "api"]
+        assert any(action_id in m and "denied" in m.lower() for m in messages)
+        assert not any("Clover" in m for m in messages)
+
+    def test_expire_logs_info_with_action_id_and_kind(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pending_store: PendingActionsStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Confirming an expired action logs an 'expired' transition line."""
+        action_id = str(uuid.uuid4())
+        pending_store.insert_pending_action(
+            action_id=action_id,
+            kind="preferences_set",
+            payload={"preferences": {"fulfillment": "pickup"}},
+            expires_at=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1),
+        )
+        with caplog.at_level(logging.INFO, logger="api"):
+            response = client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+        assert response.status_code == 410
+        messages = [r.getMessage() for r in caplog.records if r.name == "api"]
+        assert any(action_id in m and "expired" in m.lower() for m in messages)
+
+
+# ---------------------------------------------------------------------------
 # Auth: every destructive endpoint rejects unauthenticated requests
 # ---------------------------------------------------------------------------
 
@@ -364,6 +666,45 @@ class TestOrderSubmitStaging:
         action = pending_store.get_pending_action(response.get_json()["action_id"])
         assert action is not None
         assert action.payload["total"] == "7.75"
+
+    def test_non_numeric_total_returns_400(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """A total that isn't a numeric amount is rejected, not staged."""
+        cart = _make_cart({"pasta": 3.50, "sauce": 4.25})
+        response = client.post(
+            "/api/v1/order/submit",
+            json={"cart": cart.model_dump(mode="json"), "total": "not-a-number"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+        assert "total" in response.get_json()["error"]
+
+    def test_total_with_embedded_newline_returns_400_and_is_not_logged(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A total crafted to forge a fake log line is rejected before staging.
+
+        Regression test (issue #75, log hygiene): an unvalidated client
+        ``total`` used to flow verbatim into the ``staged action_id=...``
+        audit-log line, letting a caller embed a newline and forge a fake
+        transition line. It must now be rejected outright rather than
+        staged or logged.
+        """
+        cart = _make_cart({"pasta": 3.50, "sauce": 4.25})
+        forged = "7.75\nfailed action_id=forged-marker kind=safeway_order_submit"
+        with caplog.at_level(logging.INFO, logger="api"):
+            response = client.post(
+                "/api/v1/order/submit",
+                json={"cart": cart.model_dump(mode="json"), "total": forged},
+                headers=auth_headers,
+            )
+        assert response.status_code == 400
+        messages = [r.getMessage() for r in caplog.records if r.name == "api"]
+        assert not any("forged-marker" in m for m in messages)
 
     def test_staging_never_touches_the_safeway_pipeline(
         self, client: FlaskClient, auth_headers: dict[str, str]
@@ -684,7 +1025,12 @@ class TestActionsConfirm:
         auth_headers: dict[str, str],
         pending_store: PendingActionsStore,
     ) -> None:
-        """A failed Safeway submission reports 502; the claim is consumed."""
+        """A failed Safeway submission reports 502 and resolves as failed.
+
+        Issue #75 (W3): a post-claim failure (``result.success is False``)
+        must resolve the row as ``failed``, not leave it stuck
+        ``approved`` with no record that the submission actually failed.
+        """
         action_id = _stage_via_api(
             client, auth_headers, "/api/v1/order/submit", _order_body()
         )
@@ -702,7 +1048,39 @@ class TestActionsConfirm:
         assert "Safeway is down" in response.get_json()["error"]
         action = pending_store.get_pending_action(action_id)
         assert action is not None
-        assert action.status is PendingActionStatus.APPROVED
+        assert action.status is PendingActionStatus.FAILED
+        assert action.resolved_at is not None
+
+    def test_pipeline_exception_after_claim_marks_action_failed(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pending_store: PendingActionsStore,
+    ) -> None:
+        """A SafewayPipelineError raised by submit_cart marks the row failed.
+
+        Distinct from the pre-claim 503/501 paths (which never claim the
+        row): once the claim succeeds, ANY post-claim failure -- an
+        exception from ``submit_cart`` or a False ``result.success`` --
+        must resolve the row as failed, never leave it stuck approved
+        (issue #75, W3).
+        """
+        action_id = _stage_via_api(
+            client, auth_headers, "/api/v1/order/submit", _order_body()
+        )
+        pipeline = MagicMock()
+        pipeline.submit_cart.side_effect = SafewayPipelineError("network blip")
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+        assert response.status_code == 502
+        pipeline.close.assert_called_once()
+        action = pending_store.get_pending_action(action_id)
+        assert action is not None
+        assert action.status is PendingActionStatus.FAILED
 
     def test_unavailable_pipeline_returns_503_and_keeps_action_pending(
         self,
@@ -986,7 +1364,12 @@ class TestConfirmOrderIdempotency:
         auth_headers: dict[str, str],
         pending_store: PendingActionsStore,
     ) -> None:
-        """Test an UNKNOWN order outcome surfaces as HTTP 504 with status unknown."""
+        """Test an UNKNOWN order outcome surfaces as HTTP 504 with status unknown.
+
+        Issue #75 (W3): UNKNOWN is a ``result.success is False`` outcome,
+        so it's a post-claim failure like any other and must resolve the
+        row as ``failed``, not leave it stuck ``approved``.
+        """
         from grocery_butler.order_service import OrderOutcome
 
         action_id = _stage_via_api(
@@ -1012,7 +1395,7 @@ class TestConfirmOrderIdempotency:
 
         action = pending_store.get_pending_action(action_id)
         assert action is not None
-        assert action.status is PendingActionStatus.APPROVED
+        assert action.status is PendingActionStatus.FAILED
 
     def test_duplicate_outcome_returns_409(
         self,
@@ -1020,7 +1403,11 @@ class TestConfirmOrderIdempotency:
         auth_headers: dict[str, str],
         pending_store: PendingActionsStore,
     ) -> None:
-        """Test a DUPLICATE order outcome surfaces as HTTP 409 duplicate_prevented."""
+        """Test a DUPLICATE order outcome surfaces as HTTP 409 duplicate_prevented.
+
+        Issue #75 (W3): DUPLICATE is also a ``result.success is False``
+        outcome, so it too must resolve the row as ``failed``.
+        """
         from grocery_butler.order_service import OrderOutcome
 
         action_id = _stage_via_api(
@@ -1045,4 +1432,310 @@ class TestConfirmOrderIdempotency:
 
         action = pending_store.get_pending_action(action_id)
         assert action is not None
-        assert action.status is PendingActionStatus.APPROVED
+        assert action.status is PendingActionStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# W6 (issue #75): a raced/duplicate confirm must still close the pipeline
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestPipelineLeakOnRace:
+    """A raced/duplicate confirm must still close the Safeway pipeline (W6).
+
+    ``post_actions_confirm`` reads the action once, then the executor
+    builds a Safeway pipeline before atomically claiming the row. If a
+    concurrent request already resolved the row by the time the claim
+    runs, the claim fails (409) -- but the pipeline that was already
+    constructed for THIS request must still be closed, or every raced
+    confirm leaks a client/session (issue #75).
+    """
+
+    def test_claim_race_still_closes_pipeline_before_409(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """A claim that loses the race closes the already-built pipeline."""
+        action_id = _stage_via_api(
+            client, auth_headers, "/api/v1/order/submit", _order_body()
+        )
+        pipeline = MagicMock()
+        with (
+            patch("grocery_butler.api._safeway_pipeline", return_value=pipeline),
+            patch.object(
+                PendingActionsStore, "mark_pending_approved", return_value=False
+            ),
+        ):
+            response = client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+        assert response.status_code == 409
+        pipeline.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# W5 (issue #75): preferences confirmation must be all-or-nothing
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestPreferencesAtomicity:
+    """Confirming preferences_set must be all-or-nothing (W5, issue #75).
+
+    ``_confirm_preferences_set`` must use a single connection / one
+    commit for every staged key (``RecipeStore.set_preferences``)
+    instead of the old per-key loop, so a mid-way failure leaves the
+    store completely untouched rather than half-applied.
+    """
+
+    def test_mid_write_failure_leaves_no_keys_applied(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        recipe_store: RecipeStore,
+    ) -> None:
+        """A failure applying the second key rolls back the first too."""
+        body = {"preferences": {"fulfillment": "pickup", "store_id": "1234"}}
+        action_id = _stage_via_api(
+            client, auth_headers, "/api/v1/preferences/set", body
+        )
+
+        class _FailSecondWrite:
+            """Connection proxy that fails starting on its second execute()."""
+
+            def __init__(self, real_conn: Any) -> None:
+                self._real = real_conn
+                self._calls = 0
+
+            def execute(self, sql: str, params: Any = ()) -> Any:
+                self._calls += 1
+                if self._calls > 1:
+                    raise RuntimeError("simulated mid-transaction failure")
+                return self._real.execute(sql, params)
+
+            def executescript(self, sql: str) -> None:
+                self._real.executescript(sql)
+
+            def commit(self) -> None:
+                self._real.commit()
+
+            def close(self) -> None:
+                self._real.close()
+
+        def _fake_get_connection(path: str) -> _FailSecondWrite:
+            return _FailSecondWrite(get_connection(path))
+
+        with (
+            patch(
+                "grocery_butler.recipe_store.get_connection",
+                side_effect=_fake_get_connection,
+            ),
+            pytest.raises(RuntimeError, match="simulated mid-transaction failure"),
+        ):
+            client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+
+        stored = recipe_store.get_all_preferences()
+        assert "fulfillment" not in stored
+        assert "store_id" not in stored
+
+
+# ---------------------------------------------------------------------------
+# W4 (issue #75): GET /api/v1/actions and GET /api/v1/actions/<action_id>
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestListActionsEndpoint:
+    """GET /api/v1/actions -- paginated, filterable audit-trail read (W4).
+
+    Issue #75: read access to the pending_actions audit log so an
+    operator (or RubotPaul) can see what's staged, resolved, or expired
+    without querying the database directly.
+    """
+
+    def test_missing_bearer_returns_401(self, client: FlaskClient) -> None:
+        """Unauthenticated requests are rejected."""
+        response = client.get("/api/v1/actions")
+        assert response.status_code == 401
+
+    def test_returns_staged_actions_with_count(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Staged actions show up in the list with a matching count."""
+        action_id = _stage_via_api(
+            client, auth_headers, "/api/v1/brands/set", _brand_body()
+        )
+        response = client.get("/api/v1/actions", headers=auth_headers)
+        assert response.status_code == 200
+        data = response.get_json()
+        assert "actions" in data
+        assert "count" in data
+        assert data["count"] == len(data["actions"])
+        ids = [a["action_id"] for a in data["actions"]]
+        assert action_id in ids
+
+    def test_sweeps_expired_actions_before_listing(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pending_store: PendingActionsStore,
+    ) -> None:
+        """A past-due pending row shows up as expired, not pending."""
+        action_id = str(uuid.uuid4())
+        pending_store.insert_pending_action(
+            action_id=action_id,
+            kind="brands_set",
+            payload={},
+            expires_at=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1),
+        )
+        response = client.get("/api/v1/actions", headers=auth_headers)
+        assert response.status_code == 200
+        matching = [
+            a for a in response.get_json()["actions"] if a["action_id"] == action_id
+        ]
+        assert matching
+        assert matching[0]["status"] == "expired"
+
+    def test_default_limit_is_50(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Omitting ?limit uses a default of 50."""
+        with patch.object(
+            PendingActionsStore, "list_pending_actions", return_value=[]
+        ) as mock_list:
+            response = client.get("/api/v1/actions", headers=auth_headers)
+        assert response.status_code == 200
+        assert mock_list.call_args.kwargs.get("limit") == 50
+
+    def test_limit_over_max_is_clamped_not_rejected(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """A ?limit above the hard cap is clamped to 200, not a 400."""
+        with patch.object(
+            PendingActionsStore, "list_pending_actions", return_value=[]
+        ) as mock_list:
+            response = client.get("/api/v1/actions?limit=99999", headers=auth_headers)
+        assert response.status_code == 200
+        assert mock_list.call_args.kwargs.get("limit") == 200
+
+    def test_status_filter_returns_only_matching_actions(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """?status= filters the returned actions by that status."""
+        denied_id = _stage_via_api(
+            client, auth_headers, "/api/v1/brands/set", _brand_body()
+        )
+        client.post(
+            "/api/v1/actions/deny",
+            json={"action_id": denied_id},
+            headers=auth_headers,
+        )
+        _stage_via_api(client, auth_headers, "/api/v1/brands/set", _brand_body())
+
+        response = client.get("/api/v1/actions?status=denied", headers=auth_headers)
+        assert response.status_code == 200
+        data = response.get_json()
+        assert all(a["status"] == "denied" for a in data["actions"])
+        assert denied_id in [a["action_id"] for a in data["actions"]]
+
+    def test_unknown_status_value_returns_400(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """An unrecognized ?status value is rejected, not silently ignored."""
+        response = client.get(
+            "/api/v1/actions?status=not_a_real_status", headers=auth_headers
+        )
+        assert response.status_code == 400
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestGetActionEndpoint:
+    """GET /api/v1/actions/<action_id> -- single-row audit-trail read (W4)."""
+
+    def test_missing_bearer_returns_401(self, client: FlaskClient) -> None:
+        """Unauthenticated requests are rejected."""
+        response = client.get(f"/api/v1/actions/{uuid.uuid4()}")
+        assert response.status_code == 401
+
+    def test_returns_serialized_action(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """A known action_id returns its full serialized row."""
+        action_id = _stage_via_api(
+            client, auth_headers, "/api/v1/brands/set", _brand_body()
+        )
+        response = client.get(f"/api/v1/actions/{action_id}", headers=auth_headers)
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["action_id"] == action_id
+        assert data["kind"] == "brands_set"
+        assert data["status"] == "pending"
+
+    def test_unknown_action_id_returns_404(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """An unknown action_id gets a JSON 404."""
+        response = client.get(f"/api/v1/actions/{uuid.uuid4()}", headers=auth_headers)
+        assert response.status_code == 404
+        assert "error" in response.get_json()
+
+
+# ---------------------------------------------------------------------------
+# W4 (issue #75): staging endpoints also sweep past-due pending rows first
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestStagingSweepsExpiredActions:
+    """Staging a new action sweeps expired rows too, not just GET /actions.
+
+    Issue #75 (W4) requires the lazy sweep to run wherever a caller
+    touches the pending_actions table, not only on read: otherwise a
+    past-due row can sit ``pending`` forever if the audit log is never
+    listed. Each of the three staging routes must trigger the sweep as
+    a side effect of inserting its own new row.
+    """
+
+    @pytest.mark.parametrize(
+        ("path", "body"),
+        [
+            ("/api/v1/order/submit", _order_body()),
+            ("/api/v1/brands/set", _brand_body()),
+            ("/api/v1/preferences/set", {"preferences": {"fulfillment": "pickup"}}),
+        ],
+        ids=["order_submit", "brands_set", "preferences_set"],
+    )
+    def test_staging_sweeps_unrelated_past_due_row(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pending_store: PendingActionsStore,
+        path: str,
+        body: dict[str, Any],
+    ) -> None:
+        """An unrelated past-due pending row flips to expired on staging."""
+        stale_id = str(uuid.uuid4())
+        pending_store.insert_pending_action(
+            action_id=stale_id,
+            kind="brands_set",
+            payload={},
+            expires_at=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1),
+        )
+        response = client.post(path, json=body, headers=auth_headers)
+        assert response.status_code == 200
+
+        stale = pending_store.get_pending_action(stale_id)
+        assert stale is not None
+        assert stale.status is PendingActionStatus.EXPIRED
+        assert stale.resolved_at is not None
+        assert stale.resolver is None

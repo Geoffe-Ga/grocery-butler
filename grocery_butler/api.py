@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import logging
 import os
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from flask import Blueprint, abort, current_app, jsonify, request
@@ -54,6 +55,8 @@ if TYPE_CHECKING:
     from grocery_butler.models import PendingAction
 
 api_v1 = Blueprint("api_v1", __name__, url_prefix="/api/v1")
+
+LOG = logging.getLogger("api")
 
 #: How long a staged destructive action stays confirmable.
 CONFIRMATION_TTL = dt.timedelta(minutes=5)
@@ -246,6 +249,40 @@ def _cart_total(cart: CartSummary) -> Decimal:
     )
 
 
+def _resolve_order_total(body: dict[str, Any], cart: CartSummary) -> str:
+    """Return the staged order total, validating any client override.
+
+    A client-supplied ``total`` must parse as a finite decimal amount
+    (issue #75, log hygiene): an unvalidated free-form value would flow
+    verbatim into the ``_stage_pending`` audit-log line and the
+    human-facing confirmation message, letting a caller forge extra log
+    lines (embedded newlines/control characters) or display a
+    misleading total. A missing, falsy, or invalid override falls back
+    to the cart's own computed total rather than trusting raw input.
+
+    Args:
+        body: The request's JSON object body.
+        cart: The validated cart being staged.
+
+    Returns:
+        The total to stage, as a plain decimal string.
+
+    Raises:
+        HTTPException: 400 if ``total`` is present but not a finite
+            numeric value.
+    """
+    raw_total = body.get("total")
+    if not raw_total:
+        return str(_cart_total(cart))
+    try:
+        total = Decimal(str(raw_total))
+    except (InvalidOperation, ValueError, TypeError):
+        abort(400, description="total must be a numeric value")
+    if not total.is_finite():
+        abort(400, description="total must be a numeric value")
+    return str(total)
+
+
 @api_v1.post("/meals/parse")
 def post_meals_parse() -> Response:
     """Parse free-text meal names into structured ingredient lists."""
@@ -430,14 +467,70 @@ def _pending_store() -> PendingActionsStore:
     return PendingActionsStore(current_app.config["DATABASE_PATH"])
 
 
-def _stage_pending(kind: str, payload: dict[str, Any]) -> str:
-    """Stage a pending action with the standard TTL; return its action_id."""
-    action = _pending_store().insert_pending_action(
+def _log_resolution(status: str, action: PendingAction) -> None:
+    """Log an INFO transition line naming only the action_id and kind.
+
+    Never includes payload contents (issue #75, W2): every audit-trail
+    log line is deliberately restricted to non-sensitive metadata.
+
+    Args:
+        status: Transition status word (e.g. ``"confirmed"``, ``"denied"``).
+        action: The pending action being transitioned.
+    """
+    LOG.info("%s action_id=%s kind=%s", status, action.action_id, action.kind)
+
+
+def _sweep_expired(store: PendingActionsStore) -> None:
+    """Sweep past-due pending rows to expired, logging the count if any.
+
+    Shared by every route that touches ``pending_actions`` -- the three
+    staging routes and the ``GET /actions`` listing (issue #75, W4) --
+    so a row can never sit ``pending`` past its TTL just because the
+    audit log was never read.
+
+    Args:
+        store: The PendingActionsStore to sweep.
+    """
+    swept = store.sweep_expired()
+    if swept > 0:
+        LOG.info("swept expired_count=%s", swept)
+
+
+def _stage_pending(kind: str, payload: dict[str, Any], *, requester: str) -> str:
+    """Stage a pending action with the standard TTL; return its action_id.
+
+    Sweeps past-due pending rows to expired first (issue #75, W4) so the
+    lazy sweep runs on every write path, not only on ``GET /actions``.
+    Logs an INFO audit line naming the action_id and kind (and, for
+    order submissions, the staged total) -- never the payload contents
+    (issue #75, W1/W2).
+
+    Args:
+        kind: Action kind, e.g. ``safeway_order_submit``.
+        payload: JSON-serializable action payload.
+        requester: The authenticated caller_id staging this action.
+
+    Returns:
+        The new pending action's id.
+    """
+    store = _pending_store()
+    _sweep_expired(store)
+    action = store.insert_pending_action(
         action_id=str(uuid.uuid4()),
         kind=kind,
         payload=payload,
         expires_at=dt.datetime.now(dt.UTC) + CONFIRMATION_TTL,
+        requester=requester,
     )
+    if kind == "safeway_order_submit":
+        LOG.info(
+            "staged action_id=%s kind=%s total=%s",
+            action.action_id,
+            kind,
+            payload.get("total"),
+        )
+    else:
+        LOG.info("staged action_id=%s kind=%s", action.action_id, kind)
     return action.action_id
 
 
@@ -511,13 +604,14 @@ def _render_fulfillment_section(cart: CartSummary) -> str:
 @api_v1.post("/order/submit")
 def post_order_submit() -> Response:
     """Stage a Safeway order for confirmation. Never submits directly."""
-    require_bearer()
+    caller_id = require_bearer()
     body = _json_body()
     cart = _parse_cart_payload(body)
-    total = str(body.get("total") or _cart_total(cart))
+    total = _resolve_order_total(body, cart)
     action_id = _stage_pending(
         "safeway_order_submit",
         {"cart": cart.model_dump(mode="json"), "total": total},
+        requester=caller_id,
     )
     item_count = len(cart.items) + len(cart.restock_items)
     review_section = _render_review_section(cart)
@@ -535,13 +629,15 @@ def post_order_submit() -> Response:
 @api_v1.post("/brands/set")
 def post_brands_set() -> Response:
     """Stage a brand preference rule for confirmation."""
-    require_bearer()
+    caller_id = require_bearer()
     body = _json_body()
     try:
         pref = BrandPreference.model_validate(body)
     except ValidationError as exc:
         abort(400, description=f"invalid brand rule: {exc.error_count()} error(s)")
-    action_id = _stage_pending("brands_set", pref.model_dump(mode="json"))
+    action_id = _stage_pending(
+        "brands_set", pref.model_dump(mode="json"), requester=caller_id
+    )
     return jsonify(
         status="pending_confirmation",
         action_id=action_id,
@@ -566,9 +662,11 @@ def _parse_preferences_payload(body: dict[str, Any]) -> dict[str, str]:
 @api_v1.post("/preferences/set")
 def post_preferences_set() -> Response:
     """Stage app-level preference changes for confirmation."""
-    require_bearer()
+    caller_id = require_bearer()
     preferences = _parse_preferences_payload(_json_body())
-    action_id = _stage_pending("preferences_set", {"preferences": preferences})
+    action_id = _stage_pending(
+        "preferences_set", {"preferences": preferences}, requester=caller_id
+    )
     keys = ", ".join(sorted(preferences))
     return jsonify(
         status="pending_confirmation",
@@ -588,14 +686,23 @@ def _load_pending_action(body: dict[str, Any]) -> PendingAction:
     return action
 
 
-def _claim_pending(store: PendingActionsStore, action_id: str) -> None:
+def _claim_pending(
+    store: PendingActionsStore, action_id: str, *, resolver: str
+) -> None:
     """Atomically claim a pending action as approved, or abort 409.
 
     The guarded UPDATE in the store is the exactly-once gate: only one
     caller can transition the row out of ``pending``, so a raced double
     confirm cannot execute twice.
+
+    Args:
+        store: Store used to attempt the claim.
+        action_id: Identifier of the action to claim.
+        resolver: The confirming caller_id, stamped as the resolver
+            (issue #75, W1) -- distinct from the requester who staged
+            the action.
     """
-    if not store.mark_pending_approved(action_id):
+    if not store.mark_pending_approved(action_id, resolver=resolver):
         abort(409, description="action already resolved")
 
 
@@ -641,24 +748,39 @@ def _order_failure_response(
     return response, code
 
 
-def _confirm_order_submit(
-    action: PendingAction, store: PendingActionsStore
+def _mark_order_failed(store: PendingActionsStore, action: PendingAction) -> None:
+    """Resolve a claimed order action as failed and log the transition.
+
+    Args:
+        store: Store used to resolve the action.
+        action: The claimed (approved) pending action.
+    """
+    store.mark_pending_failed(action.action_id)
+    _log_resolution("failed", action)
+
+
+def _submit_claimed_order(
+    action: PendingAction,
+    store: PendingActionsStore,
+    pipeline: SafewayPipeline,
+    cart: CartSummary,
 ) -> Response | tuple[Response, int]:
-    """Submit the exact staged cart to Safeway (real money)."""
-    cart = CartSummary.model_validate(action.payload["cart"])
-    try:
-        pipeline = _safeway_pipeline()
-    except (ConfigError, SafewayPipelineError) as exc:
-        # Not claimed yet: the action stays pending so it can be retried
-        # (until it expires) once configuration is fixed.
-        return jsonify(error=f"safeway pipeline unavailable: {exc}"), 503
-    if not pipeline.order_submission_enabled:
-        # Issue #60: order submission is descoped for v1.0. Not claimed —
-        # the action stays pending so it can be retried once the flag is
-        # flipped on after live verification.
-        pipeline.close()
-        return jsonify(error=ORDER_SUBMISSION_DISABLED_MESSAGE), 501
-    _claim_pending(store, action.action_id)
+    """Submit an already-claimed order's cart and resolve its outcome.
+
+    Any post-claim failure -- a raised ``SafewayPipelineError`` or a
+    ``result.success is False`` outcome -- resolves the row as
+    ``failed`` (issue #75, W3), so a claimed action is never left
+    stuck ``approved`` with no record that execution actually failed.
+
+    Args:
+        action: The staged (already-claimed) pending action.
+        store: Store used to resolve the action's final status.
+        pipeline: An already-built, enabled Safeway pipeline.
+        cart: The exact staged cart to submit.
+
+    Returns:
+        The success or failure response for this confirmation.
+    """
     try:
         # The staged message (post_order_submit) already named every
         # flagged item and its reason code, so replying "confirm" IS the
@@ -677,11 +799,12 @@ def _confirm_order_submit(
             allow_unverified_fulfillment=True,
         )
     except SafewayPipelineError as exc:
+        _mark_order_failed(store, action)
         return jsonify(error=f"order submission failed: {exc}"), 502
-    finally:
-        pipeline.close()
     if not result.success:
+        _mark_order_failed(store, action)
         return _order_failure_response(action, result.error_message, result.outcome)
+    _log_resolution("confirmed", action)
     confirmation = (
         dataclasses.asdict(result.confirmation) if result.confirmation else {}
     )
@@ -690,29 +813,65 @@ def _confirm_order_submit(
     )
 
 
-def _confirm_brands_set(action: PendingAction, store: PendingActionsStore) -> Response:
+def _confirm_order_submit(
+    action: PendingAction, store: PendingActionsStore, resolver: str
+) -> Response | tuple[Response, int]:
+    """Submit the exact staged cart to Safeway (real money)."""
+    cart = CartSummary.model_validate(action.payload["cart"])
+    try:
+        pipeline = _safeway_pipeline()
+    except (ConfigError, SafewayPipelineError) as exc:
+        # Not claimed yet: the action stays pending so it can be retried
+        # (until it expires) once configuration is fixed.
+        return jsonify(error=f"safeway pipeline unavailable: {exc}"), 503
+    if not pipeline.order_submission_enabled:
+        # Issue #60: order submission is descoped for v1.0. Not claimed —
+        # the action stays pending so it can be retried once the flag is
+        # flipped on after live verification.
+        pipeline.close()
+        return jsonify(error=ORDER_SUBMISSION_DISABLED_MESSAGE), 501
+    # W6 (issue #75): the claim happens *inside* this try/finally so a
+    # raced claim that aborts 409 still closes the pipeline already built
+    # for this request — a bare pre-claim abort would leak it otherwise.
+    try:
+        _claim_pending(store, action.action_id, resolver=resolver)
+        return _submit_claimed_order(action, store, pipeline, cart)
+    finally:
+        pipeline.close()
+
+
+def _confirm_brands_set(
+    action: PendingAction, store: PendingActionsStore, resolver: str
+) -> Response:
     """Apply the staged brand preference rule."""
     pref = BrandPreference.model_validate(action.payload)
-    _claim_pending(store, action.action_id)
+    _claim_pending(store, action.action_id, resolver=resolver)
     pref_id = _recipe_store().add_brand_preference(pref)
+    _log_resolution("confirmed", action)
     return _approved(action, {**pref.model_dump(mode="json"), "id": pref_id})
 
 
 def _confirm_preferences_set(
-    action: PendingAction, store: PendingActionsStore
+    action: PendingAction, store: PendingActionsStore, resolver: str
 ) -> Response:
-    """Apply the staged app-level preference changes."""
+    """Apply the staged app-level preference changes atomically.
+
+    Uses :meth:`RecipeStore.set_preferences` -- one connection, one
+    commit for every staged key -- so a mid-way failure leaves the
+    store completely untouched instead of half-applied (issue #75, W5).
+    """
     preferences: dict[str, str] = action.payload["preferences"]
-    _claim_pending(store, action.action_id)
-    store_ = _recipe_store()
-    for key, value in preferences.items():
-        store_.set_preference(key, value)
-    return _approved(action, {"updated": len(preferences)})
+    _claim_pending(store, action.action_id, resolver=resolver)
+    updated = _recipe_store().set_preferences(preferences)
+    _log_resolution("confirmed", action)
+    return _approved(action, {"updated": updated})
 
 
 _CONFIRM_EXECUTORS: dict[
     str,
-    Callable[[PendingAction, PendingActionsStore], Response | tuple[Response, int]],
+    Callable[
+        [PendingAction, PendingActionsStore, str], Response | tuple[Response, int]
+    ],
 ] = {
     "safeway_order_submit": _confirm_order_submit,
     "brands_set": _confirm_brands_set,
@@ -723,18 +882,19 @@ _CONFIRM_EXECUTORS: dict[
 @api_v1.post("/actions/confirm")
 def post_actions_confirm() -> Response | tuple[Response, int]:
     """Execute a staged action exactly once after chat confirmation."""
-    require_bearer()
+    caller_id = require_bearer()
     action = _load_pending_action(_json_body())
     store = _pending_store()
     if action.status is not PendingActionStatus.PENDING:
         abort(409, description="action already resolved")
     if action.is_expired():
         store.mark_pending_expired(action.action_id)
+        _log_resolution("expired", action)
         abort(410, description="action expired — stage it again")
     executor = _CONFIRM_EXECUTORS.get(action.kind)
     if executor is None:
         abort(400, description=f"unknown action kind: {action.kind}")
-    return executor(action, store)
+    return executor(action, store, caller_id)
 
 
 @api_v1.post("/actions/deny")
@@ -745,8 +905,80 @@ def post_actions_deny() -> Response:
     check the TTL — a denied-after-expiry action records the user's
     explicit "no" rather than a timeout.
     """
-    require_bearer()
+    resolver = require_bearer()
     action = _load_pending_action(_json_body())
-    if not _pending_store().mark_pending_denied(action.action_id):
+    if not _pending_store().mark_pending_denied(action.action_id, resolver=resolver):
         abort(409, description="action already resolved")
+    _log_resolution("denied", action)
     return jsonify(status="denied", action_id=action.action_id, kind=action.kind)
+
+
+# ---------------------------------------------------------------------------
+# GET /actions and /actions/<action_id> — read access to the audit log (W4)
+# ---------------------------------------------------------------------------
+
+#: Default and hard-cap page sizes for GET /actions (W4, issue #75).
+_DEFAULT_ACTIONS_LIMIT = 50
+_MAX_ACTIONS_LIMIT = 200
+
+
+def _pending_action_json(action: PendingAction) -> dict[str, Any]:
+    """Serialize a PendingAction to a JSON-safe dict."""
+    return action.model_dump(mode="json")
+
+
+def _parse_actions_query() -> tuple[int, PendingActionStatus | None]:
+    """Parse and validate the ``?limit`` and ``?status`` query params.
+
+    Returns:
+        Tuple of (clamped limit, optional status filter). An omitted or
+        over-cap ``?limit`` is clamped into ``[1, _MAX_ACTIONS_LIMIT]``
+        rather than rejected.
+
+    Raises:
+        HTTPException: 400 if ``limit`` is not an integer, or if
+            ``status`` is present but not a recognized
+            :class:`PendingActionStatus` value.
+    """
+    raw_limit = request.args.get("limit", str(_DEFAULT_ACTIONS_LIMIT))
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        abort(400, description="limit must be an integer")
+    limit = max(1, min(limit, _MAX_ACTIONS_LIMIT))
+
+    raw_status = request.args.get("status")
+    if raw_status is None:
+        return limit, None
+    try:
+        status = PendingActionStatus(raw_status)
+    except ValueError:
+        abort(400, description="unknown status value")
+    return limit, status
+
+
+@api_v1.get("/actions")
+def get_actions() -> Response:
+    """List staged/resolved actions, sweeping expired rows first (W4).
+
+    Reading the audit log first sweeps any past-due pending rows to
+    ``expired`` so the returned statuses are current, not stale.
+    """
+    require_bearer()
+    limit, status = _parse_actions_query()
+    store = _pending_store()
+    _sweep_expired(store)
+    actions = store.list_pending_actions(limit=limit, status=status)
+    return jsonify(
+        actions=[_pending_action_json(a) for a in actions], count=len(actions)
+    )
+
+
+@api_v1.get("/actions/<action_id>")
+def get_action(action_id: str) -> Response | tuple[Response, int]:
+    """Return one staged/resolved action by id, or a JSON 404 (W4)."""
+    require_bearer()
+    action = _pending_store().get_pending_action(action_id)
+    if action is None:
+        return jsonify(error="unknown action_id"), 404
+    return jsonify(_pending_action_json(action))
