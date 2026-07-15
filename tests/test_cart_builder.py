@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
+import pytest
+
 from grocery_butler.cart_builder import (
     MAX_QUANTITY_PER_ITEM,
     CartBuilder,
@@ -27,7 +29,8 @@ from grocery_butler.models import (
     SubstitutionResult,
     SubstitutionSuitability,
 )
-from grocery_butler.product_search import CachedMapping
+from grocery_butler.product_search import CachedMapping, ProductSearchError
+from grocery_butler.safeway_client import SafewayAPIError, SafewayAuthError
 
 # ------------------------------------------------------------------
 # Fixtures
@@ -827,6 +830,212 @@ class TestBuildCart:
         assert cart_item.quantity_to_order == 3
         assert cart_item.needs_review is True
         assert cart_item.review_reason == "quantity_capped"
+
+
+# ------------------------------------------------------------------
+# Tests: CartBuilder.build_cart search/API error isolation (issue #76)
+# ------------------------------------------------------------------
+#
+# Regression guards for issue #76: a ProductSearchError or SafewayAPIError
+# raised while resolving one shopping list item used to propagate uncaught
+# out of CartBuilder.build_cart, aborting the entire cart instead of
+# routing just that item to failed_items. SafewayAuthError (not a
+# SafewayAPIError subclass) must continue to propagate uncaught -- an
+# authentication failure affects every subsequent request, not just the
+# one item being processed, so it must not be swallowed.
+
+
+class TestBuildCartSearchErrors:
+    """Tests for build_cart isolating per-item search/API failures."""
+
+    def _make_dependencies(
+        self,
+    ) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
+        """Create fresh mocks for search, selector, substitution, and client.
+
+        Returns:
+            Tuple of (mock_search, mock_selector, mock_substitution,
+            mock_client). ``mock_search.get_cached_product`` always
+            returns ``None`` so every item takes the search-and-select
+            path.
+        """
+        mock_search = MagicMock()
+        mock_search.get_cached_product.return_value = None
+        mock_selector = MagicMock()
+        mock_substitution = MagicMock()
+        mock_client = MagicMock()
+        mock_client.store_id = "1234"
+        mock_client.get.return_value = {}
+        return mock_search, mock_selector, mock_substitution, mock_client
+
+    def test_search_error_routes_item_to_failed(self) -> None:
+        """Test a ProductSearchError during search routes the item to failed.
+
+        Reproduction of issue #76: previously this exception propagated
+        uncaught out of ``build_cart`` instead of landing the item in
+        ``failed_items``.
+        """
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.search_products.side_effect = ProductSearchError("boom")
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([_make_item()])
+
+        assert len(result.failed_items) == 1
+        assert result.items == []
+
+    def test_search_error_isolates_single_failing_item(self) -> None:
+        """Test one item's ProductSearchError doesn't abort the other items.
+
+        Acceptance criterion for issue #76: a single bad item must not
+        take down the whole cart -- the remaining items must still be
+        processed and priced normally.
+        """
+        good_a = _make_item(ingredient="chicken thighs", search_term="term-a")
+        bad = _make_item(ingredient="salmon", search_term="term-b")
+        good_c = _make_item(ingredient="ground beef", search_term="term-c")
+
+        product_a = _make_product(product_id="P-A", name="term-a product")
+        product_c = _make_product(product_id="P-C", name="term-c product")
+
+        def _search_side_effect(search_term: str) -> list[SafewayProduct]:
+            """Return candidates per search term, raising for the bad one.
+
+            Args:
+                search_term: The search term passed by CartBuilder.
+
+            Returns:
+                Candidate products for a successful search term.
+
+            Raises:
+                ProductSearchError: When ``search_term`` is the
+                    designated failing term.
+            """
+            if search_term == "term-b":
+                raise ProductSearchError("boom")
+            return [product_a if search_term == "term-a" else product_c]
+
+        def _select_side_effect(
+            item: ShoppingListItem,
+            candidates: list[SafewayProduct],
+        ) -> _MockSelectionResult:
+            """Select the first candidate for whichever item is passed.
+
+            Args:
+                item: The shopping list item being resolved.
+                candidates: Candidate products from search.
+
+            Returns:
+                A selection result choosing the first candidate.
+            """
+            return _MockSelectionResult(
+                item=item, product=candidates[0], reasoning="Test"
+            )
+
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.search_products.side_effect = _search_side_effect
+        mock_selector.select_product.side_effect = _select_side_effect
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([good_a, bad, good_c])
+
+        assert len(result.failed_items) == 1
+        assert result.failed_items[0].search_term == "term-b"
+        assert len(result.items) == 2
+        product_ids = {i.safeway_product.product_id for i in result.items}
+        assert product_ids == {"P-A", "P-C"}
+
+    def test_substitution_search_error_routes_to_failed(self) -> None:
+        """Test a ProductSearchError from substitution routes item to failed.
+
+        The bug also applies to failures raised from
+        ``SubstitutionService.find_substitutions`` while handling an
+        out-of-stock product.
+        """
+        oos_product = _make_product(in_stock=False)
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.search_products.return_value = [oos_product]
+        mock_selector.select_product.return_value = _MockSelectionResult(
+            item=_make_item(),
+            product=oos_product,
+            reasoning="Test",
+        )
+        mock_substitution.find_substitutions.side_effect = ProductSearchError("boom")
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([_make_item()])
+
+        assert len(result.failed_items) == 1
+        assert result.items == []
+
+    def test_safeway_api_error_routes_to_failed(self) -> None:
+        """Test a SafewayAPIError during search routes the item to failed.
+
+        A ``SafewayAPIError`` (e.g. a 500 response from Safeway) must be
+        caught alongside ``ProductSearchError`` and never crash
+        ``build_cart``.
+        """
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.search_products.side_effect = SafewayAPIError("500 from safeway")
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([_make_item()])
+
+        assert len(result.failed_items) == 1
+        assert result.items == []
+
+    def test_safeway_auth_error_propagates(self) -> None:
+        """Test SafewayAuthError still propagates out of build_cart.
+
+        Locks the not-caught contract: unlike ``ProductSearchError`` and
+        ``SafewayAPIError``, an authentication failure affects every
+        subsequent request, not just the one item being processed, so it
+        must not be swallowed and routed to ``failed_items``.
+        """
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.search_products.side_effect = SafewayAuthError(
+            "credentials rejected"
+        )
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+
+        with pytest.raises(SafewayAuthError):
+            builder.build_cart([_make_item()])
 
 
 # ------------------------------------------------------------------
