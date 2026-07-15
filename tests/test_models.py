@@ -904,3 +904,70 @@ class TestCartSummary:
 
         assert dumped["fulfillment_unverified"] is True
         assert restored.fulfillment_unverified is True
+
+
+class TestMonetaryFieldsRejectNonFinite:
+    """Non-finite monetary values are rejected at model validation (issue #73).
+
+    JSON's ``Infinity``/``NaN`` literals are accepted by Python's json
+    parser, and a non-finite Decimal crashes ``quantize`` with
+    ``InvalidOperation`` deep inside ``compute_cart_total`` — an
+    unhandled 500 instead of a clean 400. Rejecting non-finite floats at
+    the model boundary turns any such payload into a normal
+    ``ValidationError`` (which the API maps to 400).
+    """
+
+    @pytest.mark.parametrize("bad_value", [float("inf"), float("-inf"), float("nan")])
+    def test_cart_item_rejects_non_finite_estimated_cost(
+        self, bad_value: float
+    ) -> None:
+        """Test CartItem rejects inf/-inf/nan estimated_cost."""
+        shopping_item = ShoppingListItem(
+            ingredient="milk",
+            quantity=1.0,
+            unit="gallon",
+            category=IngredientCategory.DAIRY,
+            search_term="whole milk",
+            from_meals=["Cereal"],
+        )
+        product = SafewayProduct(
+            product_id="SW-001",
+            name="Whole Milk",
+            price=5.99,
+            size="1 gallon",
+        )
+        with pytest.raises(ValidationError):
+            CartItem(
+                shopping_list_item=shopping_item,
+                safeway_product=product,
+                quantity_to_order=1,
+                estimated_cost=bad_value,
+            )
+
+    @pytest.mark.parametrize("bad_value", [float("inf"), float("-inf"), float("nan")])
+    def test_fulfillment_option_rejects_non_finite_fee(self, bad_value: float) -> None:
+        """Test FulfillmentOption rejects inf/-inf/nan fee."""
+        with pytest.raises(ValidationError):
+            FulfillmentOption(
+                type=FulfillmentType.PICKUP,
+                available=True,
+                fee=bad_value,
+                windows=[],
+            )
+
+    @pytest.mark.parametrize("field", ["subtotal", "estimated_total"])
+    def test_cart_summary_rejects_non_finite_totals(self, field: str) -> None:
+        """Test CartSummary rejects inf subtotal/estimated_total."""
+        kwargs: dict[str, object] = {
+            "items": [],
+            "failed_items": [],
+            "substituted_items": [],
+            "restock_items": [],
+            "subtotal": 0.0,
+            "fulfillment_options": [],
+            "recommended_fulfillment": FulfillmentType.PICKUP,
+            "estimated_total": 0.0,
+        }
+        kwargs[field] = float("inf")
+        with pytest.raises(ValidationError):
+            CartSummary(**kwargs)
