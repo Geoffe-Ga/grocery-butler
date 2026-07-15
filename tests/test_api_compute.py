@@ -24,6 +24,7 @@ from grocery_butler.auth_middleware import SECRET_ENV_VAR, mint_token
 from grocery_butler.models import (
     CartItem,
     CartSummary,
+    FulfillmentOption,
     FulfillmentType,
     Ingredient,
     IngredientCategory,
@@ -381,7 +382,12 @@ class TestOrderPreview:
     def test_builds_cart_and_returns_decimal_safe_total(
         self, client: FlaskClient, auth_headers: dict[str, str]
     ) -> None:
-        """0.1 + 0.2 comes back as exactly "0.3", not a float artifact."""
+        """0.1 + 0.2 comes back as exactly "0.30", not a float artifact.
+
+        Issue #73: totals are now server-computed via
+        ``order_service.compute_cart_total``, which quantizes monetary
+        values to cents — hence "0.30" rather than the bare "0.3".
+        """
         pipeline = MagicMock()
         pipeline.build_cart_only.return_value = _make_cart({"pasta": 0.1, "beans": 0.2})
         item = _make_shopping_item()
@@ -396,7 +402,7 @@ class TestOrderPreview:
         pipeline.build_cart_only.assert_called_once_with([item])
         pipeline.close.assert_called_once_with()
         body = response.get_json()
-        assert body["total"] == "0.3"
+        assert body["total"] == "0.30"
         assert len(body["cart"]["items"]) == 2
 
     def test_restock_items_count_toward_total(
@@ -418,6 +424,42 @@ class TestOrderPreview:
 
         assert response.status_code == 200
         assert response.get_json()["total"] == "3.75"
+
+    def test_order_preview_total_includes_fulfillment_fee(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Test the preview total includes the recommended fulfillment fee.
+
+        Issue #73: /order/preview computes its total via the same
+        fee-omitting ``_cart_total`` helper as /order/submit. A cart
+        with a $4.00 recommended-fulfillment fee on top of a $1.25 item
+        must preview a $5.25 total, not $1.25.
+        """
+        cart = _make_cart({"pasta": 1.25})
+        cart = cart.model_copy(
+            update={
+                "fulfillment_options": [
+                    FulfillmentOption(
+                        type=FulfillmentType.PICKUP,
+                        available=True,
+                        fee=4.00,
+                        windows=[],
+                    ),
+                ],
+                "recommended_fulfillment": FulfillmentType.PICKUP,
+            }
+        )
+        pipeline = MagicMock()
+        pipeline.build_cart_only.return_value = cart
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/order/preview",
+                json={"shopping_list": [_make_shopping_item().model_dump(mode="json")]},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        assert response.get_json()["total"] == "5.25"
 
     def test_pipeline_error_returns_503(
         self, client: FlaskClient, auth_headers: dict[str, str]

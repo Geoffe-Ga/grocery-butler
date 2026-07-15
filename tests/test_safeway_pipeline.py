@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+from decimal import Decimal
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -1353,3 +1354,81 @@ class TestSubmissionDisabledDoesNotAffectBuildCartOnly:
         cart = pipeline.build_cart_only(sample_items)
 
         assert cart is mock_cart_summary
+
+
+# ---------------------------------------------------------------------------
+# Issue #73: order-value cap — pipeline exposes the config cap and threads
+# allow_over_cap through to OrderService.
+# ---------------------------------------------------------------------------
+
+
+class TestOrderValueCapForwarding:
+    """Tests for SafewayPipeline's Issue #73 order-value cap plumbing."""
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    def test_pipeline_exposes_order_value_cap_from_config(
+        self,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+    ) -> None:
+        """Test the pipeline exposes the configured order-value cap.
+
+        Architecture: SafewayPipeline reads
+        ``config.safeway_order_value_cap`` and exposes it as a read-only
+        ``order_value_cap`` property, mirroring
+        ``order_submission_enabled``. There is no such property today.
+        """
+        pipeline = SafewayPipeline(safeway_config, ":memory:")
+
+        assert pipeline.order_value_cap == Decimal("300")
+
+    @patch("grocery_butler.safeway_pipeline.RecipeStore")
+    @patch("grocery_butler.safeway_pipeline.ProductSearchService")
+    @patch("grocery_butler.safeway_pipeline.ProductSelector")
+    @patch("grocery_butler.safeway_pipeline.SubstitutionService")
+    @patch("grocery_butler.safeway_pipeline.SafewayClient")
+    @patch("grocery_butler.safeway_pipeline.PantryManager")
+    @patch("grocery_butler.safeway_pipeline.CartBuilder")
+    @patch("grocery_butler.safeway_pipeline.OrderService")
+    def test_pipeline_passes_cap_and_override_to_order_service(
+        self,
+        mock_order_cls: MagicMock,
+        mock_cart_cls: MagicMock,
+        mock_pantry: MagicMock,
+        mock_client_cls: MagicMock,
+        mock_sub: MagicMock,
+        mock_selector: MagicMock,
+        mock_search: MagicMock,
+        mock_store: MagicMock,
+        safeway_config: Config,
+        mock_cart_summary: CartSummary,
+    ) -> None:
+        """Test submit_cart forwards allow_over_cap to OrderService.submit_order.
+
+        Architecture: OrderService.submit_order gains a keyword-only
+        ``allow_over_cap`` parameter, and ``submit_cart`` must thread the
+        caller's override through so a human-approved over-cap order can
+        proceed. ``submit_cart`` accepts no such keyword today.
+        """
+        mock_client_cls.return_value.is_authenticated = True
+        expected = OrderResult(success=True)
+        mock_order_cls.return_value.submit_order.return_value = expected
+
+        pipeline = SafewayPipeline(safeway_config, ":memory:")
+        result = pipeline.submit_cart(mock_cart_summary, allow_over_cap=True)
+
+        assert result is expected
+        mock_submit = mock_order_cls.return_value.submit_order
+        mock_submit.assert_called_once()
+        _args, kwargs = mock_submit.call_args
+        assert kwargs.get("allow_over_cap") is True
