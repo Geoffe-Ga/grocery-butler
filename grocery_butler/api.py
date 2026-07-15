@@ -583,6 +583,32 @@ def _render_review_section(cart: CartSummary) -> str:
     return f" Needs review: {named}."
 
 
+def _render_fulfillment_section(cart: CartSummary) -> str:
+    """Render a staged-message clause warning about unverified fulfillment.
+
+    Mirrors :func:`_render_review_section` but for the fulfillment gate
+    (Issue #72): when Safeway's fulfillment options could not be
+    confirmed while building the cart, the human must see that warning
+    before ever replying "confirm" — per the issue #59 precedent, that
+    visibility is what makes a later confirm count as an explicit
+    override of the fulfillment gate.
+
+    Args:
+        cart: The cart being staged for confirmation.
+
+    Returns:
+        Empty string for a cart with verified fulfillment, otherwise a
+        sentence warning that fulfillment could not be confirmed.
+    """
+    if not cart.fulfillment_unverified:
+        return ""
+    return (
+        " Fulfillment options could not be confirmed with Safeway "
+        "(unverified) — pickup/delivery availability and fees are not "
+        "final."
+    )
+
+
 @api_v1.post("/order/submit")
 def post_order_submit() -> Response | tuple[Response, int]:
     """Stage a Safeway order for confirmation. Never submits directly.
@@ -620,12 +646,13 @@ def post_order_submit() -> Response | tuple[Response, int]:
     )
     item_count = len(cart.items) + len(cart.restock_items)
     review_section = _render_review_section(cart)
+    fulfillment_section = _render_fulfillment_section(cart)
     return jsonify(
         status="pending_confirmation",
         action_id=action_id,
         message=(
             f"Staged Safeway order ({item_count} items, ${total})."
-            f"{review_section} Reply 'confirm' to submit."
+            f"{review_section}{fulfillment_section} Reply 'confirm' to submit."
         ),
     )
 
@@ -776,13 +803,18 @@ def _confirm_order_submit(
         # The staged message (post_order_submit) already named every
         # flagged item and its reason code, so replying "confirm" IS the
         # human's explicit override of the review gate (chief-architect
-        # ruling, issue #59 round 3). The action_id doubles as the
-        # idempotency key so the duplicate-order ledger and Safeway's
-        # clientOrderId correlate with the staged action (Issue #61).
+        # ruling, issue #59 round 3). The staged message also already
+        # warned when fulfillment could not be confirmed with Safeway, so
+        # this same "confirm" is likewise the explicit human override of
+        # the fulfillment gate (issue #59 precedent, issue #72). The
+        # action_id doubles as the idempotency key so the duplicate-order
+        # ledger and Safeway's clientOrderId correlate with the staged
+        # action (Issue #61).
         result = pipeline.submit_cart(
             cart,
             idempotency_key=action.action_id,
             allow_review_items=True,
+            allow_unverified_fulfillment=True,
             allow_over_cap=bool(action.payload.get("allow_over_cap", False)),
         )
     except SafewayPipelineError as exc:

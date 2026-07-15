@@ -440,12 +440,14 @@ class CartItem(BaseModel):
         safeway_product: The matched Safeway product.
         quantity_to_order: Number of product units to order.
         estimated_cost: Estimated cost for ``quantity_to_order`` units.
-        needs_review: Whether the quantity calculation needs human review
-            (e.g. an unparseable product size, incomparable units, or a
-            quantity capped by the per-item maximum).
+        needs_review: Whether the item needs human review (e.g. an
+            unparseable product size, incomparable units, a quantity
+            capped by the per-item maximum, or an auto-selected
+            substitution).
         review_reason: Machine-readable reason code for ``needs_review``
-            (``"unparseable_size"``, ``"incomparable_units"``, or
-            ``"quantity_capped"``), or ``""`` when no review is needed.
+            (``"unparseable_size"``, ``"incomparable_units"``,
+            ``"quantity_capped"``, or ``"substitution"``), or ``""``
+            when no review is needed.
     """
 
     shopping_list_item: ShoppingListItem
@@ -467,7 +469,28 @@ class FulfillmentOption(BaseModel):
 
 
 class CartSummary(BaseModel):
-    """Complete cart ready for order submission."""
+    """Complete cart ready for order submission.
+
+    Attributes:
+        items: Regular cart items.
+        failed_items: Shopping list items no product could be found for.
+        substituted_items: Out-of-stock items with substitution results.
+        skipped_items: Items explicitly skipped by the caller.
+        restock_items: Restock-queue cart items.
+        subtotal: Sum of all item costs before fulfillment fees.
+        fulfillment_options: Fulfillment options fetched from Safeway, or
+            an empty list when the fetch failed (see
+            ``fulfillment_unverified``).
+        recommended_fulfillment: The recommended fulfillment type.
+        estimated_total: Subtotal plus the recommended fulfillment fee.
+        fulfillment_unverified: True when Safeway's fulfillment options
+            could not be fetched, so ``fulfillment_options`` is empty and
+            ``estimated_total`` excludes any fulfillment fee (issue #72).
+            Callers must warn the human and require an explicit override
+            before submitting an order built from such a cart -- never
+            treat the absence of a fee as confirmation that fulfillment
+            is free. Defaults to False (verified).
+    """
 
     items: list[CartItem]
     failed_items: list[ShoppingListItem]
@@ -478,6 +501,7 @@ class CartSummary(BaseModel):
     fulfillment_options: list[FulfillmentOption]
     recommended_fulfillment: FulfillmentType
     estimated_total: float
+    fulfillment_unverified: bool = False
 
 
 class PendingActionStatus(StrEnum):

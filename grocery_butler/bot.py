@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         InventoryItem,
         ParsedMeal,
         ShoppingListItem,
+        SubstitutionResult,
     )
     from grocery_butler.order_service import OrderResult
     from grocery_butler.safeway_pipeline import SafewayPipeline
@@ -296,9 +297,16 @@ class _OrderConfirmView(discord.ui.View):
             # The rendered preview (_format_cart_summary) already showed
             # the user every flagged item and its reason code, so this
             # button press IS the explicit human override of the review
-            # gate (chief-architect ruling, issue #59 round 3).
+            # gate (chief-architect ruling, issue #59 round 3). The preview
+            # also already warned when fulfillment could not be confirmed
+            # with Safeway (via _format_fulfillment_warning), so this same
+            # confirm press is likewise the explicit human override of the
+            # fulfillment gate (issue #59 precedent, issue #72).
             order_result = await asyncio.to_thread(
-                self._pipeline.submit_cart, self._cart, allow_review_items=True
+                self._pipeline.submit_cart,
+                self._cart,
+                allow_review_items=True,
+                allow_unverified_fulfillment=True,
             )
             msg = _format_order_result(order_result)
             await interaction.followup.send(msg)
@@ -371,6 +379,68 @@ def _format_cart_item_line(ci: CartItem) -> str:
     )
 
 
+def _format_substituted_section(
+    substituted_items: list[SubstitutionResult],
+) -> list[str]:
+    """Format the "Substituted" section lines of a cart summary.
+
+    Args:
+        substituted_items: Substitution results to format.
+
+    Returns:
+        Formatted lines for this section, or an empty list when there
+        are no substituted items.
+    """
+    if not substituted_items:
+        return []
+    lines = [f"\nSubstituted ({len(substituted_items)}):"]
+    for sub in substituted_items:
+        orig = sub.original_item.ingredient
+        alt = sub.selected.product.name if sub.selected else "?"
+        lines.append(f"  {orig} -> {alt}")
+    return lines
+
+
+def _format_failed_section(failed_items: list[ShoppingListItem]) -> list[str]:
+    """Format the "Failed" section lines of a cart summary.
+
+    Args:
+        failed_items: Shopping list items no product could be found for.
+
+    Returns:
+        Formatted lines for this section, or an empty list when there
+        are no failed items.
+    """
+    if not failed_items:
+        return []
+    lines = [f"\nFailed ({len(failed_items)}):"]
+    lines.extend(f"  - {item.ingredient}" for item in failed_items)
+    return lines
+
+
+def _format_fulfillment_warning(cart: CartSummary) -> list[str]:
+    """Format the unverified-fulfillment warning line, if applicable.
+
+    Regression guard for issue #72: when Safeway's fulfillment options
+    could not be confirmed while building the cart, the human must see
+    this warning before ever pressing Confirm.
+
+    Args:
+        cart: Cart summary to inspect.
+
+    Returns:
+        A single-element list with the warning line, or an empty list
+        when the cart's fulfillment was verified.
+    """
+    if not cart.fulfillment_unverified:
+        return []
+    return [
+        "\nWARNING: fulfillment options could not be confirmed with "
+        "Safeway (unverified) — pickup/delivery availability and fees "
+        "below are not final."
+    ]
+
+
 def _format_cart_summary(cart: CartSummary) -> str:
     """Format a CartSummary for Discord display.
 
@@ -390,17 +460,9 @@ def _format_cart_summary(cart: CartSummary) -> str:
         lines.append(f"\nRestock ({len(cart.restock_items)}):")
         lines.extend(_format_cart_item_line(ci) for ci in cart.restock_items)
 
-    if cart.substituted_items:
-        lines.append(f"\nSubstituted ({len(cart.substituted_items)}):")
-        for sub in cart.substituted_items:
-            orig = sub.original_item.ingredient
-            alt = sub.selected.product.name if sub.selected else "?"
-            lines.append(f"  {orig} -> {alt}")
-
-    if cart.failed_items:
-        lines.append(f"\nFailed ({len(cart.failed_items)}):")
-        for item in cart.failed_items:
-            lines.append(f"  - {item.ingredient}")
+    lines.extend(_format_substituted_section(cart.substituted_items))
+    lines.extend(_format_failed_section(cart.failed_items))
+    lines.extend(_format_fulfillment_warning(cart))
 
     lines.append(f"\nSubtotal: ${cart.subtotal:.2f}")
     lines.append(f"Fulfillment: {cart.recommended_fulfillment.value}")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 from grocery_butler.cart_builder import (
@@ -11,7 +12,6 @@ from grocery_butler.cart_builder import (
     QuantityDecision,
     _calculate_quantity,
     _calculate_subtotal,
-    _default_fulfillment_options,
     _get_fulfillment_fee,
     _parse_fulfillment_response,
     _recommend_fulfillment,
@@ -27,6 +27,7 @@ from grocery_butler.models import (
     SubstitutionResult,
     SubstitutionSuitability,
 )
+from grocery_butler.product_search import CachedMapping
 
 # ------------------------------------------------------------------
 # Fixtures
@@ -467,29 +468,6 @@ class TestParseFulfillmentResponse:
 
 
 # ------------------------------------------------------------------
-# Tests: _default_fulfillment_options
-# ------------------------------------------------------------------
-
-
-class TestDefaultFulfillmentOptions:
-    """Tests for _default_fulfillment_options."""
-
-    def test_returns_two_options(self) -> None:
-        """Test defaults include pickup and delivery."""
-        result = _default_fulfillment_options()
-        assert len(result) == 2
-        types = {o.type for o in result}
-        assert FulfillmentType.PICKUP in types
-        assert FulfillmentType.DELIVERY in types
-
-    def test_pickup_is_free(self) -> None:
-        """Test default pickup fee is 0."""
-        result = _default_fulfillment_options()
-        pickup = next(o for o in result if o.type == FulfillmentType.PICKUP)
-        assert pickup.fee == 0.0
-
-
-# ------------------------------------------------------------------
 # Tests: CartBuilder.build_cart
 # ------------------------------------------------------------------
 
@@ -514,7 +492,8 @@ class TestBuildCart:
             CartBuilder with mocked services.
         """
         mock_search = MagicMock()
-        mock_search.search_or_cached.return_value = search_results or []
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = search_results or []
 
         mock_selector = MagicMock()
         item = _make_item()
@@ -606,7 +585,8 @@ class TestBuildCart:
         )
 
         mock_search = MagicMock()
-        mock_search.search_or_cached.return_value = [oos_product]
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = [oos_product]
 
         mock_selector = MagicMock()
         mock_selector.select_product.return_value = _MockSelectionResult(
@@ -686,8 +666,22 @@ class TestBuildCart:
 
         assert result.estimated_total == 10.0
 
-    def test_fulfillment_api_failure_uses_defaults(self) -> None:
-        """Test default fulfillment options on API failure."""
+    def test_fulfillment_api_failure_marks_cart_unverified_no_fabricated_options(
+        self,
+    ) -> None:
+        """Test a fulfillment-fetch failure marks the cart unverified (issue #72).
+
+        Regression guard for issue #72 (HIGH): previously any exception
+        raised while fetching fulfillment options was swallowed by
+        ``_get_fulfillment_options`` and replaced with fabricated
+        defaults (free pickup, $9.95 delivery, both marked
+        ``available=True``) via the now-deleted
+        ``_default_fulfillment_options`` helper -- presenting invented
+        availability and fees as real. On failure, ``build_cart`` must
+        instead return an empty ``fulfillment_options`` list and flag
+        ``fulfillment_unverified=True`` so callers know fulfillment was
+        never actually confirmed with Safeway.
+        """
         product = _make_product(price=5.0, size="1 lb")
         builder = self._make_builder(
             search_results=[product],
@@ -696,8 +690,60 @@ class TestBuildCart:
         builder._client.get.side_effect = Exception("API down")
         result = builder.build_cart([_make_item(quantity=1.0)])
 
-        assert len(result.fulfillment_options) == 2
+        assert result.fulfillment_options == []
+        assert result.fulfillment_unverified is True
+
+    def test_fulfillment_api_failure_estimated_total_has_no_fabricated_fee(
+        self,
+    ) -> None:
+        """Test a fulfillment-fetch failure never adds the fabricated $9.95 fee.
+
+        With no fulfillment options available, ``_recommend_fulfillment``
+        falls back to ``PICKUP`` and ``_get_fulfillment_fee`` returns
+        ``0.0``, so the estimated total on an unverified cart must equal
+        the subtotal exactly -- never the subtotal plus an invented
+        delivery fee (issue #72). ``fulfillment_options`` recommending
+        free pickup alone can't distinguish this fix from the old
+        fabricated-defaults behavior (which also recommended free
+        pickup), so this also asserts the options list is empty --
+        i.e. no fabricated delivery option carrying the $9.95 fee is
+        present anywhere in it.
+        """
+        product = _make_product(price=5.0, size="1 lb")
+        builder = self._make_builder(
+            search_results=[product],
+            selection_product=product,
+        )
+        builder._client.get.side_effect = Exception("API down")
+        result = builder.build_cart([_make_item(quantity=1.0)])
+
+        assert result.estimated_total == result.subtotal
         assert result.recommended_fulfillment == FulfillmentType.PICKUP
+        assert result.fulfillment_options == []
+
+    def test_fulfillment_api_success_marks_cart_verified(self) -> None:
+        """Test a successful fulfillment fetch leaves the cart verified.
+
+        On the happy path -- fulfillment options fetched without error --
+        ``fulfillment_unverified`` must be ``False`` and the parsed
+        options from the API response must be used as before (issue #72).
+        """
+        product = _make_product(price=5.0, size="1 lb")
+        fulfillment = {
+            "fulfillmentOptions": [
+                {"type": "pickup", "available": True, "fee": 0.0, "windows": []},
+            ]
+        }
+        builder = self._make_builder(
+            search_results=[product],
+            selection_product=product,
+            fulfillment_response=fulfillment,
+        )
+        result = builder.build_cart([_make_item(quantity=1.0)])
+
+        assert result.fulfillment_unverified is False
+        assert len(result.fulfillment_options) == 1
+        assert result.fulfillment_options[0].type == FulfillmentType.PICKUP
 
     def test_empty_cart(self) -> None:
         """Test building cart with no items."""
@@ -751,7 +797,8 @@ class TestBuildCart:
         """
         product = _make_product(price=1.0, size="1 lb")
         mock_search = MagicMock()
-        mock_search.search_or_cached.return_value = [product]
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = [product]
 
         item = _make_item(quantity=100.0, unit="lb")
         mock_selector = MagicMock()
@@ -780,3 +827,564 @@ class TestBuildCart:
         assert cart_item.quantity_to_order == 3
         assert cart_item.needs_review is True
         assert cart_item.review_reason == "quantity_capped"
+
+
+# ------------------------------------------------------------------
+# Tests: CartBuilder.build_cart substitution pricing (issue #70)
+# ------------------------------------------------------------------
+#
+# Regression guards for issue #70: build_cart routed out-of-stock items
+# into substituted_items with the best alternative auto-selected, but
+# never converted that selected substitute into a priced CartItem, so
+# it was silently dropped from the submitted order (never priced into
+# the subtotal, never serialized into the order payload). Per the
+# chief-architect's ruling, a selected substitution must become a
+# CartItem in cart.items, always flagged needs_review=True with
+# review_reason="substitution" (a human must confirm substitutions),
+# while still appearing in substituted_items as a display/provenance
+# record. A SubstitutionResult with no selected alternative must remain
+# display-only.
+
+
+def _make_alt_substitution_result(alt_product: SafewayProduct) -> SubstitutionResult:
+    """Build a SubstitutionResult with one alternative, pre-selection.
+
+    Mirrors what SubstitutionService.find_substitutions would return
+    before CartBuilder._handle_out_of_stock sets ``selected`` to the
+    first alternative.
+
+    Args:
+        alt_product: The alternative product to offer as a substitute.
+
+    Returns:
+        SubstitutionResult with one alternative and ``selected`` unset
+        (CartBuilder sets ``selected`` internally).
+    """
+    alt_option = SubstitutionOption(
+        product=alt_product,
+        suitability=SubstitutionSuitability.GOOD,
+        reasoning="Similar cut",
+    )
+    return SubstitutionResult(
+        status="alternatives_found",
+        original_item=_make_item(),
+        alternatives=[alt_option],
+        message="Found 1 alternative(s)",
+    )
+
+
+class TestBuildCartSubstitutionPricing:
+    """Tests for CartBuilder.build_cart pricing selected substitutions."""
+
+    def _make_builder(
+        self,
+        sub_result: SubstitutionResult,
+        oos_product: SafewayProduct | None = None,
+        fulfillment_response: dict | None = None,
+    ) -> CartBuilder:
+        """Create a CartBuilder wired for an out-of-stock + substitution flow.
+
+        Args:
+            sub_result: SubstitutionResult the mocked substitution service
+                returns for the out-of-stock item.
+            oos_product: The primary out-of-stock product returned by
+                search/selection. Defaults to a standard OOS product.
+            fulfillment_response: Fulfillment API response for the mocked
+                Safeway client.
+
+        Returns:
+            CartBuilder with mocked search, selector, substitution, and
+            client services.
+        """
+        oos = oos_product or _make_product(in_stock=False)
+        item = _make_item()
+
+        mock_search = MagicMock()
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = [oos]
+
+        mock_selector = MagicMock()
+        mock_selector.select_product.return_value = _MockSelectionResult(
+            item=item,
+            product=oos,
+            reasoning="Test selection",
+        )
+
+        mock_substitution = MagicMock()
+        mock_substitution.find_substitutions.return_value = sub_result
+
+        mock_client = MagicMock()
+        mock_client.store_id = "1234"
+        mock_client.get.return_value = fulfillment_response or {}
+
+        return CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+
+    def test_selected_substitution_added_to_cart_items(self) -> None:
+        """Test a selected substitution is converted into a CartItem.
+
+        Regression guard for issue #70: the selected substitute must
+        appear in ``cart.items`` with the substitute product, correct
+        quantity, and correctly priced cost — not silently dropped.
+        """
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = _make_alt_substitution_result(alt_product)
+        builder = self._make_builder(sub_result)
+
+        cart = builder.build_cart([_make_item()])
+
+        assert len(cart.items) == 1
+        substitute_item = cart.items[0]
+        assert substitute_item.safeway_product.product_id == "ALT1"
+        assert substitute_item.quantity_to_order == 2
+        assert substitute_item.estimated_cost == round(10.99 * 2, 2)
+
+    def test_substitution_priced_into_subtotal(self) -> None:
+        """Test the substitute's cost is included in cart.subtotal."""
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = _make_alt_substitution_result(alt_product)
+        builder = self._make_builder(sub_result)
+
+        cart = builder.build_cart([_make_item()])
+
+        assert cart.subtotal == round(10.99 * 2, 2)
+
+    def test_substitution_flagged_for_review(self) -> None:
+        """Test the substitute CartItem is always flagged for review.
+
+        Per the chief-architect's ruling, a human must confirm every
+        substitution before it is submitted, regardless of whether the
+        quantity math itself needed review.
+        """
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = _make_alt_substitution_result(alt_product)
+        builder = self._make_builder(sub_result)
+
+        cart = builder.build_cart([_make_item()])
+
+        assert len(cart.items) == 1
+        substitute_item = cart.items[0]
+        assert substitute_item.needs_review is True
+        assert substitute_item.review_reason == "substitution"
+
+    def test_estimated_total_includes_substitution(self) -> None:
+        """Test estimated_total includes the substitute's contribution.
+
+        The substitute's cost must flow through subtotal and into
+        estimated_total alongside the fulfillment fee, exactly like any
+        other priced cart item.
+        """
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = _make_alt_substitution_result(alt_product)
+        fulfillment_response = {
+            "fulfillmentOptions": [
+                {"type": "pickup", "available": False, "fee": 0.0, "windows": []},
+                {
+                    "type": "delivery",
+                    "available": True,
+                    "fee": 9.95,
+                    "windows": [],
+                },
+            ]
+        }
+        builder = self._make_builder(
+            sub_result, fulfillment_response=fulfillment_response
+        )
+
+        cart = builder.build_cart([_make_item()])
+
+        expected_subtotal = round(10.99 * 2, 2)
+        assert cart.recommended_fulfillment == FulfillmentType.DELIVERY
+        assert cart.estimated_total == round(expected_subtotal + 9.95, 2)
+
+    def test_substitution_still_listed_in_substituted_items(self) -> None:
+        """Test substituted_items still records the substitution (regression).
+
+        The provenance record in ``substituted_items`` must remain
+        populated exactly as before — pricing the substitute into
+        ``items`` must not remove it from the display list.
+        """
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = _make_alt_substitution_result(alt_product)
+        builder = self._make_builder(sub_result)
+
+        cart = builder.build_cart([_make_item()])
+
+        assert len(cart.substituted_items) == 1
+        recorded = cart.substituted_items[0]
+        assert recorded.selected is not None
+        assert recorded.selected.product.product_id == "ALT1"
+
+    def test_substitution_priced_into_unverified_fulfillment_cart(self) -> None:
+        """Test a substitute is still priced when fulfillment is unverified.
+
+        Composition of issues #70 and #72: when the fulfillment fetch
+        fails, the cart must be flagged ``fulfillment_unverified=True``
+        with no fabricated options (issue #72), while the selected
+        substitute is still converted into a priced, review-flagged
+        ``CartItem`` (issue #70). The estimated total must equal the
+        substitute's subtotal exactly -- no invented fulfillment fee.
+        """
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = _make_alt_substitution_result(alt_product)
+        builder = self._make_builder(sub_result)
+        builder._client.get.side_effect = Exception("API down")
+
+        cart = builder.build_cart([_make_item()])
+
+        assert cart.fulfillment_unverified is True
+        assert cart.fulfillment_options == []
+        assert len(cart.items) == 1
+        substitute_item = cart.items[0]
+        assert substitute_item.safeway_product.product_id == "ALT1"
+        assert substitute_item.needs_review is True
+        assert substitute_item.review_reason == "substitution"
+        assert cart.subtotal == round(10.99 * 2, 2)
+        assert cart.estimated_total == cart.subtotal
+
+    def test_no_alternative_substitution_not_added_to_items(self) -> None:
+        """Test a substitution with no alternatives stays display-only.
+
+        When SubstitutionService finds no alternatives, ``selected``
+        stays ``None`` and nothing should be added to ``items`` or
+        priced into ``subtotal`` — only ``substituted_items`` records
+        the failed substitution attempt.
+        """
+        no_alt_result = SubstitutionResult(
+            status="no_alternatives",
+            original_item=_make_item(),
+            alternatives=[],
+            message="No alternatives",
+        )
+        builder = self._make_builder(no_alt_result)
+
+        cart = builder.build_cart([_make_item()])
+
+        assert cart.items == []
+        assert cart.subtotal == 0.0
+        assert len(cart.substituted_items) == 1
+        assert cart.substituted_items[0].selected is None
+
+
+# ------------------------------------------------------------------
+# Tests: CartBuilder cache-hit / cache-miss flow (issue #71)
+# ------------------------------------------------------------------
+#
+# Regression guards for issue #71: the old ``search_or_cached`` cached
+# ``products[0]`` -- the raw pre-selection top hit, not what the selector
+# actually chose -- and rehydrated cache rows with a hardcoded size=""
+# and a default in_stock=True. Consequences: quantity was pinned to 1
+# (unparseable_size) and the substitution flow never triggered for
+# cached items. The fixed flow splits the miss path
+# (search_products -> selector.select_product -> save_mapping(selected))
+# from the hit path (get_cached_product -> reverify_product), and a hit
+# never calls search_products or select_product.
+
+
+def _make_cached_mapping(product: SafewayProduct) -> CachedMapping:
+    """Build a CachedMapping wrapping *product* for cache-hit tests.
+
+    Args:
+        product: The cached SafewayProduct.
+
+    Returns:
+        A CachedMapping resembling what
+        ``ProductSearchService.get_cached_product`` returns on a hit.
+    """
+    return CachedMapping(
+        mapping_id=1,
+        ingredient_description="boneless chicken thighs",
+        product=product,
+        is_pinned=False,
+        times_selected=1,
+        last_used=datetime.now(tz=UTC),
+    )
+
+
+class TestCartBuilderCacheFlow:
+    """Tests for the cache-hit/cache-miss split in CartBuilder._process_item."""
+
+    def _make_dependencies(
+        self,
+    ) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
+        """Create fresh mocks for search, selector, substitution, and client.
+
+        Returns:
+            Tuple of (mock_search, mock_selector, mock_substitution,
+            mock_client).
+        """
+        mock_search = MagicMock()
+        mock_selector = MagicMock()
+        mock_substitution = MagicMock()
+        mock_client = MagicMock()
+        mock_client.store_id = "1234"
+        mock_client.get.return_value = {}
+        return mock_search, mock_selector, mock_substitution, mock_client
+
+    def test_cache_miss_saves_selected_product(self) -> None:
+        """Test a cache miss saves the SELECTED candidate, not candidates[0].
+
+        Regression guard for issue #71: the old code cached
+        ``products[0]`` regardless of which candidate the selector
+        actually chose.
+        """
+        item = _make_item()
+        candidates = [
+            _make_product(product_id="P001"),
+            _make_product(product_id="P002"),
+            _make_product(product_id="P003"),
+        ]
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = candidates
+        mock_selector.select_product.return_value = _MockSelectionResult(
+            item=item, product=candidates[1], reasoning="Best match"
+        )
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        builder.build_cart([item])
+
+        mock_search.save_mapping.assert_called_once_with(
+            item.search_term, candidates[1]
+        )
+
+    def test_cache_hit_skips_search_and_select(self) -> None:
+        """Test a cache hit bypasses search_products and select_product."""
+        item = _make_item()
+        cached_product = _make_product(product_id="CACHED1", size="2 lb")
+        reverified = _make_product(product_id="CACHED1", size="2 lb")
+        cached = _make_cached_mapping(cached_product)
+
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = cached
+        mock_search.reverify_product.return_value = reverified
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([item])
+
+        mock_selector.select_product.assert_not_called()
+        mock_search.search_products.assert_not_called()
+        mock_search.reverify_product.assert_called_once_with(cached)
+        assert len(result.items) == 1
+        assert result.items[0].safeway_product.product_id == "CACHED1"
+
+    def test_cache_hit_uses_reverified_size_for_quantity(self) -> None:
+        """Test quantity calc uses the reverified product's size, not cached.
+
+        Regression guard for issue #71: the cached row's hardcoded
+        size="" used to force ``unparseable_size`` and a quantity of 1
+        for every cache hit, regardless of the item's actual needs.
+        """
+        item = _make_item(quantity=4.0, unit="lb")
+        cached_product = _make_product(product_id="CACHED1", size="1 lb")
+        reverified = _make_product(product_id="CACHED1", size="2 lb")
+        cached = _make_cached_mapping(cached_product)
+
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = cached
+        mock_search.reverify_product.return_value = reverified
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([item])
+
+        assert len(result.items) == 1
+        cart_item = result.items[0]
+        assert cart_item.quantity_to_order == 2
+        assert cart_item.needs_review is False
+
+    def test_cache_hit_out_of_stock_triggers_substitution(self) -> None:
+        """Test an out-of-stock reverified product triggers substitution.
+
+        Regression guard for issue #71: the cached row's default
+        in_stock=True used to prevent the substitution flow from ever
+        triggering for cached items.
+        """
+        item = _make_item()
+        cached_product = _make_product(product_id="CACHED1", in_stock=True)
+        reverified = _make_product(product_id="CACHED1", in_stock=False)
+        cached = _make_cached_mapping(cached_product)
+
+        sub_result = SubstitutionResult(
+            status="no_alternatives",
+            original_item=item,
+            message="No alternatives",
+        )
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = cached
+        mock_search.reverify_product.return_value = reverified
+        mock_substitution.find_substitutions.return_value = sub_result
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([item])
+
+        mock_substitution.find_substitutions.assert_called_once()
+        assert result.substituted_items == [sub_result]
+
+    def test_cache_hit_cost_uses_reverified_price(self) -> None:
+        """Test estimated_cost uses the reverified price, not the cached price."""
+        item = _make_item(quantity=1.0, unit="lb")
+        cached_product = _make_product(product_id="CACHED1", price=3.99, size="1 lb")
+        reverified = _make_product(product_id="CACHED1", price=5.49, size="1 lb")
+        cached = _make_cached_mapping(cached_product)
+
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = cached
+        mock_search.reverify_product.return_value = reverified
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([item])
+
+        assert len(result.items) == 1
+        assert result.items[0].estimated_cost == 5.49
+
+    def test_no_product_selected_returns_failed(self) -> None:
+        """Test a cache miss with no selected product fails without saving."""
+        item = _make_item()
+        candidates = [_make_product(product_id="P001")]
+
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = candidates
+        mock_selector.select_product.return_value = _MockSelectionResult(
+            item=item, product=None, reasoning="No good match"
+        )
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([item])
+
+        assert len(result.failed_items) == 1
+        mock_search.save_mapping.assert_not_called()
+
+    def test_cache_hit_out_of_stock_substitute_priced_into_items(self) -> None:
+        """Test a cache-hit substitution becomes a priced, review-flagged item.
+
+        Composition guard for issues #70 and #71: an out-of-stock
+        reverified cache hit must flow through the substitution service
+        (issue #71), and the selected substitute must then be converted
+        into a priced ``needs_review=True`` cart item (issue #70) rather
+        than being silently dropped from the order.
+        """
+        item = _make_item(quantity=2.0, unit="lb")
+        cached_product = _make_product(product_id="CACHED1", in_stock=True)
+        reverified = _make_product(product_id="CACHED1", in_stock=False)
+        cached = _make_cached_mapping(cached_product)
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = SubstitutionResult(
+            status="alternatives_found",
+            original_item=item,
+            alternatives=[
+                SubstitutionOption(
+                    product=alt_product,
+                    suitability=SubstitutionSuitability.GOOD,
+                    reasoning="Similar cut",
+                )
+            ],
+            message="Found 1 alternative(s)",
+        )
+
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = cached
+        mock_search.reverify_product.return_value = reverified
+        mock_substitution.find_substitutions.return_value = sub_result
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([item])
+
+        mock_substitution.find_substitutions.assert_called_once_with(item, reverified)
+        assert len(result.items) == 1
+        substitute_item = result.items[0]
+        assert substitute_item.safeway_product.product_id == "ALT1"
+        assert substitute_item.needs_review is True
+        assert substitute_item.review_reason == "substitution"
+        assert substitute_item.quantity_to_order == 2
+        assert substitute_item.estimated_cost == round(10.99 * 2, 2)
+        assert result.subtotal == round(10.99 * 2, 2)
+        assert result.substituted_items == [sub_result]

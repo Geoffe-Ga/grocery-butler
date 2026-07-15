@@ -110,12 +110,17 @@ def _make_cart_item(
 def _make_cart(
     items: list[CartItem] | None = None,
     restock_items: list[CartItem] | None = None,
+    *,
+    fulfillment_unverified: bool = False,
 ) -> CartSummary:
     """Create a test CartSummary.
 
     Args:
         items: Regular cart items.
         restock_items: Restock queue items.
+        fulfillment_unverified: Whether the cart's fulfillment options
+            failed to be confirmed with Safeway (issue #72). Defaults to
+            False (verified).
 
     Returns:
         CartSummary for testing.
@@ -140,6 +145,7 @@ def _make_cart(
         ],
         recommended_fulfillment=FulfillmentType.PICKUP,
         estimated_total=subtotal,
+        fulfillment_unverified=fulfillment_unverified,
     )
 
 
@@ -233,6 +239,30 @@ class TestBuildOrderPayload:
         product_ids = [i["productId"] for i in result["items"]]
         assert "P001" in product_ids
         assert "R1" in product_ids
+
+    def test_includes_substitute_item(self) -> None:
+        """Test a substitute-style CartItem in cart.items reaches the payload.
+
+        Contract guard for issue #70: once CartBuilder converts a
+        selected substitution into a CartItem (needs_review=True,
+        review_reason="substitution") and appends it to ``cart.items``,
+        ``_build_order_payload`` must serialize it exactly like any
+        other cart item, using its current (cart-only) signature.
+        """
+        substitute = _make_cart_item(
+            ingredient="bell pepper",
+            product_id="ALT1",
+            price=1.49,
+            needs_review=True,
+            review_reason="substitution",
+        )
+        cart = _make_cart(items=[substitute])
+
+        result = _build_order_payload(cart)
+
+        product_ids = [i["productId"] for i in result["items"]]
+        assert "ALT1" in product_ids
+        assert result["estimatedTotal"] == cart.estimated_total
 
 
 # ------------------------------------------------------------------
@@ -682,6 +712,193 @@ class TestSubmitOrderReviewGate:
         result = service.submit_order(_make_cart())
 
         assert result.success is True
+        service._client.post.assert_called_once()
+
+    def test_blocks_unreviewed_substitution(self) -> None:
+        """Test a substitute CartItem blocks submission pending review.
+
+        Contract guard for issue #70: once CartBuilder appends a
+        selected substitution to ``cart.items`` with
+        ``review_reason="substitution"``, the existing issue #59 review
+        gate must block it exactly like any other flagged item unless
+        the caller explicitly opts in with ``allow_review_items=True``.
+        """
+        service = self._make_service(
+            api_response={
+                "orderId": "ORD-123",
+                "status": "confirmed",
+                "total": 1.49,
+            }
+        )
+        substitute = _make_cart_item(
+            ingredient="bell pepper",
+            product_id="ALT1",
+            price=1.49,
+            needs_review=True,
+            review_reason="substitution",
+        )
+        cart = _make_cart(items=[substitute])
+
+        blocked = service.submit_order(cart)
+
+        assert blocked.success is False
+        assert "substitution" in blocked.error_message.lower()
+        service._client.post.assert_not_called()
+
+        allowed = service.submit_order(cart, allow_review_items=True)
+
+        assert allowed.success is True
+        assert allowed.confirmation is not None
+        service._client.post.assert_called_once()
+
+
+# ------------------------------------------------------------------
+# Tests: fulfillment_block_result and OrderService.submit_order
+# fulfillment gate (issue #72)
+# ------------------------------------------------------------------
+#
+# Issue #72 (HIGH): CartBuilder._get_fulfillment_options previously
+# swallowed any fetch failure and substituted fabricated defaults (free
+# pickup, $9.95 delivery, both marked available=True), presenting
+# invented availability and fees as real and letting orders proceed as
+# if fulfillment had been confirmed. The fix marks such a cart
+# fulfillment_unverified, and submit_order must block it before any HTTP
+# call unless the caller explicitly overrides with
+# allow_unverified_fulfillment=True.
+
+
+class TestFulfillmentBlockResult:
+    """Tests for order_service.fulfillment_block_result (issue #72)."""
+
+    def test_unverified_cart_returns_blocking_result(self) -> None:
+        """Test a fulfillment_unverified cart returns a failed OrderResult."""
+        from grocery_butler.order_service import fulfillment_block_result
+
+        cart = _make_cart(fulfillment_unverified=True)
+        result = fulfillment_block_result(cart)
+
+        assert result is not None
+        assert result.success is False
+        assert "fulfillment" in result.error_message.lower()
+
+    def test_verified_cart_returns_none(self) -> None:
+        """Test a verified cart (the default) returns None -- nothing blocks."""
+        from grocery_butler.order_service import fulfillment_block_result
+
+        cart = _make_cart(fulfillment_unverified=False)
+        assert fulfillment_block_result(cart) is None
+
+
+class TestSubmitOrderFulfillmentGate:
+    """Tests for OrderService.submit_order blocking unverified fulfillment."""
+
+    def _make_service(
+        self,
+        api_response: dict[str, Any] | None = None,
+    ) -> OrderService:
+        """Create an OrderService with mock dependencies.
+
+        Args:
+            api_response: Response the mocked client should return if the
+                order submission is allowed to proceed.
+
+        Returns:
+            OrderService with mocked client and pantry. Constructed with
+            ``submission_enabled=True`` because the fulfillment gate
+            under test sits behind the Issue #60 descope gate, which
+            blocks everything by default.
+        """
+        mock_client = MagicMock()
+        mock_client.post.return_value = api_response or {}
+        mock_pantry = MagicMock()
+        mock_pantry.mark_restocked.return_value = 0
+        return OrderService(mock_client, mock_pantry, submission_enabled=True)
+
+    def test_blocks_unverified_fulfillment_cart_before_any_post(self) -> None:
+        """Test an unverified-fulfillment cart blocks submission with no HTTP call."""
+        service = self._make_service()
+        cart = _make_cart(fulfillment_unverified=True)
+
+        result = service.submit_order(cart)
+
+        assert result.success is False
+        assert "fulfillment" in result.error_message.lower()
+        service._client.post.assert_not_called()
+
+    def test_allow_unverified_fulfillment_true_lets_it_proceed(self) -> None:
+        """Test allow_unverified_fulfillment=True is an explicit human override.
+
+        With the override set, submission must proceed exactly like the
+        unflagged happy path: the client is called and success is True.
+        """
+        service = self._make_service(
+            api_response={
+                "orderId": "ORD-123",
+                "status": "confirmed",
+                "total": 8.99,
+            }
+        )
+        cart = _make_cart(fulfillment_unverified=True)
+
+        result = service.submit_order(cart, allow_unverified_fulfillment=True)
+
+        assert result.success is True
+        service._client.post.assert_called_once()
+
+    def test_verified_cart_unaffected_by_default_kwarg(self) -> None:
+        """Test a normal (verified) cart submits normally with the new kwarg default.
+
+        Pins that the new ``allow_unverified_fulfillment`` keyword
+        argument defaults to False without changing behavior for a cart
+        whose fulfillment was actually confirmed.
+        """
+        service = self._make_service(
+            api_response={
+                "orderId": "ORD-456",
+                "status": "confirmed",
+                "total": 8.99,
+            }
+        )
+        result = service.submit_order(_make_cart())
+
+        assert result.success is True
+        service._client.post.assert_called_once()
+
+    def test_review_flagged_and_unverified_cart_needs_both_overrides(self) -> None:
+        """Test a cart that is both review-flagged and unverified needs both flags.
+
+        Overriding only one gate must not be enough to reach the client:
+        the human must explicitly clear both the review gate (issue #59)
+        and the fulfillment gate (issue #72) before real money moves.
+        """
+        flagged = _make_cart_item(
+            ingredient="flour",
+            needs_review=True,
+            review_reason="incomparable_units",
+        )
+        cart = _make_cart(items=[flagged], fulfillment_unverified=True)
+        service = self._make_service(
+            api_response={
+                "orderId": "ORD-789",
+                "status": "confirmed",
+                "total": 8.99,
+            }
+        )
+
+        only_review_override = service.submit_order(cart, allow_review_items=True)
+        assert only_review_override.success is False
+        service._client.post.assert_not_called()
+
+        only_fulfillment_override = service.submit_order(
+            cart, allow_unverified_fulfillment=True
+        )
+        assert only_fulfillment_override.success is False
+        service._client.post.assert_not_called()
+
+        both_overrides = service.submit_order(
+            cart, allow_review_items=True, allow_unverified_fulfillment=True
+        )
+        assert both_overrides.success is True
         service._client.post.assert_called_once()
 
 

@@ -104,6 +104,13 @@ class CartBuilder:
     ) -> CartSummary:
         """Build a complete cart from shopping list items.
 
+        Selected substitutions (out-of-stock items with an
+        auto-selected alternative) are converted into priced,
+        ``needs_review=True`` cart items so they are included in the
+        submitted order rather than silently dropped (issue #70). They
+        also remain listed in ``substituted_items`` as a display and
+        provenance record.
+
         Args:
             items: Shopping list items to add to cart.
             restock_items: Optional restock queue items.
@@ -137,7 +144,14 @@ class CartBuilder:
             elif isinstance(result, SubstitutionResult):
                 substituted.append(result)
 
-        fulfillment_options = self._get_fulfillment_options()
+        for sub in substituted:
+            substitute_item = _substitution_to_cart_item(
+                sub, self._max_quantity_per_item
+            )
+            if substitute_item is not None:
+                cart_items.append(substitute_item)
+
+        fulfillment_options, unverified = self._get_fulfillment_options()
         recommended = _recommend_fulfillment(fulfillment_options)
         subtotal = _calculate_subtotal(cart_items, restock_cart)
         fee = _get_fulfillment_fee(fulfillment_options, recommended)
@@ -152,6 +166,7 @@ class CartBuilder:
             fulfillment_options=fulfillment_options,
             recommended_fulfillment=recommended,
             estimated_total=estimated_total,
+            fulfillment_unverified=unverified,
         )
 
     # ------------------------------------------------------------------
@@ -171,14 +186,7 @@ class CartBuilder:
             CartItem if successful, SubstitutionResult if substituted,
             or None if no product found.
         """
-        candidates = self._search.search_or_cached(item.search_term)
-        if not candidates:
-            logger.warning("No products found for '%s'", item.search_term)
-            return None
-
-        selection = self._selector.select_product(item, candidates)
-        product = selection.product
-
+        product = self._resolve_product(item)
         if product is None:
             return None
 
@@ -195,6 +203,60 @@ class CartBuilder:
             needs_review=decision.needs_review,
             review_reason=decision.review_reason,
         )
+
+    def _resolve_product(
+        self,
+        item: ShoppingListItem,
+    ) -> SafewayProduct | None:
+        """Resolve a shopping list item to a product via cache or search.
+
+        On a cache hit, the cached product is re-verified against a
+        fresh live search (see
+        :meth:`ProductSearchService.reverify_product`) so quantity and
+        stock decisions never rely on stale cached data. On a cache
+        miss, a full search-and-select flow runs instead.
+
+        Args:
+            item: The shopping list item to resolve.
+
+        Returns:
+            The resolved SafewayProduct, or None if unresolvable.
+        """
+        cached = self._search.get_cached_product(item.search_term)
+        if cached is not None:
+            return self._search.reverify_product(cached)
+        return self._search_and_select(item)
+
+    def _search_and_select(
+        self,
+        item: ShoppingListItem,
+    ) -> SafewayProduct | None:
+        """Search for and select a product on a cache miss.
+
+        Performs a live search, hands the candidates to the product
+        selector, and -- when a selection is made -- caches the
+        selected product (not merely the top raw search hit) so future
+        lookups hit the cache with the right product.
+
+        Args:
+            item: The shopping list item to search for.
+
+        Returns:
+            The selected SafewayProduct, or None if no products were
+            found or none was selected.
+        """
+        candidates = self._search.search_products(item.search_term)
+        if not candidates:
+            logger.warning("No products found for '%s'", item.search_term)
+            return None
+
+        selection = self._selector.select_product(item, candidates)
+        product = selection.product
+        if product is None:
+            return None
+
+        self._search.save_mapping(item.search_term, product)
+        return product
 
     def _handle_out_of_stock(
         self,
@@ -215,21 +277,29 @@ class CartBuilder:
             result.selected = result.alternatives[0]
         return result
 
-    def _get_fulfillment_options(self) -> list[FulfillmentOption]:
+    def _get_fulfillment_options(self) -> tuple[list[FulfillmentOption], bool]:
         """Query available fulfillment options from Safeway.
 
+        Issue #72 (HIGH): a fetch failure must never be papered over with
+        fabricated pickup/delivery options presented as real availability
+        and fees. On failure this returns an empty options list and flags
+        the result as unverified so callers can warn the human and
+        require an explicit override before submitting.
+
         Returns:
-            List of available fulfillment options.
+            A tuple of (fulfillment options, unverified). ``unverified``
+            is True when the fetch failed, in which case the options
+            list is empty; False (with the parsed options) on success.
         """
         try:
             store_id = self._client.store_id
             response = self._client.get(
                 f"/abs/pub/web/stores/{store_id}/fulfillment",
             )
-            return _parse_fulfillment_response(response)
+            return _parse_fulfillment_response(response), False
         except Exception:
             logger.exception("Failed to fetch fulfillment options")
-            return _default_fulfillment_options()
+            return [], True
 
 
 # ------------------------------------------------------------------
@@ -379,23 +449,40 @@ def _parse_fulfillment_response(
     return options
 
 
-def _default_fulfillment_options() -> list[FulfillmentOption]:
-    """Return default fulfillment options when API is unavailable.
+def _substitution_to_cart_item(
+    result: SubstitutionResult,
+    cap: int,
+) -> CartItem | None:
+    """Convert a selected substitution into a priced, review-flagged item.
+
+    A substitution is a machine decision (the best available alternative,
+    auto-selected by :meth:`CartBuilder._handle_out_of_stock`) and must be
+    confirmed by a human before the order is submitted. Per the
+    chief-architect's ruling on issue #70, the resulting ``CartItem`` is
+    always flagged ``needs_review=True`` with ``review_reason="substitution"``,
+    regardless of whether the quantity calculation itself needed review.
+
+    Args:
+        result: A ``SubstitutionResult`` produced while processing an
+            out-of-stock shopping list item.
+        cap: Maximum quantity to order without flagging for review, passed
+            through to the underlying quantity calculation.
 
     Returns:
-        Pickup and delivery with default values.
+        A ``CartItem`` for the selected substitute product, or ``None``
+        when ``result.selected`` is unset (no alternative was chosen).
     """
-    return [
-        FulfillmentOption(
-            type=FulfillmentType.PICKUP,
-            available=True,
-            fee=0.0,
-            windows=[],
-        ),
-        FulfillmentOption(
-            type=FulfillmentType.DELIVERY,
-            available=True,
-            fee=9.95,
-            windows=[],
-        ),
-    ]
+    if result.selected is None:
+        return None
+
+    product = result.selected.product
+    decision = _calculate_quantity(result.original_item, product, cap=cap)
+    cost = round(product.price * decision.quantity, 2)
+    return CartItem(
+        shopping_list_item=result.original_item,
+        safeway_product=product,
+        quantity_to_order=decision.quantity,
+        estimated_cost=cost,
+        needs_review=True,
+        review_reason="substitution",
+    )

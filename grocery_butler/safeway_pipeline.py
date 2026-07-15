@@ -17,6 +17,7 @@ from grocery_butler.order_service import (
     OrderOutcome,
     OrderResult,
     OrderService,
+    fulfillment_block_result,
     review_block_result,
 )
 from grocery_butler.order_submissions import (
@@ -203,6 +204,7 @@ class SafewayPipeline:
         idempotency_key: str | None = None,
         *,
         allow_review_items: bool = False,
+        allow_unverified_fulfillment: bool = False,
         allow_over_cap: bool = False,
     ) -> OrderResult:
         """Submit a pre-built cart to Safeway.
@@ -217,6 +219,10 @@ class SafewayPipeline:
             allow_review_items: If True, bypass the review gate for
                 items flagged as ``needs_review`` (explicit human
                 override). Defaults to False (safe/blocking).
+            allow_unverified_fulfillment: If True, bypass the
+                fulfillment gate for a cart whose fulfillment options
+                could not be confirmed with Safeway (explicit human
+                override, Issue #72). Defaults to False (safe/blocking).
             allow_over_cap: If True, bypass the Issue #73 order-value
                 cap gate for a total exceeding ``order_value_cap``
                 (explicit human override). Defaults to False
@@ -237,6 +243,7 @@ class SafewayPipeline:
             cart,
             idempotency_key,
             allow_review_items=allow_review_items,
+            allow_unverified_fulfillment=allow_unverified_fulfillment,
             allow_over_cap=allow_over_cap,
         )
 
@@ -263,6 +270,7 @@ class SafewayPipeline:
         idempotency_key: str | None,
         *,
         allow_review_items: bool = False,
+        allow_unverified_fulfillment: bool = False,
         allow_over_cap: bool = False,
     ) -> OrderResult:
         """Submit a cart through the duplicate-order guard (Issue #61).
@@ -271,12 +279,14 @@ class SafewayPipeline:
         :class:`~grocery_butler.order_service.OrderService` (which
         rejects it with its existing "cart is empty" error). A cart with
         items flagged ``needs_review`` is blocked next (Issue #59) —
-        unless ``allow_review_items`` overrides — *before* any ledger
-        write, so a review-blocked attempt (which never reaches Safeway)
-        can never leave behind a ledger row that would spuriously mark
-        the post-review resubmission a duplicate. Otherwise, the attempt
-        is atomically recorded in the ledger — or rejected as a
-        duplicate — via a single call to
+        unless ``allow_review_items`` overrides — followed by a cart
+        flagged ``fulfillment_unverified`` (Issue #72) — unless
+        ``allow_unverified_fulfillment`` overrides — both *before* any
+        ledger write, so a gate-blocked attempt (which never reaches
+        Safeway) can never leave behind a ledger row that would
+        spuriously mark a post-override resubmission a duplicate.
+        Otherwise, the attempt is atomically recorded in the ledger — or
+        rejected as a duplicate — via a single call to
         ``OrderSubmissionStore.try_record_attempt`` (fail-closed, and
         race-safe: a security review found the prior
         ``find_recent_blocking`` + ``record_attempt`` pair vulnerable
@@ -289,6 +299,10 @@ class SafewayPipeline:
             allow_review_items: If True, bypass the review gate for
                 flagged items (explicit human override). Defaults to
                 False (safe/blocking).
+            allow_unverified_fulfillment: If True, bypass the
+                fulfillment gate for a cart whose fulfillment options
+                could not be confirmed with Safeway (explicit human
+                override, Issue #72). Defaults to False (safe/blocking).
             allow_over_cap: If True, bypass the Issue #73 order-value
                 cap gate (explicit human override). Defaults to False
                 (safe/blocking).
@@ -303,6 +317,11 @@ class SafewayPipeline:
 
         if not allow_review_items:
             blocked = review_block_result(cart)
+            if blocked is not None:
+                return blocked
+
+        if not allow_unverified_fulfillment:
+            blocked = fulfillment_block_result(cart)
             if blocked is not None:
                 return blocked
 
@@ -332,6 +351,7 @@ class SafewayPipeline:
             cart,
             idempotency_key=key,
             allow_review_items=allow_review_items,
+            allow_unverified_fulfillment=allow_unverified_fulfillment,
             allow_over_cap=allow_over_cap,
         )
 

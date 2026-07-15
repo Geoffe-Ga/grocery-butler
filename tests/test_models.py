@@ -857,3 +857,50 @@ class TestCartSummary:
         )
         assert summary.subtotal == 0.0
         assert len(summary.items) == 0
+
+    def test_fulfillment_unverified_defaults_to_false(self) -> None:
+        """Test fulfillment_unverified defaults to False when omitted (issue #72).
+
+        Regression guard for issue #72: a cart with fulfillment options
+        that were actually fetched and parsed must not be flagged as
+        unverified by default.
+        """
+        summary = CartSummary(
+            items=[],
+            failed_items=[],
+            substituted_items=[],
+            skipped_items=[],
+            restock_items=[],
+            subtotal=0.0,
+            fulfillment_options=[],
+            recommended_fulfillment=FulfillmentType.PICKUP,
+            estimated_total=0.0,
+        )
+        assert summary.fulfillment_unverified is False
+
+    def test_fulfillment_unverified_round_trips_through_dump_and_validate(
+        self,
+    ) -> None:
+        """Test fulfillment_unverified survives a model_dump/model_validate round trip.
+
+        Issue #72: the API layer stages a cart via ``model_dump(mode="json")``
+        and later reconstructs it via ``model_validate`` when the human
+        confirms, so the flag must not be lost across that round trip.
+        """
+        summary = CartSummary(
+            items=[],
+            failed_items=[],
+            substituted_items=[],
+            skipped_items=[],
+            restock_items=[],
+            subtotal=0.0,
+            fulfillment_options=[],
+            recommended_fulfillment=FulfillmentType.PICKUP,
+            estimated_total=0.0,
+            fulfillment_unverified=True,
+        )
+        dumped = summary.model_dump(mode="json")
+        restored = CartSummary.model_validate(dumped)
+
+        assert dumped["fulfillment_unverified"] is True
+        assert restored.fulfillment_unverified is True
