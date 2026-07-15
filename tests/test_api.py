@@ -1,4 +1,11 @@
-"""Tests for the /api/v1 read endpoints (grocery_butler.api blueprint)."""
+"""Tests for the /api/v1 read endpoints (grocery_butler.api blueprint).
+
+Issue #74: every bearer token minted in this module is now bound to the
+exact (method, path, body) of the request it authorizes, via the shared
+``tests.conftest.bearer_header`` helper. A single static header cannot
+cover the many different GET requests exercised here, so ``auth_headers``
+is a per-request minting factory rather than a static header dict.
+"""
 
 from __future__ import annotations
 
@@ -9,13 +16,16 @@ from unittest.mock import patch
 import pytest
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from flask import Flask
     from flask.testing import FlaskClient
 
+    AuthHeaderFactory = Callable[[str, str, bytes], dict[str, str]]
+
 from grocery_butler.app import create_app
-from grocery_butler.auth_middleware import SECRET_ENV_VAR, mint_token
+from grocery_butler.auth_middleware import SECRET_ENV_VAR
 from grocery_butler.models import (
     BrandMatchType,
     BrandPreference,
@@ -28,6 +38,7 @@ from grocery_butler.models import (
 )
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
+from tests.conftest import bearer_header
 
 TEST_SECRET = "test-shared-secret"
 SECRET_ENV = {SECRET_ENV_VAR: TEST_SECRET}
@@ -80,11 +91,26 @@ def recipe_store(db_path: str) -> RecipeStore:
 
 
 @pytest.fixture()
-def auth_headers() -> dict[str, str]:
-    """Return a valid Authorization header minted with the test secret."""
-    with patch.dict(os.environ, SECRET_ENV):
-        token = mint_token("rubotpaul")
-    return {"Authorization": f"Bearer {token}"}
+def auth_headers() -> AuthHeaderFactory:
+    """Return a factory that mints a bearer header for one exact request.
+
+    A single static header cannot authorize every GET request exercised
+    in this module -- each read endpoint has its own path, and the
+    request-bound token contract (issue #74) signs method, path, and
+    body together. Callers invoke the returned factory once per
+    request, e.g. ``auth_headers("GET", "/api/v1/inventory")``.
+
+    Returns:
+        A callable ``(method, path, body=b"") -> {"Authorization": ...}``
+        that mints tokens under the test shared secret.
+    """
+
+    def _make(method: str, path: str, body: bytes = b"") -> dict[str, str]:
+        """Mint a bearer header bound to the given method/path/body."""
+        with patch.dict(os.environ, SECRET_ENV):
+            return bearer_header("rubotpaul", method, path, body)
+
+    return _make
 
 
 @pytest.fixture()
@@ -159,23 +185,27 @@ class TestInventoryEndpoint:
     """GET /api/v1/inventory."""
 
     def test_empty_inventory(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """An empty database yields an empty items list."""
-        response = client.get("/api/v1/inventory", headers=auth_headers)
+        response = client.get(
+            "/api/v1/inventory", headers=auth_headers("GET", "/api/v1/inventory")
+        )
         assert response.status_code == 200
         assert response.get_json() == {"items": []}
 
     def test_returns_seeded_items(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pantry_mgr: PantryManager,
         sample_item: InventoryItem,
     ) -> None:
         """Seeded inventory items come back with full field shape."""
         pantry_mgr.add_item(sample_item)
-        response = client.get("/api/v1/inventory", headers=auth_headers)
+        response = client.get(
+            "/api/v1/inventory", headers=auth_headers("GET", "/api/v1/inventory")
+        )
         assert response.status_code == 200
         items = response.get_json()["items"]
         assert len(items) == 1
@@ -192,12 +222,14 @@ class TestPantryEndpoint:
     def test_returns_staples(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         recipe_store: RecipeStore,
     ) -> None:
         """Seeded pantry staples come back with id/ingredient/category."""
         recipe_store.add_pantry_staple("dragonfruit powder", "pantry_dry")
-        response = client.get("/api/v1/pantry", headers=auth_headers)
+        response = client.get(
+            "/api/v1/pantry", headers=auth_headers("GET", "/api/v1/pantry")
+        )
         assert response.status_code == 200
         staples = response.get_json()["staples"]
         added = [s for s in staples if s["ingredient"] == "dragonfruit powder"]
@@ -214,13 +246,15 @@ class TestRecipeEndpoints:
     def test_list_recipes(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         recipe_store: RecipeStore,
         sample_meal: ParsedMeal,
     ) -> None:
         """Recipe list returns summary rows with ids."""
         recipe_id = recipe_store.save_recipe(sample_meal)
-        response = client.get("/api/v1/recipes", headers=auth_headers)
+        response = client.get(
+            "/api/v1/recipes", headers=auth_headers("GET", "/api/v1/recipes")
+        )
         assert response.status_code == 200
         recipes = response.get_json()["recipes"]
         assert len(recipes) == 1
@@ -230,13 +264,14 @@ class TestRecipeEndpoints:
     def test_get_recipe_full(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         recipe_store: RecipeStore,
         sample_meal: ParsedMeal,
     ) -> None:
         """Recipe detail returns the full parsed meal with ingredients."""
         recipe_id = recipe_store.save_recipe(sample_meal)
-        response = client.get(f"/api/v1/recipes/{recipe_id}", headers=auth_headers)
+        recipe_path = f"/api/v1/recipes/{recipe_id}"
+        response = client.get(recipe_path, headers=auth_headers("GET", recipe_path))
         assert response.status_code == 200
         body = response.get_json()
         assert body["id"] == recipe_id
@@ -246,10 +281,12 @@ class TestRecipeEndpoints:
         assert body["pantry_items"][0]["ingredient"] == "salt"
 
     def test_get_recipe_unknown_id_returns_404(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """An unknown recipe id yields a JSON 404."""
-        response = client.get("/api/v1/recipes/999", headers=auth_headers)
+        response = client.get(
+            "/api/v1/recipes/999", headers=auth_headers("GET", "/api/v1/recipes/999")
+        )
         assert response.status_code == 404
         assert response.get_json() == {"error": "recipe not found"}
 
@@ -261,7 +298,7 @@ class TestBrandsEndpoint:
     def test_returns_preferences(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         recipe_store: RecipeStore,
     ) -> None:
         """Seeded brand preferences come back with full field shape."""
@@ -274,7 +311,9 @@ class TestBrandsEndpoint:
                 notes="organic",
             )
         )
-        response = client.get("/api/v1/brands", headers=auth_headers)
+        response = client.get(
+            "/api/v1/brands", headers=auth_headers("GET", "/api/v1/brands")
+        )
         assert response.status_code == 200
         brands = response.get_json()["brands"]
         assert len(brands) == 1
@@ -293,13 +332,15 @@ class TestPreferencesEndpoint:
     def test_returns_all_preferences(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         recipe_store: RecipeStore,
     ) -> None:
         """Stored preference keys come back as a flat JSON object."""
         recipe_store.set_preference("default_servings", "4")
         recipe_store.set_preference("default_units", "imperial")
-        response = client.get("/api/v1/preferences", headers=auth_headers)
+        response = client.get(
+            "/api/v1/preferences", headers=auth_headers("GET", "/api/v1/preferences")
+        )
         assert response.status_code == 200
         body = response.get_json()
         assert body["default_servings"] == "4"
@@ -313,14 +354,16 @@ class TestRestockEndpoint:
     def test_returns_low_and_out_items(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pantry_mgr: PantryManager,
         sample_item: InventoryItem,
     ) -> None:
         """Items marked out show up in the restock queue."""
         pantry_mgr.add_item(sample_item)
         pantry_mgr.update_status("milk", InventoryStatus.OUT)
-        response = client.get("/api/v1/restock", headers=auth_headers)
+        response = client.get(
+            "/api/v1/restock", headers=auth_headers("GET", "/api/v1/restock")
+        )
         assert response.status_code == 200
         items = response.get_json()["items"]
         assert len(items) == 1
@@ -330,13 +373,15 @@ class TestRestockEndpoint:
     def test_on_hand_items_excluded(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pantry_mgr: PantryManager,
         sample_item: InventoryItem,
     ) -> None:
         """Items still on hand do not show up in the restock queue."""
         pantry_mgr.add_item(sample_item)
-        response = client.get("/api/v1/restock", headers=auth_headers)
+        response = client.get(
+            "/api/v1/restock", headers=auth_headers("GET", "/api/v1/restock")
+        )
         assert response.status_code == 200
         assert response.get_json() == {"items": []}
 

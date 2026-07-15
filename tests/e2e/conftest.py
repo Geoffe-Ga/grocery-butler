@@ -17,6 +17,7 @@ secrets) and locally.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -27,7 +28,7 @@ import httpx
 import pytest
 
 from grocery_butler.app import create_app
-from grocery_butler.auth_middleware import SECRET_ENV_VAR, mint_token
+from grocery_butler.auth_middleware import SECRET_ENV_VAR, RequestBinding, mint_token
 from grocery_butler.models import Ingredient, IngredientCategory, ParsedMeal
 from grocery_butler.recipe_store import RecipeStore
 from grocery_butler.safeway_client import OKTA_CLIENT_ID
@@ -198,10 +199,16 @@ def signed_headers() -> Callable[..., dict[str, str]]:
 
     Supports building expired, future-dated, and foreign-secret tokens
     for exercising the auth module's rejection paths, in addition to
-    plain valid tokens.
+    plain valid tokens. Issue #74: tokens are now bound to the exact
+    request they authorize (method + path + body hash) via
+    ``RequestBinding``, so the factory accepts ``method``/``path``/
+    ``body`` overrides -- defaulting to a bodyless ``GET
+    /api/v1/inventory``, the request this fixture is most commonly used
+    against across the e2e suite.
 
     Returns:
-        A callable ``(caller_id="rubotpaul", *, now_offset=0.0,
+        A callable ``(caller_id="rubotpaul", *, method="GET",
+        path="/api/v1/inventory", body=b"", now_offset=0.0,
         secret=None) -> {"Authorization": "Bearer <token>"}``. Positive
         ``now_offset`` mints a future-dated token; a very negative one
         mints an expired token. ``secret`` signs with a different
@@ -211,22 +218,71 @@ def signed_headers() -> Callable[..., dict[str, str]]:
     def _make(
         caller_id: str = "rubotpaul",
         *,
+        method: str = "GET",
+        path: str = "/api/v1/inventory",
+        body: bytes = b"",
         now_offset: float = 0.0,
         secret: str | None = None,
     ) -> dict[str, str]:
+        binding = RequestBinding.of(method, path, body)
         now = time.time() + now_offset
         if secret is None:
-            token = mint_token(caller_id, now=now)
+            token = mint_token(caller_id, binding, now=now)
         else:
             real_secret = os.environ[SECRET_ENV_VAR]
             os.environ[SECRET_ENV_VAR] = secret
             try:
-                token = mint_token(caller_id, now=now)
+                token = mint_token(caller_id, binding, now=now)
             finally:
                 os.environ[SECRET_ENV_VAR] = real_secret
         return {"Authorization": f"Bearer {token}"}
 
     return _make
+
+
+@pytest.fixture()
+def signed_request(
+    client: FlaskClient, signed_headers: Callable[..., dict[str, str]]
+) -> Callable[..., Any]:
+    """Return a helper that mints a bound token and sends one request atomically.
+
+    Issue #74 bound every bearer token to the exact ``(method, path,
+    body)`` triple it authorizes, so a header dict minted once can no
+    longer be reused across requests to different endpoints or with
+    different bodies. This fixture closes that gap for callers that
+    need to hit several endpoints in one test: it serializes
+    ``json_body`` to bytes exactly once and mints the token off those
+    same bytes, then sends those same bytes -- never re-serializing
+    (which could byte-differ, e.g. on key order) between minting and
+    sending.
+
+    Args:
+        client: The Flask test client.
+        signed_headers: The token-minting header factory fixture.
+
+    Returns:
+        A callable ``(method, path, json_body=None, **header_kwargs) ->
+        werkzeug.test.TestResponse``. ``json_body`` is any
+        JSON-serializable value; omit it (or pass ``None``) to send a
+        bodyless request. Extra ``header_kwargs`` (``caller_id``,
+        ``now_offset``, ``secret``) are forwarded to ``signed_headers``.
+    """
+
+    def _send(
+        method: str,
+        path: str,
+        json_body: Any = None,
+        **header_kwargs: Any,
+    ) -> Any:
+        """Mint a token bound to this exact request, then send it."""
+        body = b"" if json_body is None else json.dumps(json_body).encode()
+        headers = signed_headers(method=method, path=path, body=body, **header_kwargs)
+        call = getattr(client, method.lower())
+        if json_body is None:
+            return call(path, headers=headers)
+        return call(path, data=body, content_type="application/json", headers=headers)
+
+    return _send
 
 
 # ---------------------------------------------------------------------------

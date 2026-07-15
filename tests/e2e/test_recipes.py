@@ -9,14 +9,12 @@ attempted.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from flask.testing import FlaskClient
 
 pytestmark = pytest.mark.e2e
 
@@ -53,44 +51,36 @@ def _save_body(name: str = "e2e taco night") -> dict[str, object]:
 
 
 def test_save_list_detail_then_duplicate_conflicts(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     no_claude: None,
 ) -> None:
     """Saving a recipe makes it listable and fetchable; duplicates 409."""
-    headers = signed_headers()
     body = _save_body()
 
-    created = client.post("/api/v1/recipes/save", json=body, headers=headers)
+    created = signed_request("POST", "/api/v1/recipes/save", body)
     assert created.status_code == 201
     recipe_id = created.get_json()["id"]
 
-    listed = client.get("/api/v1/recipes", headers=headers)
+    listed = signed_request("GET", "/api/v1/recipes")
     names = [r["display_name"] for r in listed.get_json()["recipes"]]
     assert "e2e taco night" in names
 
-    detail = client.get(f"/api/v1/recipes/{recipe_id}", headers=headers)
+    detail = signed_request("GET", f"/api/v1/recipes/{recipe_id}")
     assert detail.status_code == 200
     assert detail.get_json()["name"] == "e2e taco night"
 
-    duplicate = client.post("/api/v1/recipes/save", json=body, headers=headers)
+    duplicate = signed_request("POST", "/api/v1/recipes/save", body)
     assert duplicate.status_code == 409
 
 
 def test_meals_parse_reuses_saved_recipe_without_claude(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     no_claude: None,
 ) -> None:
     """Parsing a saved recipe's name returns its stored ingredients."""
-    headers = signed_headers()
-    client.post("/api/v1/recipes/save", json=_save_body(), headers=headers)
+    signed_request("POST", "/api/v1/recipes/save", _save_body())
 
-    response = client.post(
-        "/api/v1/meals/parse",
-        json={"text": "e2e taco night"},
-        headers=headers,
-    )
+    response = signed_request("POST", "/api/v1/meals/parse", {"text": "e2e taco night"})
     assert response.status_code == 200
     meals = response.get_json()["meals"]
     assert len(meals) == 1
@@ -101,21 +91,15 @@ def test_meals_parse_reuses_saved_recipe_without_claude(
 
 
 def test_delete_recipe_then_detail_404(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     no_claude: None,
 ) -> None:
     """Deleting a recipe removes it; its detail page then 404s."""
-    headers = signed_headers()
-    created = client.post(
-        "/api/v1/recipes/save",
-        json=_save_body("e2e one-off"),
-        headers=headers,
-    )
+    created = signed_request("POST", "/api/v1/recipes/save", _save_body("e2e one-off"))
     recipe_id = created.get_json()["id"]
 
-    deleted = client.delete(f"/api/v1/recipes/{recipe_id}", headers=headers)
+    deleted = signed_request("DELETE", f"/api/v1/recipes/{recipe_id}")
     assert deleted.status_code == 204
 
-    detail = client.get(f"/api/v1/recipes/{recipe_id}", headers=headers)
+    detail = signed_request("GET", f"/api/v1/recipes/{recipe_id}")
     assert detail.status_code == 404

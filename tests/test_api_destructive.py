@@ -5,11 +5,19 @@ Covers the highest-stakes flow in the stack: ``/order/submit``,
 and execute only through ``/actions/confirm`` (chat-based draft →
 confirm → execute per PIVOT.md). No test may ever reach a real Safeway
 client — the pipeline factory is mocked everywhere it could execute.
+
+Issue #74: every bearer token minted in this module is now bound to the
+exact (method, path, body) of the request it authorizes, via the
+shared ``tests.conftest.bearer_header`` helper. A single static header
+cannot cover the many different requests exercised here, so the
+``auth_headers`` fixture is a per-request minting factory rather than a
+static header dict.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -18,13 +26,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from flask import Flask
     from flask.testing import FlaskClient
 
+    AuthHeaderFactory = Callable[[str, str, bytes], dict[str, str]]
+
+from grocery_butler.api import api_v1
 from grocery_butler.app import create_app
-from grocery_butler.auth_middleware import SECRET_ENV_VAR, mint_token
+from grocery_butler.auth_middleware import SECRET_ENV_VAR
 from grocery_butler.config import ConfigError
 from grocery_butler.models import (
     BrandMatchType,
@@ -42,6 +54,7 @@ from grocery_butler.models import (
 from grocery_butler.order_service import OrderConfirmation, OrderResult
 from grocery_butler.pending_actions import PendingActionsStore
 from grocery_butler.recipe_store import RecipeStore
+from tests.conftest import bearer_header
 
 TEST_SECRET = "test-shared-secret"
 SECRET_ENV = {SECRET_ENV_VAR: TEST_SECRET}
@@ -53,6 +66,27 @@ DESTRUCTIVE_ENDPOINTS = [
     "/api/v1/actions/confirm",
     "/api/v1/actions/deny",
 ]
+
+#: Issue #74 AC#2: a view that never calls require_bearer() itself, used
+#: to prove the api_v1 blueprint's before_request hook enforces auth
+#: even when a route forgets the per-route check. Registered once, at
+#: import time -- Flask blueprints only accept new routes before
+#: they've been applied to an app via register_blueprint, and api_v1 is
+#: a process-wide singleton reused by every create_app() call in this
+#: suite, so this must be added before any test in the suite calls
+#: create_app().
+UNAUTHENTICATED_THROWAWAY_PATH = "/api/v1/_test_unauthenticated_view_issue_74"
+
+
+@api_v1.get("/_test_unauthenticated_view_issue_74")
+def _unauthenticated_throwaway_view() -> dict[str, bool]:
+    """Return a fixed payload without ever calling require_bearer().
+
+    Exists solely so ``TestAuthByDefault`` can prove that unauthenticated
+    requests are still rejected -- by the blueprint's before_request
+    hook, not by this view.
+    """
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -93,11 +127,57 @@ def recipe_store(db_path: str) -> RecipeStore:
 
 
 @pytest.fixture()
-def auth_headers() -> dict[str, str]:
-    """Return a valid Authorization header minted with the test secret."""
-    with patch.dict(os.environ, SECRET_ENV):
-        token = mint_token("rubotpaul")
-    return {"Authorization": f"Bearer {token}"}
+def auth_headers() -> AuthHeaderFactory:
+    """Return a factory that mints a bearer header for one exact request.
+
+    A single static header cannot authorize every request exercised in
+    this module -- each destructive-endpoint call has its own method,
+    path, and body, and the request-bound token contract (issue #74)
+    signs all three together. Callers invoke the returned factory once
+    per request, e.g.
+    ``auth_headers("POST", "/api/v1/order/submit", serialized_body)``.
+
+    Returns:
+        A callable ``(method, path, body=b"") -> {"Authorization": ...}``
+        that mints tokens under the test shared secret.
+    """
+
+    def _make(method: str, path: str, body: bytes = b"") -> dict[str, str]:
+        """Mint a bearer header bound to the given method/path/body."""
+        with patch.dict(os.environ, SECRET_ENV):
+            return bearer_header("rubotpaul", method, path, body)
+
+    return _make
+
+
+def _post(
+    client: FlaskClient,
+    auth_headers: AuthHeaderFactory,
+    path: str,
+    body: Any,
+) -> Any:
+    """POST a JSON-serializable body with a token bound to the exact bytes sent.
+
+    Serializes ``body`` exactly once so the identical bytes are both
+    sent as the request payload and hashed into the bearer token's
+    binding -- the two must match byte-for-byte for the server's HMAC
+    verification to succeed (issue #74).
+
+    Args:
+        client: Flask test client.
+        auth_headers: Factory fixture minting a bearer header for one
+            exact (method, path, body) triple.
+        path: Request path to POST to.
+        body: JSON-serializable request payload.
+
+    Returns:
+        The Flask test client's response.
+    """
+    serialized = json.dumps(body).encode()
+    headers = auth_headers("POST", path, serialized)
+    return client.post(
+        path, data=serialized, content_type="application/json", headers=headers
+    )
 
 
 def _make_shopping_item(ingredient: str = "pasta") -> ShoppingListItem:
@@ -234,12 +314,12 @@ def _successful_order_result() -> OrderResult:
 
 def _stage_via_api(
     client: FlaskClient,
-    auth_headers: dict[str, str],
+    auth_headers: AuthHeaderFactory,
     path: str,
     body: dict[str, Any],
 ) -> str:
     """Stage an action through the API and return its action_id."""
-    response = client.post(path, json=body, headers=auth_headers)
+    response = _post(client, auth_headers, path, body)
     assert response.status_code == 200
     action_id = response.get_json()["action_id"]
     assert isinstance(action_id, str)
@@ -281,58 +361,60 @@ class TestOrderSubmitStaging:
     """/order/submit stages a pending action and must not touch Safeway."""
 
     def test_missing_cart_returns_400(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """A body without a cart is rejected."""
-        response = client.post(
-            "/api/v1/order/submit", json={"total": "9.99"}, headers=auth_headers
+        response = _post(
+            client, auth_headers, "/api/v1/order/submit", {"total": "9.99"}
         )
         assert response.status_code == 400
         assert "cart" in response.get_json()["error"]
 
     def test_invalid_cart_returns_400(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """A cart that fails CartSummary validation is rejected."""
-        response = client.post(
+        response = _post(
+            client,
+            auth_headers,
             "/api/v1/order/submit",
-            json={"cart": {"items": "nope"}},
-            headers=auth_headers,
+            {"cart": {"items": "nope"}},
         )
         assert response.status_code == 400
         assert "invalid cart" in response.get_json()["error"]
 
     def test_empty_cart_returns_400(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """A structurally valid but empty cart is rejected."""
         empty = _make_cart({})
-        response = client.post(
+        response = _post(
+            client,
+            auth_headers,
             "/api/v1/order/submit",
-            json={"cart": empty.model_dump(mode="json")},
-            headers=auth_headers,
+            {"cart": empty.model_dump(mode="json")},
         )
         assert response.status_code == 400
         assert "empty" in response.get_json()["error"]
 
     def test_non_object_body_returns_400(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """A non-object JSON body is rejected."""
-        response = client.post(
-            "/api/v1/order/submit", json=["not", "a", "dict"], headers=auth_headers
+        response = _post(
+            client, auth_headers, "/api/v1/order/submit", ["not", "a", "dict"]
         )
         assert response.status_code == 400
 
     def test_stages_pending_action_and_returns_confirmation_prompt(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pending_store: PendingActionsStore,
     ) -> None:
         """Submitting a cart stages a pending_actions row with the exact cart."""
         body = _order_body()
-        response = client.post("/api/v1/order/submit", json=body, headers=auth_headers)
+        response = _post(client, auth_headers, "/api/v1/order/submit", body)
         assert response.status_code == 200
         data = response.get_json()
         assert data["status"] == "pending_confirmation"
@@ -350,15 +432,16 @@ class TestOrderSubmitStaging:
     def test_total_defaults_to_cart_total_when_omitted(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pending_store: PendingActionsStore,
     ) -> None:
         """Without an explicit total, the staged total is computed from the cart."""
         cart = _make_cart({"pasta": 3.50, "sauce": 4.25})
-        response = client.post(
+        response = _post(
+            client,
+            auth_headers,
             "/api/v1/order/submit",
-            json={"cart": cart.model_dump(mode="json")},
-            headers=auth_headers,
+            {"cart": cart.model_dump(mode="json")},
         )
         assert response.status_code == 200
         action = pending_store.get_pending_action(response.get_json()["action_id"])
@@ -366,19 +449,19 @@ class TestOrderSubmitStaging:
         assert action.payload["total"] == "7.75"
 
     def test_staging_never_touches_the_safeway_pipeline(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """Staging an order must not construct or call the Safeway pipeline."""
         factory = MagicMock()
         with patch("grocery_butler.api._safeway_pipeline", factory):
-            response = client.post(
-                "/api/v1/order/submit", json=_order_body(), headers=auth_headers
+            response = _post(
+                client, auth_headers, "/api/v1/order/submit", _order_body()
             )
         assert response.status_code == 200
         factory.assert_not_called()
 
     def test_staged_message_lists_flagged_items_and_reasons(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """The staged message must surface flagged ingredients and reasons.
 
@@ -389,10 +472,11 @@ class TestOrderSubmitStaging:
         must name every flagged ingredient and its reason code.
         """
         cart = _make_cart_with_flagged_item()
-        response = client.post(
+        response = _post(
+            client,
+            auth_headers,
             "/api/v1/order/submit",
-            json={"cart": cart.model_dump(mode="json")},
-            headers=auth_headers,
+            {"cart": cart.model_dump(mode="json")},
         )
         assert response.status_code == 200
         message = response.get_json()["message"]
@@ -400,18 +484,16 @@ class TestOrderSubmitStaging:
         assert "incomparable_units" in message
 
     def test_staged_message_has_no_review_section_for_clean_cart(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """A cart with no flagged items keeps the plain staging message."""
-        response = client.post(
-            "/api/v1/order/submit", json=_order_body(), headers=auth_headers
-        )
+        response = _post(client, auth_headers, "/api/v1/order/submit", _order_body())
         assert response.status_code == 200
         message = response.get_json()["message"]
         assert "review" not in message.lower()
 
     def test_staged_message_includes_unverified_fulfillment_clause(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """The staged message must warn about unverified fulfillment (issue #72).
 
@@ -421,10 +503,11 @@ class TestOrderSubmitStaging:
         of the fulfillment gate (issue #59 precedent).
         """
         cart = _make_cart_with_unverified_fulfillment()
-        response = client.post(
+        response = _post(
+            client,
+            auth_headers,
             "/api/v1/order/submit",
-            json={"cart": cart.model_dump(mode="json")},
-            headers=auth_headers,
+            {"cart": cart.model_dump(mode="json")},
         )
         assert response.status_code == 200
         message = response.get_json()["message"].lower()
@@ -444,14 +527,12 @@ class TestBrandsSetStaging:
     def test_stages_pending_action(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pending_store: PendingActionsStore,
         recipe_store: RecipeStore,
     ) -> None:
         """A valid brand rule is staged, not written to brand preferences."""
-        response = client.post(
-            "/api/v1/brands/set", json=_brand_body(), headers=auth_headers
-        )
+        response = _post(client, auth_headers, "/api/v1/brands/set", _brand_body())
         assert response.status_code == 200
         data = response.get_json()
         assert data["status"] == "pending_confirmation"
@@ -464,11 +545,11 @@ class TestBrandsSetStaging:
         assert recipe_store.get_brand_preferences() == []
 
     def test_invalid_brand_payload_returns_400(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """A payload missing required brand fields is rejected."""
-        response = client.post(
-            "/api/v1/brands/set", json={"brand": "Clover"}, headers=auth_headers
+        response = _post(
+            client, auth_headers, "/api/v1/brands/set", {"brand": "Clover"}
         )
         assert response.status_code == 400
         assert "invalid brand" in response.get_json()["error"]
@@ -481,15 +562,13 @@ class TestPreferencesSetStaging:
     def test_stages_pending_action(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pending_store: PendingActionsStore,
         recipe_store: RecipeStore,
     ) -> None:
         """Valid preferences are staged, not written to the store."""
         body = {"preferences": {"fulfillment": "pickup", "store_id": "1234"}}
-        response = client.post(
-            "/api/v1/preferences/set", json=body, headers=auth_headers
-        )
+        response = _post(client, auth_headers, "/api/v1/preferences/set", body)
         assert response.status_code == 200
         data = response.get_json()
         assert data["status"] == "pending_confirmation"
@@ -515,13 +594,11 @@ class TestPreferencesSetStaging:
     def test_invalid_preferences_return_400(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         body: dict[str, Any],
     ) -> None:
         """Missing, empty, or non-string preference payloads are rejected."""
-        response = client.post(
-            "/api/v1/preferences/set", json=body, headers=auth_headers
-        )
+        response = _post(client, auth_headers, "/api/v1/preferences/set", body)
         assert response.status_code == 400
 
 
@@ -535,20 +612,21 @@ class TestActionsConfirm:
     """/actions/confirm resolves staged actions with strict semantics."""
 
     def test_missing_action_id_returns_400(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """A body without action_id is rejected."""
-        response = client.post("/api/v1/actions/confirm", json={}, headers=auth_headers)
+        response = _post(client, auth_headers, "/api/v1/actions/confirm", {})
         assert response.status_code == 400
 
     def test_unknown_action_id_returns_404(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """An unknown action_id gets a JSON 404."""
-        response = client.post(
+        response = _post(
+            client,
+            auth_headers,
             "/api/v1/actions/confirm",
-            json={"action_id": str(uuid.uuid4())},
-            headers=auth_headers,
+            {"action_id": str(uuid.uuid4())},
         )
         assert response.status_code == 404
         assert "error" in response.get_json()
@@ -556,7 +634,7 @@ class TestActionsConfirm:
     def test_expired_action_returns_410_and_marks_expired(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pending_store: PendingActionsStore,
     ) -> None:
         """Confirming past the TTL returns 410 and resolves the row as expired."""
@@ -567,10 +645,11 @@ class TestActionsConfirm:
             payload={"preferences": {"fulfillment": "pickup"}},
             expires_at=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1),
         )
-        response = client.post(
+        response = _post(
+            client,
+            auth_headers,
             "/api/v1/actions/confirm",
-            json={"action_id": action_id},
-            headers=auth_headers,
+            {"action_id": action_id},
         )
         assert response.status_code == 410
         action = pending_store.get_pending_action(action_id)
@@ -581,7 +660,7 @@ class TestActionsConfirm:
     def test_confirm_order_calls_submit_with_exact_staged_cart(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pending_store: PendingActionsStore,
     ) -> None:
         """Confirming an order submits the exact staged cart and approves the row."""
@@ -591,10 +670,11 @@ class TestActionsConfirm:
         pipeline = MagicMock()
         pipeline.submit_cart.return_value = _successful_order_result()
         with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = client.post(
+            response = _post(
+                client,
+                auth_headers,
                 "/api/v1/actions/confirm",
-                json={"action_id": action_id},
-                headers=auth_headers,
+                {"action_id": action_id},
             )
 
         assert response.status_code == 200
@@ -616,7 +696,7 @@ class TestActionsConfirm:
     def test_confirm_order_forwards_allow_review_items_override(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
     ) -> None:
         """Confirming a staged order must override the review gate.
 
@@ -634,10 +714,11 @@ class TestActionsConfirm:
         pipeline = MagicMock()
         pipeline.submit_cart.return_value = _successful_order_result()
         with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = client.post(
+            response = _post(
+                client,
+                auth_headers,
                 "/api/v1/actions/confirm",
-                json={"action_id": action_id},
-                headers=auth_headers,
+                {"action_id": action_id},
             )
 
         assert response.status_code == 200
@@ -648,7 +729,7 @@ class TestActionsConfirm:
     def test_confirm_order_forwards_allow_unverified_fulfillment_override(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
     ) -> None:
         """Confirming a staged order must override the fulfillment gate.
 
@@ -667,10 +748,11 @@ class TestActionsConfirm:
         pipeline = MagicMock()
         pipeline.submit_cart.return_value = _successful_order_result()
         with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = client.post(
+            response = _post(
+                client,
+                auth_headers,
                 "/api/v1/actions/confirm",
-                json={"action_id": action_id},
-                headers=auth_headers,
+                {"action_id": action_id},
             )
 
         assert response.status_code == 200
@@ -681,7 +763,7 @@ class TestActionsConfirm:
     def test_failed_order_submission_returns_502(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pending_store: PendingActionsStore,
     ) -> None:
         """A failed Safeway submission reports 502; the claim is consumed."""
@@ -693,10 +775,11 @@ class TestActionsConfirm:
             success=False, error_message="Safeway is down"
         )
         with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = client.post(
+            response = _post(
+                client,
+                auth_headers,
                 "/api/v1/actions/confirm",
-                json={"action_id": action_id},
-                headers=auth_headers,
+                {"action_id": action_id},
             )
         assert response.status_code == 502
         assert "Safeway is down" in response.get_json()["error"]
@@ -707,7 +790,7 @@ class TestActionsConfirm:
     def test_unavailable_pipeline_returns_503_and_keeps_action_pending(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pending_store: PendingActionsStore,
     ) -> None:
         """If the pipeline can't start, the action stays pending for retry."""
@@ -718,10 +801,11 @@ class TestActionsConfirm:
             "grocery_butler.api._safeway_pipeline",
             side_effect=ConfigError("SAFEWAY_USERNAME missing"),
         ):
-            response = client.post(
+            response = _post(
+                client,
+                auth_headers,
                 "/api/v1/actions/confirm",
-                json={"action_id": action_id},
-                headers=auth_headers,
+                {"action_id": action_id},
             )
         assert response.status_code == 503
         action = pending_store.get_pending_action(action_id)
@@ -731,7 +815,7 @@ class TestActionsConfirm:
     def test_disabled_submission_returns_501_and_keeps_action_pending(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pending_store: PendingActionsStore,
     ) -> None:
         """Issue #60: a disabled pipeline returns 501 and leaves the row pending.
@@ -749,10 +833,11 @@ class TestActionsConfirm:
         pipeline.order_submission_enabled = False
         pipeline.submit_cart.return_value = _successful_order_result()
         with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = client.post(
+            response = _post(
+                client,
+                auth_headers,
                 "/api/v1/actions/confirm",
-                json={"action_id": action_id},
-                headers=auth_headers,
+                {"action_id": action_id},
             )
 
         assert response.status_code == 501
@@ -767,22 +852,24 @@ class TestActionsConfirm:
     def test_double_confirm_returns_409(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
     ) -> None:
         """Confirming an already-approved action returns 409."""
         action_id = _stage_via_api(
             client, auth_headers, "/api/v1/brands/set", _brand_body()
         )
-        first = client.post(
+        first = _post(
+            client,
+            auth_headers,
             "/api/v1/actions/confirm",
-            json={"action_id": action_id},
-            headers=auth_headers,
+            {"action_id": action_id},
         )
         assert first.status_code == 200
-        second = client.post(
+        second = _post(
+            client,
+            auth_headers,
             "/api/v1/actions/confirm",
-            json={"action_id": action_id},
-            headers=auth_headers,
+            {"action_id": action_id},
         )
         assert second.status_code == 409
         assert "error" in second.get_json()
@@ -790,29 +877,31 @@ class TestActionsConfirm:
     def test_confirm_after_deny_returns_409(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
     ) -> None:
         """Confirming a denied action returns 409."""
         action_id = _stage_via_api(
             client, auth_headers, "/api/v1/brands/set", _brand_body()
         )
-        denied = client.post(
+        denied = _post(
+            client,
+            auth_headers,
             "/api/v1/actions/deny",
-            json={"action_id": action_id},
-            headers=auth_headers,
+            {"action_id": action_id},
         )
         assert denied.status_code == 200
-        response = client.post(
+        response = _post(
+            client,
+            auth_headers,
             "/api/v1/actions/confirm",
-            json={"action_id": action_id},
-            headers=auth_headers,
+            {"action_id": action_id},
         )
         assert response.status_code == 409
 
     def test_confirm_brands_applies_rule(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         recipe_store: RecipeStore,
         pending_store: PendingActionsStore,
     ) -> None:
@@ -820,10 +909,11 @@ class TestActionsConfirm:
         action_id = _stage_via_api(
             client, auth_headers, "/api/v1/brands/set", _brand_body()
         )
-        response = client.post(
+        response = _post(
+            client,
+            auth_headers,
             "/api/v1/actions/confirm",
-            json={"action_id": action_id},
-            headers=auth_headers,
+            {"action_id": action_id},
         )
         assert response.status_code == 200
         data = response.get_json()
@@ -846,7 +936,7 @@ class TestActionsConfirm:
     def test_confirm_preferences_applies_settings(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         recipe_store: RecipeStore,
     ) -> None:
         """Confirming a preferences_set action writes every key/value pair."""
@@ -854,10 +944,11 @@ class TestActionsConfirm:
         action_id = _stage_via_api(
             client, auth_headers, "/api/v1/preferences/set", body
         )
-        response = client.post(
+        response = _post(
+            client,
+            auth_headers,
             "/api/v1/actions/confirm",
-            json={"action_id": action_id},
-            headers=auth_headers,
+            {"action_id": action_id},
         )
         assert response.status_code == 200
         assert response.get_json()["result"]["updated"] == 2
@@ -876,27 +967,28 @@ class TestActionsDeny:
     """/actions/deny resolves staged actions as denied."""
 
     def test_missing_action_id_returns_400(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """A body without action_id is rejected."""
-        response = client.post("/api/v1/actions/deny", json={}, headers=auth_headers)
+        response = _post(client, auth_headers, "/api/v1/actions/deny", {})
         assert response.status_code == 400
 
     def test_unknown_action_id_returns_404(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """An unknown action_id gets 404."""
-        response = client.post(
+        response = _post(
+            client,
+            auth_headers,
             "/api/v1/actions/deny",
-            json={"action_id": str(uuid.uuid4())},
-            headers=auth_headers,
+            {"action_id": str(uuid.uuid4())},
         )
         assert response.status_code == 404
 
     def test_denies_pending_action(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pending_store: PendingActionsStore,
         recipe_store: RecipeStore,
     ) -> None:
@@ -904,10 +996,11 @@ class TestActionsDeny:
         action_id = _stage_via_api(
             client, auth_headers, "/api/v1/brands/set", _brand_body()
         )
-        response = client.post(
+        response = _post(
+            client,
+            auth_headers,
             "/api/v1/actions/deny",
-            json={"action_id": action_id},
-            headers=auth_headers,
+            {"action_id": action_id},
         )
         assert response.status_code == 200
         data = response.get_json()
@@ -923,22 +1016,24 @@ class TestActionsDeny:
     def test_double_deny_returns_409(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
     ) -> None:
         """Denying an already-denied action returns 409."""
         action_id = _stage_via_api(
             client, auth_headers, "/api/v1/brands/set", _brand_body()
         )
-        first = client.post(
+        first = _post(
+            client,
+            auth_headers,
             "/api/v1/actions/deny",
-            json={"action_id": action_id},
-            headers=auth_headers,
+            {"action_id": action_id},
         )
         assert first.status_code == 200
-        second = client.post(
+        second = _post(
+            client,
+            auth_headers,
             "/api/v1/actions/deny",
-            json={"action_id": action_id},
-            headers=auth_headers,
+            {"action_id": action_id},
         )
         assert second.status_code == 409
 
@@ -960,7 +1055,7 @@ class TestConfirmOrderIdempotency:
     def test_confirm_order_passes_action_id_as_idempotency_key(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
     ) -> None:
         """Test the staged action_id is forwarded as the idempotency key."""
         action_id = _stage_via_api(
@@ -969,10 +1064,11 @@ class TestConfirmOrderIdempotency:
         pipeline = MagicMock()
         pipeline.submit_cart.return_value = _successful_order_result()
         with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = client.post(
+            response = _post(
+                client,
+                auth_headers,
                 "/api/v1/actions/confirm",
-                json={"action_id": action_id},
-                headers=auth_headers,
+                {"action_id": action_id},
             )
 
         assert response.status_code == 200
@@ -983,7 +1079,7 @@ class TestConfirmOrderIdempotency:
     def test_unknown_outcome_returns_504(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pending_store: PendingActionsStore,
     ) -> None:
         """Test an UNKNOWN order outcome surfaces as HTTP 504 with status unknown."""
@@ -999,10 +1095,11 @@ class TestConfirmOrderIdempotency:
             error_message="Order outcome unknown — request timed out",
         )
         with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = client.post(
+            response = _post(
+                client,
+                auth_headers,
                 "/api/v1/actions/confirm",
-                json={"action_id": action_id},
-                headers=auth_headers,
+                {"action_id": action_id},
             )
 
         assert response.status_code == 504
@@ -1017,7 +1114,7 @@ class TestConfirmOrderIdempotency:
     def test_duplicate_outcome_returns_409(
         self,
         client: FlaskClient,
-        auth_headers: dict[str, str],
+        auth_headers: AuthHeaderFactory,
         pending_store: PendingActionsStore,
     ) -> None:
         """Test a DUPLICATE order outcome surfaces as HTTP 409 duplicate_prevented."""
@@ -1033,10 +1130,11 @@ class TestConfirmOrderIdempotency:
             error_message="Duplicate order blocked — a recent submission is pending",
         )
         with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = client.post(
+            response = _post(
+                client,
+                auth_headers,
                 "/api/v1/actions/confirm",
-                json={"action_id": action_id},
-                headers=auth_headers,
+                {"action_id": action_id},
             )
 
         assert response.status_code == 409
@@ -1046,3 +1144,92 @@ class TestConfirmOrderIdempotency:
         action = pending_store.get_pending_action(action_id)
         assert action is not None
         assert action.status is PendingActionStatus.APPROVED
+
+
+# ---------------------------------------------------------------------------
+# Issue #74 AC#1: a token bound to one endpoint cannot be replayed on another
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestCrossEndpointTokenReplayRejected:
+    """A token minted for a harmless read endpoint cannot confirm actions."""
+
+    def test_inventory_token_replayed_against_confirm_returns_401(
+        self,
+        client: FlaskClient,
+        auth_headers: AuthHeaderFactory,
+        pending_store: PendingActionsStore,
+    ) -> None:
+        """AC#1: a GET /inventory token posted to /actions/confirm is rejected.
+
+        Stages a real action with a correctly-bound token, then attempts
+        to confirm it with a token minted for an unrelated read
+        endpoint. The replay must be rejected, and the staged action
+        must remain untouched -- no action may execute as a side effect
+        of a mismatched token.
+        """
+        action_id = _stage_via_api(
+            client, auth_headers, "/api/v1/brands/set", _brand_body()
+        )
+        stolen_headers = auth_headers("GET", "/api/v1/inventory", b"")
+
+        response = client.post(
+            "/api/v1/actions/confirm",
+            data=json.dumps({"action_id": action_id}).encode(),
+            content_type="application/json",
+            headers=stolen_headers,
+        )
+
+        assert response.status_code == 401
+        action = pending_store.get_pending_action(action_id)
+        assert action is not None
+        assert action.status is PendingActionStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# Issue #74 AC#2: auth-by-default via the blueprint's before_request hook
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestAuthByDefault:
+    """The api_v1 blueprint enforces auth even without a per-route call.
+
+    ``_unauthenticated_throwaway_view`` (module scope, above) never
+    calls ``require_bearer()`` itself. If the blueprint's
+    ``before_request`` hook is doing its job, unauthenticated requests
+    to it must still 401, and correctly-bound requests must still 200.
+    """
+
+    def test_unauthenticated_request_to_unguarded_view_returns_401(
+        self, db_path: str
+    ) -> None:
+        """An unauthenticated request to the unguarded view is rejected.
+
+        Args:
+            db_path: Temporary database path fixture for test isolation.
+        """
+        application = create_app(db_path=db_path)
+        application.config["TESTING"] = True
+        test_client = application.test_client()
+
+        response = test_client.get(UNAUTHENTICATED_THROWAWAY_PATH)
+
+        assert response.status_code == 401
+
+    def test_bound_token_for_unguarded_view_returns_200(self, db_path: str) -> None:
+        """A correctly bound token still reaches the unguarded view.
+
+        Args:
+            db_path: Temporary database path fixture for test isolation.
+        """
+        application = create_app(db_path=db_path)
+        application.config["TESTING"] = True
+        test_client = application.test_client()
+        headers = bearer_header("rubotpaul", "GET", UNAUTHENTICATED_THROWAWAY_PATH)
+
+        response = test_client.get(UNAUTHENTICATED_THROWAWAY_PATH, headers=headers)
+
+        assert response.status_code == 200
+        assert response.get_json() == {"ok": True}

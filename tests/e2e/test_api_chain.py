@@ -11,7 +11,7 @@ separately in ``test_ordering.py``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -21,80 +21,63 @@ from grocery_butler.pending_actions import PendingActionsStore
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from flask.testing import FlaskClient
-
     from tests.e2e.conftest import SafewayMockState
 
 pytestmark = pytest.mark.e2e
 
 
 def _stage_order(
-    client: FlaskClient,
-    headers: dict[str, str],
+    signed_request: Callable[..., Any],
     meal_name: str,
 ) -> str:
     """Run meals/parse -> shopping-list/preview -> order/preview -> submit.
 
     Args:
-        client: The Flask test client.
-        headers: Bearer auth headers.
+        signed_request: The bound-token request-sending fixture.
         meal_name: Name of a recipe already resolvable via the recipe store.
 
     Returns:
         The ``action_id`` of the staged ``safeway_order_submit`` action.
     """
-    parsed = client.post(
-        "/api/v1/meals/parse",
-        json={"text": meal_name},
-        headers=headers,
-    )
+    parsed = signed_request("POST", "/api/v1/meals/parse", {"text": meal_name})
     meals = parsed.get_json()["meals"]
-    preview = client.post(
+    preview = signed_request(
+        "POST",
         "/api/v1/shopping-list/preview",
-        json={"meals": meals, "include_restock": False},
-        headers=headers,
+        {"meals": meals, "include_restock": False},
     )
     shopping_list = preview.get_json()["items"]
-    order_preview = client.post(
-        "/api/v1/order/preview",
-        json={"shopping_list": shopping_list},
-        headers=headers,
+    order_preview = signed_request(
+        "POST", "/api/v1/order/preview", {"shopping_list": shopping_list}
     )
     order_body = order_preview.get_json()
-    submitted = client.post(
+    submitted = signed_request(
+        "POST",
         "/api/v1/order/submit",
-        json={"cart": order_body["cart"], "total": order_body["total"]},
-        headers=headers,
+        {"cart": order_body["cart"], "total": order_body["total"]},
     )
     action_id: str = submitted.get_json()["action_id"]
     return action_id
 
 
 def test_full_chain_meal_to_confirmed_order(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     seed_recipe: ParsedMeal,
     no_claude: None,
     safeway_mock: SafewayMockState,
     db_path: str,
 ) -> None:
     """meals/parse -> shopping-list/preview -> order/preview -> submit -> confirm."""
-    headers = signed_headers()
-
-    parsed = client.post(
-        "/api/v1/meals/parse",
-        json={"text": seed_recipe.name},
-        headers=headers,
-    )
+    parsed = signed_request("POST", "/api/v1/meals/parse", {"text": seed_recipe.name})
     assert parsed.status_code == 200
     meals = parsed.get_json()["meals"]
     assert len(meals) == 1
     assert meals[0]["known_recipe"] is True
 
-    preview = client.post(
+    preview = signed_request(
+        "POST",
         "/api/v1/shopping-list/preview",
-        json={"meals": meals, "include_restock": False},
-        headers=headers,
+        {"meals": meals, "include_restock": False},
     )
     assert preview.status_code == 200
     shopping_list = preview.get_json()["items"]
@@ -104,10 +87,8 @@ def test_full_chain_meal_to_confirmed_order(
         "tomato sauce",
     }
 
-    order_preview = client.post(
-        "/api/v1/order/preview",
-        json={"shopping_list": shopping_list},
-        headers=headers,
+    order_preview = signed_request(
+        "POST", "/api/v1/order/preview", {"shopping_list": shopping_list}
     )
     assert order_preview.status_code == 200
     order_body = order_preview.get_json()
@@ -116,10 +97,10 @@ def test_full_chain_meal_to_confirmed_order(
     assert cart["substituted_items"] == []
     assert len(cart["items"]) == 3
 
-    submitted = client.post(
+    submitted = signed_request(
+        "POST",
         "/api/v1/order/submit",
-        json={"cart": cart, "total": order_body["total"]},
-        headers=headers,
+        {"cart": cart, "total": order_body["total"]},
     )
     assert submitted.status_code == 200
     submit_body = submitted.get_json()
@@ -136,10 +117,8 @@ def test_full_chain_meal_to_confirmed_order(
     assert "tomato sauce" in staged_message
     assert "incomparable_units" in staged_message
 
-    confirmed = client.post(
-        "/api/v1/actions/confirm",
-        json={"action_id": action_id},
-        headers=headers,
+    confirmed = signed_request(
+        "POST", "/api/v1/actions/confirm", {"action_id": action_id}
     )
     assert confirmed.status_code == 200
     confirm_body = confirmed.get_json()
@@ -154,8 +133,7 @@ def test_full_chain_meal_to_confirmed_order(
 
 
 def test_disabled_submission_returns_501_default_off(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     seed_recipe: ParsedMeal,
     no_claude: None,
     safeway_mock: SafewayMockState,
@@ -174,13 +152,10 @@ def test_disabled_submission_returns_501_default_off(
     from grocery_butler.order_service import ORDER_SUBMISSION_DISABLED_MESSAGE
 
     monkeypatch.delenv("SAFEWAY_ORDER_SUBMISSION_ENABLED", raising=False)
-    headers = signed_headers()
-    action_id = _stage_order(client, headers, seed_recipe.name)
+    action_id = _stage_order(signed_request, seed_recipe.name)
 
-    confirmed = client.post(
-        "/api/v1/actions/confirm",
-        json={"action_id": action_id},
-        headers=headers,
+    confirmed = signed_request(
+        "POST", "/api/v1/actions/confirm", {"action_id": action_id}
     )
 
     assert confirmed.status_code == 501
@@ -195,26 +170,16 @@ def test_disabled_submission_returns_501_default_off(
 
 
 def test_confirming_same_action_twice_returns_409(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     seed_recipe: ParsedMeal,
     no_claude: None,
     safeway_mock: SafewayMockState,
 ) -> None:
     """A second confirm call for an already-resolved action is rejected."""
-    headers = signed_headers()
-    action_id = _stage_order(client, headers, seed_recipe.name)
+    action_id = _stage_order(signed_request, seed_recipe.name)
 
-    first = client.post(
-        "/api/v1/actions/confirm",
-        json={"action_id": action_id},
-        headers=headers,
-    )
+    first = signed_request("POST", "/api/v1/actions/confirm", {"action_id": action_id})
     assert first.status_code == 200
 
-    second = client.post(
-        "/api/v1/actions/confirm",
-        json={"action_id": action_id},
-        headers=headers,
-    )
+    second = signed_request("POST", "/api/v1/actions/confirm", {"action_id": action_id})
     assert second.status_code == 409
