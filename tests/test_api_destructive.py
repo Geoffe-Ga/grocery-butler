@@ -579,7 +579,10 @@ class TestOrderSubmitTotalValidationAndCap:
 
         The cap gate reads the env var at staging time; if an operator
         has set it to garbage the request must fail with a clean JSON
-        503 naming the configuration problem, not an unhandled 500.
+        503, not an unhandled 500. Issue #77: the body is a terse,
+        stable "order configuration invalid" message rather than one
+        naming the offending env var or its raw value -- that detail is
+        logged server-side instead of relayed to the client.
         """
         body = _order_body()
         del body["total"]
@@ -588,7 +591,10 @@ class TestOrderSubmitTotalValidationAndCap:
                 "/api/v1/order/submit", json=body, headers=auth_headers
             )
         assert response.status_code == 503
-        assert "cap" in response.get_json()["error"].lower()
+        assert response.get_json()["error"] == "order configuration invalid"
+        text = response.get_data(as_text=True)
+        assert "SAFEWAY_ORDER_VALUE_CAP_USD" not in text
+        assert "garbage" not in text
 
     def test_order_submit_accepts_matching_client_total(
         self,
@@ -969,7 +975,14 @@ class TestActionsConfirm:
         auth_headers: dict[str, str],
         pending_store: PendingActionsStore,
     ) -> None:
-        """A failed Safeway submission reports 502; the claim is consumed."""
+        """A failed Safeway submission reports a terse 502; the claim is consumed.
+
+        Issue #77: the raw ``error_message`` from an unmapped-outcome
+        OrderResult failure must not be relayed verbatim into the
+        response body — "Safeway is down" is a stand-in for text that,
+        in production, could carry internal detail. The body must use
+        the fixed, terse "order submission failed" message instead.
+        """
         action_id = _stage_via_api(
             client, auth_headers, "/api/v1/order/submit", _order_body()
         )
@@ -984,7 +997,8 @@ class TestActionsConfirm:
                 headers=auth_headers,
             )
         assert response.status_code == 502
-        assert "Safeway is down" in response.get_json()["error"]
+        assert response.get_json()["error"] == "order submission failed"
+        assert "Safeway is down" not in response.get_data(as_text=True)
         action = pending_store.get_pending_action(action_id)
         assert action is not None
         assert action.status is PendingActionStatus.APPROVED
@@ -1271,7 +1285,14 @@ class TestConfirmOrderIdempotency:
         auth_headers: dict[str, str],
         pending_store: PendingActionsStore,
     ) -> None:
-        """Test an UNKNOWN order outcome surfaces as HTTP 504 with status unknown."""
+        """Test an UNKNOWN order outcome surfaces as HTTP 504 with status unknown.
+
+        Issue #77: the mapped-outcome response must keep ``status`` and
+        ``action_id`` (RubotPaul needs those to route the reply) but
+        must not relay the raw ``error_message`` free text verbatim —
+        this OrderResult's message is a stand-in for text that could
+        carry internal detail in production.
+        """
         from grocery_butler.order_service import OrderOutcome
 
         action_id = _stage_via_api(
@@ -1293,7 +1314,9 @@ class TestConfirmOrderIdempotency:
         assert response.status_code == 504
         data = response.get_json()
         assert data["status"] == "unknown"
+        assert data["action_id"] == action_id
         assert "error" in data
+        assert "request timed out" not in data["error"]
 
         action = pending_store.get_pending_action(action_id)
         assert action is not None
@@ -1305,7 +1328,13 @@ class TestConfirmOrderIdempotency:
         auth_headers: dict[str, str],
         pending_store: PendingActionsStore,
     ) -> None:
-        """Test a DUPLICATE order outcome surfaces as HTTP 409 duplicate_prevented."""
+        """Test a DUPLICATE order outcome surfaces as HTTP 409 duplicate_prevented.
+
+        Issue #77: the mapped-outcome response must keep ``status`` and
+        ``action_id`` but must not relay the raw ``error_message`` free
+        text verbatim — this OrderResult's message is a stand-in for
+        text that could carry internal detail in production.
+        """
         from grocery_butler.order_service import OrderOutcome
 
         action_id = _stage_via_api(
@@ -1327,6 +1356,9 @@ class TestConfirmOrderIdempotency:
         assert response.status_code == 409
         data = response.get_json()
         assert data["status"] == "duplicate_prevented"
+        assert data["action_id"] == action_id
+        assert "error" in data
+        assert "Duplicate order blocked" not in data["error"]
 
         action = pending_store.get_pending_action(action_id)
         assert action is not None
