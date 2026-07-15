@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -405,6 +406,43 @@ def test_recipes_save_duplicate_conflict(
             auth_headers,
             _recipe_body(name="Test Pasta"),
         )
+    assert response.status_code == 409
+
+
+def test_recipes_save_raced_duplicate_returns_409(
+    client: FlaskClient,
+    app: Flask,
+    auth_headers: dict[str, str],
+) -> None:
+    """A concurrent insert that races the pre-check is a 409, not a 500.
+
+    Regression test for issue #79: `post_recipes_save` checks
+    `store.get_recipe(name)` for None, then calls `store.save_recipe(meal)`.
+    If another request inserts the same name in between (or the pre-check
+    is otherwise stale), `save_recipe` raises
+    `grocery_butler.db.adapter.IntegrityError` because `recipes.name` is
+    UNIQUE, and today that propagates as an unhandled 500 instead of being
+    translated to a 409 the way `post_stock_add` handles its own
+    `IntegrityError` case.
+
+    PROPAGATE_EXCEPTIONS is explicitly disabled (see
+    TestInternalServerErrorContract in test_api_errors.py) so the test
+    client exercises the request pipeline the way it behaves in
+    production instead of TESTING=True re-raising the exception.
+    """
+    app.config["PROPAGATE_EXCEPTIONS"] = False
+    with (
+        patch.object(RecipeStore, "get_recipe", return_value=None),
+        patch.object(
+            RecipeStore,
+            "save_recipe",
+            side_effect=sqlite3.IntegrityError(
+                "UNIQUE constraint failed: recipes.name"
+            ),
+        ),
+        patch.dict(os.environ, SECRET_ENV),
+    ):
+        response = _post(client, "/api/v1/recipes/save", auth_headers, _recipe_body())
     assert response.status_code == 409
 
 
