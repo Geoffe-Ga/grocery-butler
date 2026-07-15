@@ -419,6 +419,34 @@ class TestOrderPreview:
         assert response.status_code == 200
         assert response.get_json()["total"] == "3.75"
 
+    def test_failed_items_are_serialized_in_cart_response(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """A cart with failed_items still serializes as JSON (issue #76).
+
+        Serialization guard: when CartBuilder routes an item to
+        ``failed_items`` (e.g. after a per-item ``ProductSearchError``),
+        the ``/order/preview`` response must still come back as a clean
+        200 with the failed item present in ``cart.failed_items`` --
+        not blow up or silently drop it.
+        """
+        cart = _make_cart({"pasta": 1.0})
+        failed_item = _make_shopping_item("eggs")
+        cart = cart.model_copy(update={"failed_items": [failed_item]})
+        pipeline = MagicMock()
+        pipeline.build_cart_only.return_value = cart
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/order/preview",
+                json={"shopping_list": [_make_shopping_item().model_dump(mode="json")]},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        failed_items = response.get_json()["cart"]["failed_items"]
+        assert len(failed_items) == 1
+        assert failed_items[0]["ingredient"] == "eggs"
+
     def test_pipeline_error_returns_503(
         self, client: FlaskClient, auth_headers: dict[str, str]
     ) -> None:
