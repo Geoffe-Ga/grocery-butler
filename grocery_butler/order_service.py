@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -112,6 +113,10 @@ class OrderService:
             Safeway is descoped for v1.0 because the checkout API surface
             is unverified, so this defaults to ``False``. Callers must
             opt in explicitly (see ``SAFEWAY_ORDER_SUBMISSION_ENABLED``).
+        order_value_cap: Issue #73 order-value cap. A cart whose
+            fee-inclusive total (see :func:`compute_cart_total`) exceeds
+            this amount is blocked before any client call unless the
+            caller opts in via ``allow_over_cap``. Defaults to $300.
     """
 
     def __init__(
@@ -120,6 +125,7 @@ class OrderService:
         pantry_manager: PantryManager,
         *,
         submission_enabled: bool = False,
+        order_value_cap: Decimal = Decimal("300"),
     ) -> None:
         """Initialize the order service.
 
@@ -129,10 +135,14 @@ class OrderService:
             submission_enabled: Issue #60 fail-safe gate. Defaults to
                 ``False`` so submission is blocked unless explicitly
                 enabled by the caller.
+            order_value_cap: Issue #73 order-value cap. Defaults to
+                $300; callers should forward the configured
+                ``Config.safeway_order_value_cap`` value.
         """
         self._client = safeway_client
         self._pantry = pantry_manager
         self._submission_enabled = submission_enabled
+        self._order_value_cap = order_value_cap
 
     def submit_order(
         self,
@@ -140,6 +150,7 @@ class OrderService:
         idempotency_key: str | None = None,
         *,
         allow_review_items: bool = False,
+        allow_over_cap: bool = False,
     ) -> OrderResult:
         """Submit a cart to Safeway and update inventory.
 
@@ -147,6 +158,10 @@ class OrderService:
         by unit-aware quantity math (see :attr:`CartItem.needs_review`).
         Flagged items block submission unless ``allow_review_items`` is
         set, which represents an explicit human override after review.
+        The cart's fee-inclusive total (see :func:`compute_cart_total`)
+        is also checked against ``order_value_cap``; a total exceeding
+        the cap blocks submission unless ``allow_over_cap`` is set
+        (Issue #73).
 
         Sends a ``clientOrderId`` (the given ``idempotency_key``, or a
         freshly generated UUID4 if none is given) with the order so
@@ -164,6 +179,9 @@ class OrderService:
             allow_review_items: If True, bypass the review gate and
                 submit even if items are flagged as ``needs_review``.
                 Defaults to False (safe/blocking).
+            allow_over_cap: If True, bypass the order-value cap gate
+                (Issue #73) even if the cart total exceeds
+                ``order_value_cap``. Defaults to False (safe/blocking).
 
         Returns:
             OrderResult with confirmation or error details. If order
@@ -171,7 +189,11 @@ class OrderService:
             with :data:`ORDER_SUBMISSION_DISABLED_MESSAGE` before any
             other validation or API call.
         """
-        blocked = self._preflight_block(cart, allow_review_items=allow_review_items)
+        blocked = self._preflight_block(
+            cart,
+            allow_review_items=allow_review_items,
+            allow_over_cap=allow_over_cap,
+        )
         if blocked is not None:
             return blocked
 
@@ -263,18 +285,22 @@ class OrderService:
         cart: CartSummary,
         *,
         allow_review_items: bool,
+        allow_over_cap: bool,
     ) -> OrderResult | None:
         """Run the pre-flight gates that block a submission before any I/O.
 
         Gates run in a deliberate order: the Issue #60 descope gate
         short-circuits first (before any other validation), then the
         Issue #59 review gate (unless overridden), then the empty-cart
-        check — all before any HTTP call or ledger write.
+        check, then the Issue #73 order-value cap gate (unless
+        overridden) — all before any HTTP call or ledger write.
 
         Args:
             cart: The built cart summary to validate.
             allow_review_items: If True, skip the review gate (explicit
                 human override).
+            allow_over_cap: If True, skip the order-value cap gate
+                (explicit human override).
 
         Returns:
             A failed OrderResult describing the first gate that blocks
@@ -296,6 +322,18 @@ class OrderService:
                 success=False,
                 error_message="Cart is empty — nothing to order",
             )
+
+        if not allow_over_cap:
+            total = compute_cart_total(cart)
+            if total > self._order_value_cap:
+                return OrderResult(
+                    success=False,
+                    error_message=(
+                        f"Order total ${total} exceeds the order-value cap "
+                        f"of ${self._order_value_cap}. Re-submit with "
+                        "allow_over_cap=True to proceed."
+                    ),
+                )
         return None
 
     def _restock_ordered_items(self, cart: CartSummary) -> int:
@@ -328,6 +366,53 @@ class OrderService:
 # ------------------------------------------------------------------
 # Pure helper functions
 # ------------------------------------------------------------------
+
+
+def compute_cart_total(cart: CartSummary) -> Decimal:
+    """Compute the fee-inclusive, server-trusted total for a cart.
+
+    Sums the estimated cost of every regular and restock item and adds
+    the recommended fulfillment option's fee (see
+    :func:`_recommended_fulfillment_fee`), then quantizes the result to
+    cents. Deliberately never reads ``cart.subtotal`` or
+    ``cart.estimated_total`` — those fields may be stale or supplied by
+    an untrusted client, so this is the single source of truth for what
+    a cart actually costs (Issue #73).
+
+    Args:
+        cart: Cart summary to total.
+
+    Returns:
+        The fee-inclusive total, quantized to cents with ROUND_HALF_UP.
+    """
+    items_total = sum(
+        (Decimal(str(item.estimated_cost)) for item in cart.items + cart.restock_items),
+        Decimal("0"),
+    )
+    total = items_total + _recommended_fulfillment_fee(cart)
+    return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _recommended_fulfillment_fee(cart: CartSummary) -> Decimal:
+    """Return the fee for the cart's recommended fulfillment option.
+
+    Deliberately does not import
+    ``grocery_butler.cart_builder._get_fulfillment_fee`` — sibling
+    changes land in ``cart_builder.py`` independently, and this module
+    must not couple to it (chief-architect ruling, Issue #73).
+
+    Args:
+        cart: Cart summary whose fulfillment options to scan.
+
+    Returns:
+        The fee of the fulfillment option matching
+        ``cart.recommended_fulfillment``, or ``Decimal("0")`` if no
+        option matches.
+    """
+    for option in cart.fulfillment_options:
+        if option.type == cart.recommended_fulfillment:
+            return Decimal(str(option.fee))
+    return Decimal("0")
 
 
 def _build_order_payload(

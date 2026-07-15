@@ -32,6 +32,7 @@ from grocery_butler.models import (
     BrandPreferenceType,
     CartItem,
     CartSummary,
+    FulfillmentOption,
     FulfillmentType,
     IngredientCategory,
     PendingActionStatus,
@@ -157,6 +158,43 @@ def _make_cart(costs: dict[str, float]) -> CartSummary:
         fulfillment_options=[],
         recommended_fulfillment=FulfillmentType.PICKUP,
         estimated_total=sum(costs.values()),
+    )
+
+
+def _make_cart_with_fee(costs: dict[str, float], fee: float) -> CartSummary:
+    """Return a CartSummary whose recommended fulfillment option has a fee.
+
+    Unlike :func:`_make_cart` (empty ``fulfillment_options``), this pins
+    a non-zero fee on the recommended (pickup) fulfillment option so
+    tests can verify the staged total includes it (issue #73).
+    ``estimated_total`` deliberately omits the fee, matching the shape
+    of a cart built by today's (buggy) pipeline.
+
+    Args:
+        costs: Mapping of ingredient name to estimated cost.
+        fee: Fee for the recommended pickup fulfillment option.
+
+    Returns:
+        A CartSummary with a non-zero recommended-fulfillment fee.
+    """
+    items = [_make_cart_item(name, cost) for name, cost in costs.items()]
+    subtotal = sum(costs.values())
+    return CartSummary(
+        items=items,
+        failed_items=[],
+        substituted_items=[],
+        restock_items=[],
+        subtotal=subtotal,
+        fulfillment_options=[
+            FulfillmentOption(
+                type=FulfillmentType.PICKUP,
+                available=True,
+                fee=fee,
+                windows=[],
+            ),
+        ],
+        recommended_fulfillment=FulfillmentType.PICKUP,
+        estimated_total=subtotal,
     )
 
 
@@ -397,6 +435,194 @@ class TestOrderSubmitStaging:
         assert response.status_code == 200
         message = response.get_json()["message"]
         assert "review" not in message.lower()
+
+
+# ---------------------------------------------------------------------------
+# POST /order/submit — issue #73: server-trusted total and order-value cap
+#
+# Today ``post_order_submit`` does
+# ``total = str(body.get("total") or _cart_total(cart))``: a client-
+# supplied total is trusted verbatim (staged into the confirmation
+# message and audit payload), ``_cart_total`` omits the recommended
+# fulfillment fee, and there is no order-value cap anywhere. These tests
+# pin the fixed behavior: the server always computes the fee-inclusive
+# total, a mismatching/non-numeric client total is rejected, and orders
+# over a configurable cap are blocked unless explicitly overridden.
+# ---------------------------------------------------------------------------
+
+
+@patch.dict(os.environ, SECRET_ENV)
+class TestOrderSubmitTotalValidationAndCap:
+    """/order/submit trusts only the server total and enforces a value cap."""
+
+    def test_order_submit_rejects_client_total_mismatch_returns_400(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Test a client total that mismatches the server total is rejected.
+
+        A $200 cart staged with a lying client total of "7.75" must be
+        rejected with 400. Today it is staged as-is: the client's lie
+        becomes the audited total.
+        """
+        cart = _make_cart({"steak": 200.00})
+        response = client.post(
+            "/api/v1/order/submit",
+            json={"cart": cart.model_dump(mode="json"), "total": "7.75"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+        assert "total" in response.get_json()["error"].lower()
+
+    @pytest.mark.parametrize(
+        "bad_total",
+        [{"x": 1}, True, [1, 2], "not-a-number"],
+        ids=["dict", "bool", "list", "unparseable-str"],
+    )
+    def test_order_submit_rejects_non_numeric_total_returns_400(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        bad_total: Any,
+    ) -> None:
+        """Test dict/list/bool/unparseable-string totals are rejected with 400.
+
+        Today's ``body.get("total") or _cart_total(cart)`` accepts any
+        truthy value verbatim — a dict or list would even survive
+        ``str()`` into the staged message and audit payload.
+        """
+        body = _order_body()
+        body["total"] = bad_total
+        response = client.post(
+            "/api/v1/order/submit", json=body, headers=auth_headers
+        )
+        assert response.status_code == 400
+        assert "total" in response.get_json()["error"].lower()
+
+    def test_order_submit_accepts_matching_client_total(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pending_store: PendingActionsStore,
+    ) -> None:
+        """Test a client total exactly equal to the server total is accepted.
+
+        Once total validation exists, a correct client total must still
+        stage normally (200) with the server-computed total persisted
+        in the pending payload.
+        """
+        cart = _make_cart({"pasta": 3.50, "sauce": 4.25})
+        response = client.post(
+            "/api/v1/order/submit",
+            json={"cart": cart.model_dump(mode="json"), "total": "7.75"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        action = pending_store.get_pending_action(response.get_json()["action_id"])
+        assert action is not None
+        assert action.payload["total"] == "7.75"
+
+    def test_order_submit_message_uses_fee_inclusive_server_total(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pending_store: PendingActionsStore,
+    ) -> None:
+        """Test the staged total/message include the recommended fulfillment fee.
+
+        ``_cart_total`` in api.py sums only item/restock costs and
+        omits ``cart.fulfillment_options[].fee`` for the recommended
+        option. With no client total supplied, the staged total must be
+        item-plus-fee inclusive: $3.50 + $4.25 + $2.50 fee = $10.25.
+        """
+        cart = _make_cart_with_fee({"pasta": 3.50, "sauce": 4.25}, fee=2.50)
+        response = client.post(
+            "/api/v1/order/submit",
+            json={"cart": cart.model_dump(mode="json")},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        data = response.get_json()
+        assert "$10.25" in data["message"]
+        action = pending_store.get_pending_action(data["action_id"])
+        assert action is not None
+        assert action.payload["total"] == "10.25"
+
+    def test_order_submit_over_cap_without_override_returns_400(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Test a cart whose server total exceeds the cap is rejected with 400.
+
+        There is no order-value cap anywhere today, so a cart totalling
+        well over $300 stages successfully. The fixed behavior must
+        reject staging with 400 mentioning the cap unless overridden.
+        """
+        cart = _make_cart({"prime rib": 350.00})
+        response = client.post(
+            "/api/v1/order/submit",
+            json={"cart": cart.model_dump(mode="json")},
+            headers=auth_headers,
+        )
+        assert response.status_code == 400
+        assert "cap" in response.get_json()["error"].lower()
+
+    def test_order_submit_over_cap_with_override_stages_with_flag(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+        pending_store: PendingActionsStore,
+    ) -> None:
+        """Test override_cap=true stages an over-cap order with the flag persisted.
+
+        When a human explicitly overrides the cap, staging must succeed
+        and record ``allow_over_cap=True`` in the pending payload so the
+        confirm path can thread it through to OrderService's cap gate.
+        """
+        cart = _make_cart({"prime rib": 350.00})
+        response = client.post(
+            "/api/v1/order/submit",
+            json={"cart": cart.model_dump(mode="json"), "override_cap": True},
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        action = pending_store.get_pending_action(response.get_json()["action_id"])
+        assert action is not None
+        assert action.payload["allow_over_cap"] is True
+
+    def test_confirm_order_submit_passes_allow_over_cap_to_pipeline(
+        self,
+        client: FlaskClient,
+        auth_headers: dict[str, str],
+    ) -> None:
+        """Test confirm forwards allow_over_cap from the staged payload.
+
+        ``_confirm_order_submit`` must read
+        ``action.payload.get("allow_over_cap", False)`` and forward it
+        to ``pipeline.submit_cart`` so the OrderService cap gate can be
+        overridden by a human who already approved the over-cap total
+        at staging time.
+        """
+        cart = _make_cart({"prime rib": 350.00})
+        stage_response = client.post(
+            "/api/v1/order/submit",
+            json={"cart": cart.model_dump(mode="json"), "override_cap": True},
+            headers=auth_headers,
+        )
+        assert stage_response.status_code == 200
+        action_id = stage_response.get_json()["action_id"]
+
+        pipeline = MagicMock()
+        pipeline.submit_cart.return_value = _successful_order_result()
+        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
+            response = client.post(
+                "/api/v1/actions/confirm",
+                json={"action_id": action_id},
+                headers=auth_headers,
+            )
+
+        assert response.status_code == 200
+        pipeline.submit_cart.assert_called_once()
+        _, kwargs = pipeline.submit_cart.call_args
+        assert kwargs.get("allow_over_cap") is True
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ import dataclasses
 import datetime as dt
 import os
 import uuid
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from flask import Blueprint, abort, current_app, jsonify, request
@@ -21,7 +21,7 @@ from pydantic import ValidationError
 from grocery_butler import order_service
 from grocery_butler.auth_middleware import require_bearer
 from grocery_butler.claude_utils import make_anthropic_client
-from grocery_butler.config import ConfigError, load_config
+from grocery_butler.config import ConfigError, load_config, parse_order_value_cap
 from grocery_butler.consolidator import Consolidator
 from grocery_butler.db.adapter import IntegrityError
 from grocery_butler.meal_parser import MealParser
@@ -112,6 +112,29 @@ def _safeway_pipeline() -> SafewayPipeline:
     return SafewayPipeline(
         config, current_app.config["DATABASE_PATH"], _anthropic_client()
     )
+
+
+def _order_value_cap() -> Decimal:
+    """Return the configured Safeway order-value cap (Issue #73).
+
+    Reads ``SAFEWAY_ORDER_VALUE_CAP_USD`` directly via
+    :func:`grocery_butler.config.parse_order_value_cap` rather than
+    going through :func:`grocery_butler.config.load_config`, so the
+    ``/order/submit`` cap gate does not depend on Safeway credentials or
+    ``ANTHROPIC_API_KEY`` being configured the way
+    :func:`_safeway_pipeline` does — staging (as opposed to confirming)
+    an order must work even before the rest of the Safeway integration
+    is configured.
+
+    Returns:
+        The parsed, non-negative cap.
+
+    Raises:
+        ConfigError: If ``SAFEWAY_ORDER_VALUE_CAP_USD`` is set to an
+            invalid value.
+    """
+    raw = os.environ.get("SAFEWAY_ORDER_VALUE_CAP_USD", "300")
+    return parse_order_value_cap(raw)
 
 
 def _json_body() -> dict[str, Any]:
@@ -235,17 +258,6 @@ def _parse_shopping_list_payloads(raw_items: Any) -> list[ShoppingListItem]:
         )
 
 
-def _cart_total(cart: CartSummary) -> Decimal:
-    """Sum item and restock costs without float artifacts."""
-    return sum(
-        (
-            Decimal(str(cart_item.estimated_cost))
-            for cart_item in [*cart.items, *cart.restock_items]
-        ),
-        Decimal("0"),
-    )
-
-
 @api_v1.post("/meals/parse")
 def post_meals_parse() -> Response:
     """Parse free-text meal names into structured ingredient lists."""
@@ -288,7 +300,8 @@ def post_order_preview() -> Response | tuple[Response, int]:
         return jsonify(error=f"cart build failed: {exc}"), 503
     finally:
         pipeline.close()
-    return jsonify(cart=cart.model_dump(mode="json"), total=str(_cart_total(cart)))
+    total = order_service.compute_cart_total(cart)
+    return jsonify(cart=cart.model_dump(mode="json"), total=str(total))
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +468,94 @@ def _parse_cart_payload(body: dict[str, Any]) -> CartSummary:
     return cart
 
 
+def _parse_total(raw: Any) -> Decimal:
+    """Parse a client-supplied ``total`` value into a Decimal, or abort 400.
+
+    Booleans are rejected explicitly (``isinstance(True, int)`` is
+    ``True`` in Python, so a bare numeric-type check would otherwise
+    silently accept ``True``/``False``). Any other non-numeric type
+    (dict, list, etc.) is rejected too. Numeric and numeric-string
+    values are converted via ``Decimal(str(raw))``, which raises
+    ``InvalidOperation`` only for an unparseable string (int/float
+    always stringify to something Decimal accepts).
+
+    Args:
+        raw: The raw ``total`` value from the request body.
+
+    Returns:
+        The parsed value as a Decimal.
+
+    Raises:
+        werkzeug.exceptions.HTTPException: 400 if ``raw`` is not a
+            parseable number.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        abort(400, description="total must be a number")
+    try:
+        return Decimal(str(raw))
+    except InvalidOperation:
+        abort(400, description="total must be a number")
+
+
+def _validate_client_total(body: dict[str, Any], server_total: Decimal) -> None:
+    """Validate an optional client-supplied total against the server total.
+
+    A missing ``total`` is accepted (the server total is authoritative
+    either way); a present ``total`` must parse as a number and match
+    the server-computed total to the cent (Issue #73) — a mismatch (or
+    an unparseable value) is rejected rather than trusted verbatim.
+
+    Args:
+        body: Parsed JSON request body.
+        server_total: Fee-inclusive total computed via
+            :func:`grocery_butler.order_service.compute_cart_total`.
+
+    Raises:
+        werkzeug.exceptions.HTTPException: 400 if ``total`` is present
+            but malformed or does not match ``server_total``.
+    """
+    raw = body.get("total")
+    if raw is None:
+        return
+    client_total = _parse_total(raw).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if client_total != server_total:
+        abort(
+            400,
+            description=(
+                f"total mismatch: client sent {client_total}, "
+                f"server computed {server_total}"
+            ),
+        )
+
+
+def _enforce_order_cap(server_total: Decimal, override: bool) -> None:
+    """Abort 400 if the total exceeds the order-value cap and isn't overridden.
+
+    Args:
+        server_total: Fee-inclusive server-computed total.
+        override: Whether the caller explicitly opted to bypass the cap
+            (``override_cap`` truthy in the request body).
+
+    Raises:
+        werkzeug.exceptions.HTTPException: 400 if ``server_total``
+            exceeds the configured cap and ``override`` is False.
+        ConfigError: If ``SAFEWAY_ORDER_VALUE_CAP_USD`` is set to an
+            invalid value — callers must handle this (see
+            :func:`post_order_submit`).
+    """
+    if override:
+        return
+    cap = _order_value_cap()
+    if server_total > cap:
+        abort(
+            400,
+            description=(
+                f"order total ${server_total} exceeds the order-value cap "
+                f"of ${cap}. Re-submit with override_cap=true to proceed."
+            ),
+        )
+
+
 def _render_review_section(cart: CartSummary) -> str:
     """Render a staged-message clause naming flagged items and reasons.
 
@@ -483,15 +584,39 @@ def _render_review_section(cart: CartSummary) -> str:
 
 
 @api_v1.post("/order/submit")
-def post_order_submit() -> Response:
-    """Stage a Safeway order for confirmation. Never submits directly."""
+def post_order_submit() -> Response | tuple[Response, int]:
+    """Stage a Safeway order for confirmation. Never submits directly.
+
+    The total is always the server-computed, fee-inclusive
+    :func:`~grocery_butler.order_service.compute_cart_total` — an
+    optional client-supplied ``total`` is validated against it (Issue
+    #73) rather than trusted verbatim. Orders whose total exceeds the
+    configured order-value cap are rejected unless the request sets
+    ``override_cap`` truthy, in which case the override is persisted in
+    the staged payload for :func:`_confirm_order_submit` to forward.
+
+    Returns:
+        The staged-action JSON response, or a 503 JSON error if the
+        order-value cap configuration itself is invalid.
+    """
     require_bearer()
     body = _json_body()
     cart = _parse_cart_payload(body)
-    total = str(body.get("total") or _cart_total(cart))
+    server_total = order_service.compute_cart_total(cart)
+    _validate_client_total(body, server_total)
+    override_cap = bool(body.get("override_cap"))
+    try:
+        _enforce_order_cap(server_total, override_cap)
+    except ConfigError as exc:
+        return jsonify(error=f"order-value cap configuration invalid: {exc}"), 503
+    total = str(server_total)
     action_id = _stage_pending(
         "safeway_order_submit",
-        {"cart": cart.model_dump(mode="json"), "total": total},
+        {
+            "cart": cart.model_dump(mode="json"),
+            "total": total,
+            "allow_over_cap": override_cap,
+        },
     )
     item_count = len(cart.items) + len(cart.restock_items)
     review_section = _render_review_section(cart)
@@ -617,7 +742,22 @@ def _order_failure_response(
 def _confirm_order_submit(
     action: PendingAction, store: PendingActionsStore
 ) -> Response | tuple[Response, int]:
-    """Submit the exact staged cart to Safeway (real money)."""
+    """Submit the exact staged cart to Safeway (real money).
+
+    Forwards ``action.payload["allow_over_cap"]`` (set at staging time
+    by ``post_order_submit`` when the human passed ``override_cap``) to
+    :meth:`SafewayPipeline.submit_cart` so the Issue #73 order-value cap
+    gate can be bypassed exactly when it was already approved at
+    staging time.
+
+    Args:
+        action: The staged, not-yet-claimed pending action.
+        store: Pending-actions store used to claim the action.
+
+    Returns:
+        The confirmation JSON response, or an error response/status
+        code per the failure branch that applies.
+    """
     cart = CartSummary.model_validate(action.payload["cart"])
     try:
         pipeline = _safeway_pipeline()
@@ -643,6 +783,7 @@ def _confirm_order_submit(
             cart,
             idempotency_key=action.action_id,
             allow_review_items=True,
+            allow_over_cap=bool(action.payload.get("allow_over_cap", False)),
         )
     except SafewayPipelineError as exc:
         return jsonify(error=f"order submission failed: {exc}"), 502
