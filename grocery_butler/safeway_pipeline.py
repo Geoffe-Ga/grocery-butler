@@ -32,6 +32,8 @@ from grocery_butler.safeway_client import SafewayClient
 from grocery_butler.substitution_service import SubstitutionService
 
 if TYPE_CHECKING:
+    from decimal import Decimal
+
     from grocery_butler.config import Config
     from grocery_butler.models import CartSummary, ShoppingListItem
 
@@ -117,12 +119,14 @@ class SafewayPipeline:
         # OrderService also defaults to disabled, and this pipeline
         # additionally short-circuits run()/submit_cart() before any I/O.
         self._submission_enabled = config.safeway_order_submission_enabled
+        self._order_value_cap = config.safeway_order_value_cap
 
         pantry_manager = PantryManager(db_path, anthropic_client)
         self._order_service = OrderService(
             self._client,
             pantry_manager,
             submission_enabled=self._submission_enabled,
+            order_value_cap=self._order_value_cap,
         )
         self._order_submissions = OrderSubmissionStore(db_path)
 
@@ -135,6 +139,16 @@ class SafewayPipeline:
             when this pipeline's config was loaded, False otherwise.
         """
         return self._submission_enabled
+
+    @property
+    def order_value_cap(self) -> Decimal:
+        """The configured Safeway order-value cap (Issue #73 gate).
+
+        Returns:
+            The cap threshold read from ``config.safeway_order_value_cap``
+            when this pipeline was constructed.
+        """
+        return self._order_value_cap
 
     def run(
         self,
@@ -192,6 +206,7 @@ class SafewayPipeline:
         *,
         allow_review_items: bool = False,
         allow_unverified_fulfillment: bool = False,
+        allow_over_cap: bool = False,
     ) -> OrderResult:
         """Submit a pre-built cart to Safeway.
 
@@ -209,6 +224,10 @@ class SafewayPipeline:
                 fulfillment gate for a cart whose fulfillment options
                 could not be confirmed with Safeway (explicit human
                 override, Issue #72). Defaults to False (safe/blocking).
+            allow_over_cap: If True, bypass the Issue #73 order-value
+                cap gate for a total exceeding ``order_value_cap``
+                (explicit human override). Defaults to False
+                (safe/blocking).
 
         Returns:
             OrderResult with confirmation or error details.
@@ -226,6 +245,7 @@ class SafewayPipeline:
             idempotency_key,
             allow_review_items=allow_review_items,
             allow_unverified_fulfillment=allow_unverified_fulfillment,
+            allow_over_cap=allow_over_cap,
         )
 
     def close(self) -> None:
@@ -252,6 +272,7 @@ class SafewayPipeline:
         *,
         allow_review_items: bool = False,
         allow_unverified_fulfillment: bool = False,
+        allow_over_cap: bool = False,
     ) -> OrderResult:
         """Submit a cart through the duplicate-order guard (Issue #61).
 
@@ -283,12 +304,15 @@ class SafewayPipeline:
                 fulfillment gate for a cart whose fulfillment options
                 could not be confirmed with Safeway (explicit human
                 override, Issue #72). Defaults to False (safe/blocking).
+            allow_over_cap: If True, bypass the Issue #73 order-value
+                cap gate (explicit human override). Defaults to False
+                (safe/blocking).
 
         Returns:
             OrderResult with confirmation, error, or DUPLICATE details.
         """
         if not cart.items and not cart.restock_items:
-            return self._order_service.submit_order(cart)
+            return self._order_service.submit_order(cart, allow_over_cap=allow_over_cap)
 
         if not allow_review_items:
             blocked = review_block_result(cart)
@@ -327,6 +351,7 @@ class SafewayPipeline:
             idempotency_key=key,
             allow_review_items=allow_review_items,
             allow_unverified_fulfillment=allow_unverified_fulfillment,
+            allow_over_cap=allow_over_cap,
         )
 
         self._finalize_submission(submission_id, result)

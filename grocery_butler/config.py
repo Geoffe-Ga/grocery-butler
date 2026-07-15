@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
@@ -18,6 +19,42 @@ if TYPE_CHECKING:
 
 class ConfigError(Exception):
     """Raised when required configuration is missing or invalid."""
+
+
+#: Issue #73: default Safeway order-value cap when
+#: ``SAFEWAY_ORDER_VALUE_CAP_USD`` is not set.
+DEFAULT_ORDER_VALUE_CAP = Decimal("300")
+
+
+def parse_order_value_cap(raw: str) -> Decimal:
+    """Parse and validate the Safeway order-value cap (Issue #73).
+
+    Shared by :func:`load_config` and callers (such as the API layer)
+    that need the cap without loading full application configuration
+    (e.g. without requiring ``ANTHROPIC_API_KEY``) — single source of
+    truth for the parsing/validation rules.
+
+    Args:
+        raw: Raw string value of ``SAFEWAY_ORDER_VALUE_CAP_USD``.
+
+    Returns:
+        The parsed, non-negative cap as a Decimal.
+
+    Raises:
+        ConfigError: If ``raw`` is not a valid decimal amount or is
+            negative.
+    """
+    try:
+        cap = Decimal(raw)
+    except InvalidOperation as err:
+        raise ConfigError(
+            f"SAFEWAY_ORDER_VALUE_CAP_USD must be a valid decimal amount, got: {raw!r}"
+        ) from err
+    if cap < 0:
+        raise ConfigError(
+            f"SAFEWAY_ORDER_VALUE_CAP_USD must not be negative, got: {raw!r}"
+        )
+    return cap
 
 
 @dataclass(frozen=True)
@@ -51,6 +88,10 @@ class Config:
     # API surface). Fail-safe default is off; opt in explicitly once the
     # live Safeway checkout flow has been verified.
     safeway_order_submission_enabled: bool = False
+
+    # Issue #73: order-value cap. Orders whose fee-inclusive total
+    # exceeds this amount are blocked unless explicitly overridden.
+    safeway_order_value_cap: Decimal = DEFAULT_ORDER_VALUE_CAP
 
 
 def load_config(env_path: str | Path | None = None) -> Config:
@@ -92,6 +133,9 @@ def load_config(env_path: str | Path | None = None) -> Config:
 
     database_url = os.getenv("DATABASE_URL", "")
 
+    order_value_cap_raw = os.getenv("SAFEWAY_ORDER_VALUE_CAP_USD", "300")
+    safeway_order_value_cap = parse_order_value_cap(order_value_cap_raw)
+
     return Config(
         anthropic_api_key=anthropic_api_key,
         discord_bot_token=os.getenv("DISCORD_BOT_TOKEN", ""),
@@ -108,4 +152,5 @@ def load_config(env_path: str | Path | None = None) -> Config:
             "SAFEWAY_ORDER_SUBMISSION_ENABLED", "false"
         ).lower()
         in ("true", "1", "yes"),
+        safeway_order_value_cap=safeway_order_value_cap,
     )

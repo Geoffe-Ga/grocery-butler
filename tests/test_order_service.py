@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -145,6 +146,49 @@ def _make_cart(
         recommended_fulfillment=FulfillmentType.PICKUP,
         estimated_total=subtotal,
         fulfillment_unverified=fulfillment_unverified,
+    )
+
+
+def _make_cart_with_fee(
+    items: list[CartItem] | None = None,
+    fee: float = 5.99,
+    recommended: FulfillmentType = FulfillmentType.PICKUP,
+) -> CartSummary:
+    """Create a test CartSummary whose recommended fulfillment option has a fee.
+
+    Unlike :func:`_make_cart` (fee always 0.0), this pins a non-zero fee
+    on the recommended fulfillment option so tests can verify
+    ``compute_cart_total`` includes it (issue #73). ``estimated_total``
+    and ``subtotal`` deliberately omit the fee, matching the shape of a
+    cart built by today's (buggy) pipeline.
+
+    Args:
+        items: Regular cart items (defaults to a single $8.99 item).
+        fee: Fee for the recommended (pickup) fulfillment option.
+        recommended: Fulfillment type the cart recommends.
+
+    Returns:
+        CartSummary with a non-zero recommended-fulfillment fee.
+    """
+    cart_items = [_make_cart_item()] if items is None else items
+    subtotal = sum(i.estimated_cost for i in cart_items)
+    return CartSummary(
+        items=cart_items,
+        failed_items=[],
+        substituted_items=[],
+        skipped_items=[],
+        restock_items=[],
+        subtotal=subtotal,
+        fulfillment_options=[
+            FulfillmentOption(
+                type=FulfillmentType.PICKUP,
+                available=True,
+                fee=fee,
+                windows=[],
+            ),
+        ],
+        recommended_fulfillment=recommended,
+        estimated_total=subtotal,
     )
 
 
@@ -1287,3 +1331,158 @@ class TestSubmitOrderClientOrderId:
 
         _args, kwargs = mock_client.post.call_args
         assert kwargs.get("retry_on_auth_failure") is False
+
+
+# ------------------------------------------------------------------
+# Issue #73: compute_cart_total — fee-inclusive, server-trusted total
+#
+# grocery_butler.order_service.compute_cart_total does not exist yet, so
+# it is imported locally inside each test body (matching the file's
+# existing convention for names introduced test-first, e.g. OrderOutcome
+# above) rather than at module scope, where the ImportError would break
+# collection of every other test in this file.
+# ------------------------------------------------------------------
+
+
+class TestComputeCartTotal:
+    """Tests for order_service.compute_cart_total (issue #73)."""
+
+    def test_compute_cart_total_includes_recommended_fulfillment_fee(self) -> None:
+        """Test the total sums item costs plus the recommended fulfillment fee.
+
+        Today's ``_cart_total`` helper in ``api.py`` sums only item and
+        restock costs and never looks at ``fulfillment_options`` at all,
+        so a cart with a $0.005 pickup fee on top of an $8.99 item would
+        total $8.99 instead of the correct fee-inclusive $9.00. This also
+        pins cents quantization: 8.99 + 0.005 = 8.995, which rounds
+        half-up to 9.00.
+        """
+        from grocery_butler.order_service import compute_cart_total
+
+        cart = _make_cart_with_fee(fee=0.005)
+
+        result = compute_cart_total(cart)
+
+        assert result == Decimal("9.00")
+
+    def test_compute_cart_total_no_matching_option_is_items_only(self) -> None:
+        """Test the fee is 0 when no fulfillment option matches the recommended type.
+
+        The cart recommends DELIVERY but ``fulfillment_options`` only
+        contains a PICKUP entry, so there is no fee to add.
+        """
+        from grocery_butler.order_service import compute_cart_total
+
+        cart = _make_cart_with_fee(fee=5.99, recommended=FulfillmentType.DELIVERY)
+
+        result = compute_cart_total(cart)
+
+        assert result == Decimal("8.99")
+
+    def test_compute_cart_total_ignores_client_supplied_totals(self) -> None:
+        """Test the total derives from items+fee, never subtotal/estimated_total.
+
+        A cart whose ``subtotal``/``estimated_total`` fields have been
+        tampered with (e.g. a client-supplied cart payload) must not
+        leak into ``compute_cart_total``'s answer — it must derive its
+        result solely from ``items``, ``restock_items``, and the
+        recommended fulfillment option's fee.
+        """
+        from grocery_butler.order_service import compute_cart_total
+
+        cart = _make_cart_with_fee(fee=1.00)
+        tampered = cart.model_copy(
+            update={"subtotal": 999999.99, "estimated_total": 999999.99}
+        )
+
+        result = compute_cart_total(tampered)
+
+        assert result == Decimal("9.99")
+
+
+# ------------------------------------------------------------------
+# Issue #73: OrderService order-value cap preflight gate
+#
+# OrderService.__init__ does not accept order_value_cap yet, so
+# constructing the service below raises TypeError — the acceptable RED
+# for a not-yet-existing constructor keyword argument.
+# ------------------------------------------------------------------
+
+
+class TestSubmitOrderValueCap:
+    """Tests for the Issue #73 order-value cap preflight gate."""
+
+    def _make_service(
+        self,
+        *,
+        order_value_cap: Decimal = Decimal("300"),
+        api_response: dict[str, Any] | None = None,
+    ) -> OrderService:
+        """Create a submission-enabled OrderService with the given cap.
+
+        Args:
+            order_value_cap: Cap forwarded to the constructor.
+            api_response: Response the mocked client should return if
+                the submission is allowed to proceed.
+
+        Returns:
+            OrderService wired to mocked client/pantry dependencies.
+        """
+        mock_client = MagicMock()
+        mock_client.post.return_value = api_response or {
+            "orderId": "ORD-CAP",
+            "status": "confirmed",
+            "total": 8.99,
+        }
+        mock_pantry = MagicMock()
+        mock_pantry.mark_restocked.return_value = 0
+        return OrderService(
+            mock_client,
+            mock_pantry,
+            submission_enabled=True,
+            order_value_cap=order_value_cap,
+        )
+
+    def _make_priced_cart(self, price: float) -> CartSummary:
+        """Return a single-item cart totalling exactly ``price``."""
+        item = _make_cart_item(price=price)
+        return _make_cart(items=[item])
+
+    def test_submit_order_blocks_when_total_exceeds_cap(self) -> None:
+        """Test a cart over the cap is blocked before any client call.
+
+        No HTTP post should occur and the error message must mention
+        the cap.
+        """
+        service = self._make_service(order_value_cap=Decimal("300"))
+        cart = self._make_priced_cart(350.00)
+
+        result = service.submit_order(cart)
+
+        assert result.success is False
+        assert "cap" in result.error_message.lower()
+        service._client.post.assert_not_called()
+
+    def test_submit_order_allows_over_cap_with_override(self) -> None:
+        """Test allow_over_cap=True is an explicit human override of the cap gate."""
+        service = self._make_service(order_value_cap=Decimal("300"))
+        cart = self._make_priced_cart(350.00)
+
+        result = service.submit_order(cart, allow_over_cap=True)
+
+        assert result.success is True
+        service._client.post.assert_called_once()
+
+    def test_submit_order_under_cap_proceeds(self) -> None:
+        """Test a total exactly equal to the cap is not blocked.
+
+        The cap gate must be exclusive: it blocks only when the total is
+        strictly greater than the cap.
+        """
+        service = self._make_service(order_value_cap=Decimal("300"))
+        cart = self._make_priced_cart(300.00)
+
+        result = service.submit_order(cart)
+
+        assert result.success is True
+        service._client.post.assert_called_once()
