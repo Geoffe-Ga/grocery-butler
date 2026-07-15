@@ -284,6 +284,8 @@ class TestOrderValueCap:
             "ANTHROPIC_API_KEY": "sk-test",
             "SAFEWAY_ORDER_VALUE_CAP_USD": raw_value,
         }
-        with patch.dict(os.environ, env, clear=True):
-            with pytest.raises(ConfigError, match="SAFEWAY_ORDER_VALUE_CAP_USD"):
-                load_config()
+        with (
+            patch.dict(os.environ, env, clear=True),
+            pytest.raises(ConfigError, match="SAFEWAY_ORDER_VALUE_CAP_USD"),
+        ):
+            load_config()

@@ -48,8 +48,7 @@ def parse_order_value_cap(raw: str) -> Decimal:
         cap = Decimal(raw)
     except InvalidOperation as err:
         raise ConfigError(
-            "SAFEWAY_ORDER_VALUE_CAP_USD must be a valid decimal amount, "
-            f"got: {raw!r}"
+            f"SAFEWAY_ORDER_VALUE_CAP_USD must be a valid decimal amount, got: {raw!r}"
         ) from err
     if cap < 0:
         raise ConfigError(

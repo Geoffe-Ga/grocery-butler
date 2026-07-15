@@ -454,9 +454,7 @@ class TestOrderPreview:
         with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
             response = client.post(
                 "/api/v1/order/preview",
-                json={
-                    "shopping_list": [_make_shopping_item().model_dump(mode="json")]
-                },
+                json={"shopping_list": [_make_shopping_item().model_dump(mode="json")]},
                 headers=auth_headers,
             )
 

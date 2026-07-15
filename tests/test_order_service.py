@@ -1380,7 +1380,7 @@ class TestComputeCartTotal:
         assert result == Decimal("8.99")
 
     def test_compute_cart_total_ignores_client_supplied_totals(self) -> None:
-        """Test the total is computed from items+fee, never cart.subtotal/estimated_total.
+        """Test the total derives from items+fee, never subtotal/estimated_total.
 
         A cart whose ``subtotal``/``estimated_total`` fields have been
         tampered with (e.g. a client-supplied cart payload) must not

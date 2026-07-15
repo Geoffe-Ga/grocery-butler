@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from grocery_butler.cart_builder import CartBuilder
@@ -33,6 +32,8 @@ from grocery_butler.safeway_client import SafewayClient
 from grocery_butler.substitution_service import SubstitutionService
 
 if TYPE_CHECKING:
+    from decimal import Decimal
+
     from grocery_butler.config import Config
     from grocery_butler.models import CartSummary, ShoppingListItem
 
@@ -311,9 +312,7 @@ class SafewayPipeline:
             OrderResult with confirmation, error, or DUPLICATE details.
         """
         if not cart.items and not cart.restock_items:
-            return self._order_service.submit_order(
-                cart, allow_over_cap=allow_over_cap
-            )
+            return self._order_service.submit_order(cart, allow_over_cap=allow_over_cap)
 
         if not allow_review_items:
             blocked = review_block_result(cart)

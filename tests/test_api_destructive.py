@@ -525,9 +525,7 @@ class TestOrderSubmitTotalValidationAndCap:
         """
         body = _order_body()
         body["total"] = bad_total
-        response = client.post(
-            "/api/v1/order/submit", json=body, headers=auth_headers
-        )
+        response = client.post("/api/v1/order/submit", json=body, headers=auth_headers)
         assert response.status_code == 400
         assert "total" in response.get_json()["error"].lower()
 
