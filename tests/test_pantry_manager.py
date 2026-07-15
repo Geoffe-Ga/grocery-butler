@@ -658,6 +658,48 @@ class TestParseInventoryIntent:
         assert result[1].ingredient == "eggs"
         assert result[1].new_status == InventoryStatus.LOW
 
+    def test_valid_json_response_wrapped_in_markdown_fence_parses(
+        self, db_path: str
+    ) -> None:
+        """Test parse succeeds when Claude wraps JSON in ```json fences.
+
+        Regression test for issue #79: `_call_claude_with_retry` calls
+        `_parse_claude_response`, which calls `json.loads` directly on the
+        raw response text instead of stripping markdown fences via
+        `grocery_butler.claude_utils.extract_json_text` first. A fenced
+        response should still parse into the same updates a bare JSON
+        array would, not silently drop them.
+        """
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_content = MagicMock()
+        payload = json.dumps(
+            [
+                {
+                    "ingredient": "milk",
+                    "new_status": "out",
+                    "confidence": 0.95,
+                },
+                {
+                    "ingredient": "eggs",
+                    "new_status": "low",
+                    "confidence": 0.90,
+                },
+            ]
+        )
+        mock_content.text = f"```json\n{payload}\n```"
+        mock_response.content = [mock_content]
+        mock_client.messages.create.return_value = mock_response
+
+        pm = PantryManager(db_path, anthropic_client=mock_client)
+        result = pm.parse_inventory_intent("we're out of milk and low on eggs")
+
+        assert len(result) == 2
+        assert result[0].ingredient == "milk"
+        assert result[0].new_status == InventoryStatus.OUT
+        assert result[1].ingredient == "eggs"
+        assert result[1].new_status == InventoryStatus.LOW
+
     def test_filters_low_confidence(self, db_path: str) -> None:
         """Test parse filters out results with confidence < 0.8."""
         mock_client = MagicMock()

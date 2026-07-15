@@ -452,7 +452,10 @@ def post_recipes_save() -> tuple[Response, int]:
         purchase_items=[i for i in ingredients if not i.is_pantry_item],
         pantry_items=[i for i in ingredients if i.is_pantry_item],
     )
-    recipe_id = store.save_recipe(meal)
+    try:
+        recipe_id = store.save_recipe(meal)
+    except IntegrityError:
+        abort(409, description="recipe with that name exists")
     return jsonify(id=recipe_id, **meal.model_dump(mode="json")), 201
 
 
