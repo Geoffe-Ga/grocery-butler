@@ -830,6 +830,277 @@ class TestBuildCart:
 
 
 # ------------------------------------------------------------------
+# Tests: CartBuilder.build_cart substitution pricing (issue #70)
+# ------------------------------------------------------------------
+#
+# Regression guards for issue #70: build_cart routed out-of-stock items
+# into substituted_items with the best alternative auto-selected, but
+# never converted that selected substitute into a priced CartItem, so
+# it was silently dropped from the submitted order (never priced into
+# the subtotal, never serialized into the order payload). Per the
+# chief-architect's ruling, a selected substitution must become a
+# CartItem in cart.items, always flagged needs_review=True with
+# review_reason="substitution" (a human must confirm substitutions),
+# while still appearing in substituted_items as a display/provenance
+# record. A SubstitutionResult with no selected alternative must remain
+# display-only.
+
+
+def _make_alt_substitution_result(alt_product: SafewayProduct) -> SubstitutionResult:
+    """Build a SubstitutionResult with one alternative, pre-selection.
+
+    Mirrors what SubstitutionService.find_substitutions would return
+    before CartBuilder._handle_out_of_stock sets ``selected`` to the
+    first alternative.
+
+    Args:
+        alt_product: The alternative product to offer as a substitute.
+
+    Returns:
+        SubstitutionResult with one alternative and ``selected`` unset
+        (CartBuilder sets ``selected`` internally).
+    """
+    alt_option = SubstitutionOption(
+        product=alt_product,
+        suitability=SubstitutionSuitability.GOOD,
+        reasoning="Similar cut",
+    )
+    return SubstitutionResult(
+        status="alternatives_found",
+        original_item=_make_item(),
+        alternatives=[alt_option],
+        message="Found 1 alternative(s)",
+    )
+
+
+class TestBuildCartSubstitutionPricing:
+    """Tests for CartBuilder.build_cart pricing selected substitutions."""
+
+    def _make_builder(
+        self,
+        sub_result: SubstitutionResult,
+        oos_product: SafewayProduct | None = None,
+        fulfillment_response: dict | None = None,
+    ) -> CartBuilder:
+        """Create a CartBuilder wired for an out-of-stock + substitution flow.
+
+        Args:
+            sub_result: SubstitutionResult the mocked substitution service
+                returns for the out-of-stock item.
+            oos_product: The primary out-of-stock product returned by
+                search/selection. Defaults to a standard OOS product.
+            fulfillment_response: Fulfillment API response for the mocked
+                Safeway client.
+
+        Returns:
+            CartBuilder with mocked search, selector, substitution, and
+            client services.
+        """
+        oos = oos_product or _make_product(in_stock=False)
+        item = _make_item()
+
+        mock_search = MagicMock()
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = [oos]
+
+        mock_selector = MagicMock()
+        mock_selector.select_product.return_value = _MockSelectionResult(
+            item=item,
+            product=oos,
+            reasoning="Test selection",
+        )
+
+        mock_substitution = MagicMock()
+        mock_substitution.find_substitutions.return_value = sub_result
+
+        mock_client = MagicMock()
+        mock_client.store_id = "1234"
+        mock_client.get.return_value = fulfillment_response or {}
+
+        return CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+
+    def test_selected_substitution_added_to_cart_items(self) -> None:
+        """Test a selected substitution is converted into a CartItem.
+
+        Regression guard for issue #70: the selected substitute must
+        appear in ``cart.items`` with the substitute product, correct
+        quantity, and correctly priced cost — not silently dropped.
+        """
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = _make_alt_substitution_result(alt_product)
+        builder = self._make_builder(sub_result)
+
+        cart = builder.build_cart([_make_item()])
+
+        assert len(cart.items) == 1
+        substitute_item = cart.items[0]
+        assert substitute_item.safeway_product.product_id == "ALT1"
+        assert substitute_item.quantity_to_order == 2
+        assert substitute_item.estimated_cost == round(10.99 * 2, 2)
+
+    def test_substitution_priced_into_subtotal(self) -> None:
+        """Test the substitute's cost is included in cart.subtotal."""
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = _make_alt_substitution_result(alt_product)
+        builder = self._make_builder(sub_result)
+
+        cart = builder.build_cart([_make_item()])
+
+        assert cart.subtotal == round(10.99 * 2, 2)
+
+    def test_substitution_flagged_for_review(self) -> None:
+        """Test the substitute CartItem is always flagged for review.
+
+        Per the chief-architect's ruling, a human must confirm every
+        substitution before it is submitted, regardless of whether the
+        quantity math itself needed review.
+        """
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = _make_alt_substitution_result(alt_product)
+        builder = self._make_builder(sub_result)
+
+        cart = builder.build_cart([_make_item()])
+
+        assert len(cart.items) == 1
+        substitute_item = cart.items[0]
+        assert substitute_item.needs_review is True
+        assert substitute_item.review_reason == "substitution"
+
+    def test_estimated_total_includes_substitution(self) -> None:
+        """Test estimated_total includes the substitute's contribution.
+
+        The substitute's cost must flow through subtotal and into
+        estimated_total alongside the fulfillment fee, exactly like any
+        other priced cart item.
+        """
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = _make_alt_substitution_result(alt_product)
+        fulfillment_response = {
+            "fulfillmentOptions": [
+                {"type": "pickup", "available": False, "fee": 0.0, "windows": []},
+                {
+                    "type": "delivery",
+                    "available": True,
+                    "fee": 9.95,
+                    "windows": [],
+                },
+            ]
+        }
+        builder = self._make_builder(
+            sub_result, fulfillment_response=fulfillment_response
+        )
+
+        cart = builder.build_cart([_make_item()])
+
+        expected_subtotal = round(10.99 * 2, 2)
+        assert cart.recommended_fulfillment == FulfillmentType.DELIVERY
+        assert cart.estimated_total == round(expected_subtotal + 9.95, 2)
+
+    def test_substitution_still_listed_in_substituted_items(self) -> None:
+        """Test substituted_items still records the substitution (regression).
+
+        The provenance record in ``substituted_items`` must remain
+        populated exactly as before — pricing the substitute into
+        ``items`` must not remove it from the display list.
+        """
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = _make_alt_substitution_result(alt_product)
+        builder = self._make_builder(sub_result)
+
+        cart = builder.build_cart([_make_item()])
+
+        assert len(cart.substituted_items) == 1
+        recorded = cart.substituted_items[0]
+        assert recorded.selected is not None
+        assert recorded.selected.product.product_id == "ALT1"
+
+    def test_substitution_priced_into_unverified_fulfillment_cart(self) -> None:
+        """Test a substitute is still priced when fulfillment is unverified.
+
+        Composition of issues #70 and #72: when the fulfillment fetch
+        fails, the cart must be flagged ``fulfillment_unverified=True``
+        with no fabricated options (issue #72), while the selected
+        substitute is still converted into a priced, review-flagged
+        ``CartItem`` (issue #70). The estimated total must equal the
+        substitute's subtotal exactly -- no invented fulfillment fee.
+        """
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = _make_alt_substitution_result(alt_product)
+        builder = self._make_builder(sub_result)
+        builder._client.get.side_effect = Exception("API down")
+
+        cart = builder.build_cart([_make_item()])
+
+        assert cart.fulfillment_unverified is True
+        assert cart.fulfillment_options == []
+        assert len(cart.items) == 1
+        substitute_item = cart.items[0]
+        assert substitute_item.safeway_product.product_id == "ALT1"
+        assert substitute_item.needs_review is True
+        assert substitute_item.review_reason == "substitution"
+        assert cart.subtotal == round(10.99 * 2, 2)
+        assert cart.estimated_total == cart.subtotal
+
+    def test_no_alternative_substitution_not_added_to_items(self) -> None:
+        """Test a substitution with no alternatives stays display-only.
+
+        When SubstitutionService finds no alternatives, ``selected``
+        stays ``None`` and nothing should be added to ``items`` or
+        priced into ``subtotal`` — only ``substituted_items`` records
+        the failed substitution attempt.
+        """
+        no_alt_result = SubstitutionResult(
+            status="no_alternatives",
+            original_item=_make_item(),
+            alternatives=[],
+            message="No alternatives",
+        )
+        builder = self._make_builder(no_alt_result)
+
+        cart = builder.build_cart([_make_item()])
+
+        assert cart.items == []
+        assert cart.subtotal == 0.0
+        assert len(cart.substituted_items) == 1
+        assert cart.substituted_items[0].selected is None
+
+
+# ------------------------------------------------------------------
 # Tests: CartBuilder cache-hit / cache-miss flow (issue #71)
 # ------------------------------------------------------------------
 #
@@ -1059,3 +1330,61 @@ class TestCartBuilderCacheFlow:
 
         assert len(result.failed_items) == 1
         mock_search.save_mapping.assert_not_called()
+
+    def test_cache_hit_out_of_stock_substitute_priced_into_items(self) -> None:
+        """Test a cache-hit substitution becomes a priced, review-flagged item.
+
+        Composition guard for issues #70 and #71: an out-of-stock
+        reverified cache hit must flow through the substitution service
+        (issue #71), and the selected substitute must then be converted
+        into a priced ``needs_review=True`` cart item (issue #70) rather
+        than being silently dropped from the order.
+        """
+        item = _make_item(quantity=2.0, unit="lb")
+        cached_product = _make_product(product_id="CACHED1", in_stock=True)
+        reverified = _make_product(product_id="CACHED1", in_stock=False)
+        cached = _make_cached_mapping(cached_product)
+        alt_product = _make_product(
+            product_id="ALT1",
+            name="Organic Chicken Thighs",
+            price=10.99,
+            size="1 lb",
+        )
+        sub_result = SubstitutionResult(
+            status="alternatives_found",
+            original_item=item,
+            alternatives=[
+                SubstitutionOption(
+                    product=alt_product,
+                    suitability=SubstitutionSuitability.GOOD,
+                    reasoning="Similar cut",
+                )
+            ],
+            message="Found 1 alternative(s)",
+        )
+
+        mock_search, mock_selector, mock_substitution, mock_client = (
+            self._make_dependencies()
+        )
+        mock_search.get_cached_product.return_value = cached
+        mock_search.reverify_product.return_value = reverified
+        mock_substitution.find_substitutions.return_value = sub_result
+
+        builder = CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+        result = builder.build_cart([item])
+
+        mock_substitution.find_substitutions.assert_called_once_with(item, reverified)
+        assert len(result.items) == 1
+        substitute_item = result.items[0]
+        assert substitute_item.safeway_product.product_id == "ALT1"
+        assert substitute_item.needs_review is True
+        assert substitute_item.review_reason == "substitution"
+        assert substitute_item.quantity_to_order == 2
+        assert substitute_item.estimated_cost == round(10.99 * 2, 2)
+        assert result.subtotal == round(10.99 * 2, 2)
+        assert result.substituted_items == [sub_result]

@@ -440,12 +440,14 @@ class CartItem(BaseModel):
         safeway_product: The matched Safeway product.
         quantity_to_order: Number of product units to order.
         estimated_cost: Estimated cost for ``quantity_to_order`` units.
-        needs_review: Whether the quantity calculation needs human review
-            (e.g. an unparseable product size, incomparable units, or a
-            quantity capped by the per-item maximum).
+        needs_review: Whether the item needs human review (e.g. an
+            unparseable product size, incomparable units, a quantity
+            capped by the per-item maximum, or an auto-selected
+            substitution).
         review_reason: Machine-readable reason code for ``needs_review``
-            (``"unparseable_size"``, ``"incomparable_units"``, or
-            ``"quantity_capped"``), or ``""`` when no review is needed.
+            (``"unparseable_size"``, ``"incomparable_units"``,
+            ``"quantity_capped"``, or ``"substitution"``), or ``""``
+            when no review is needed.
     """
 
     shopping_list_item: ShoppingListItem
