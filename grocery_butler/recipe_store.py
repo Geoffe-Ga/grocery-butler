@@ -490,6 +490,36 @@ class RecipeStore:
         finally:
             conn.close()
 
+    def set_preferences(self, values: dict[str, str]) -> int:
+        """Set multiple preferences atomically (all-or-nothing).
+
+        Uses a single connection and a single commit for every key
+        (issue #75, W5), unlike a per-key loop over :meth:`set_preference`
+        -- a failure partway through leaves the store completely
+        untouched instead of half-applied, since nothing is committed
+        until every upsert has succeeded.
+
+        Args:
+            values: Mapping of preference keys to their new values.
+
+        Returns:
+            Number of preferences upserted.
+        """
+        conn = self._connect()
+        try:
+            for key, value in values.items():
+                result = conn.execute(
+                    "INSERT INTO preferences (key, value) VALUES (?, ?)"
+                    " ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+                    " RETURNING key",
+                    (key, value),
+                )
+                result.fetchall()  # drain RETURNING so commit sees no open cursor
+            conn.commit()
+            return len(values)
+        finally:
+            conn.close()
+
     def get_all_preferences(self) -> dict[str, str]:
         """Return all preferences as a dict.
 
