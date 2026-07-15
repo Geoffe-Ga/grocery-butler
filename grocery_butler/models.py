@@ -11,7 +11,7 @@ import logging
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -440,6 +440,9 @@ class CartItem(BaseModel):
         safeway_product: The matched Safeway product.
         quantity_to_order: Number of product units to order.
         estimated_cost: Estimated cost for ``quantity_to_order`` units.
+            Must be finite — JSON's non-standard ``Infinity``/``NaN``
+            literals are rejected at validation (issue #73), keeping
+            non-finite values out of server-side total computation.
         needs_review: Whether the item needs human review (e.g. an
             unparseable product size, incomparable units, a quantity
             capped by the per-item maximum, or an auto-selected
@@ -453,17 +456,22 @@ class CartItem(BaseModel):
     shopping_list_item: ShoppingListItem
     safeway_product: SafewayProduct
     quantity_to_order: int
-    estimated_cost: float
+    estimated_cost: float = Field(allow_inf_nan=False)
     needs_review: bool = False
     review_reason: str = ""
 
 
 class FulfillmentOption(BaseModel):
-    """A fulfillment option (pickup or delivery) with scheduling."""
+    """A fulfillment option (pickup or delivery) with scheduling.
+
+    The ``fee`` must be finite — JSON's non-standard ``Infinity``/``NaN``
+    literals are rejected at validation (issue #73), keeping non-finite
+    values out of server-side total computation.
+    """
 
     type: FulfillmentType
     available: bool
-    fee: float
+    fee: float = Field(allow_inf_nan=False)
     windows: list[dict[str, Any]]
     next_window: str | None = None
 
@@ -477,12 +485,14 @@ class CartSummary(BaseModel):
         substituted_items: Out-of-stock items with substitution results.
         skipped_items: Items explicitly skipped by the caller.
         restock_items: Restock-queue cart items.
-        subtotal: Sum of all item costs before fulfillment fees.
+        subtotal: Sum of all item costs before fulfillment fees. Must
+            be finite (issue #73).
         fulfillment_options: Fulfillment options fetched from Safeway, or
             an empty list when the fetch failed (see
             ``fulfillment_unverified``).
         recommended_fulfillment: The recommended fulfillment type.
         estimated_total: Subtotal plus the recommended fulfillment fee.
+            Must be finite (issue #73).
         fulfillment_unverified: True when Safeway's fulfillment options
             could not be fetched, so ``fulfillment_options`` is empty and
             ``estimated_total`` excludes any fulfillment fee (issue #72).
@@ -497,10 +507,10 @@ class CartSummary(BaseModel):
     substituted_items: list[SubstitutionResult]
     skipped_items: list[ShoppingListItem] = []
     restock_items: list[CartItem]
-    subtotal: float
+    subtotal: float = Field(allow_inf_nan=False)
     fulfillment_options: list[FulfillmentOption]
     recommended_fulfillment: FulfillmentType
-    estimated_total: float
+    estimated_total: float = Field(allow_inf_nan=False)
     fulfillment_unverified: bool = False
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -243,3 +244,48 @@ class TestLoadConfig:
         with patch.dict(os.environ, env, clear=True):
             cfg = load_config()
         assert cfg.safeway_order_submission_enabled is expected
+
+
+class TestOrderValueCap:
+    """Tests for the Issue #73 order-value cap config field.
+
+    ``Config.safeway_order_value_cap`` does not exist yet, so reading it
+    below raises ``AttributeError`` — the acceptable RED for a
+    not-yet-existing config field.
+    """
+
+    def test_order_value_cap_defaults_to_300(self) -> None:
+        """Test Config.safeway_order_value_cap defaults to $300."""
+        cfg = Config(anthropic_api_key="sk-test")
+        assert cfg.safeway_order_value_cap == Decimal("300")
+
+    @patch.dict(
+        os.environ,
+        {
+            "ANTHROPIC_API_KEY": "sk-test",
+            "SAFEWAY_ORDER_VALUE_CAP_USD": "150.50",
+        },
+        clear=True,
+    )
+    def test_order_value_cap_reads_env(self) -> None:
+        """Test load_config parses SAFEWAY_ORDER_VALUE_CAP_USD as a Decimal."""
+        cfg = load_config()
+        assert cfg.safeway_order_value_cap == Decimal("150.50")
+
+    @pytest.mark.parametrize("raw_value", ["abc", "-5"])
+    def test_order_value_cap_invalid_raises_config_error(self, raw_value: str) -> None:
+        """Test a non-numeric or negative cap value raises ConfigError.
+
+        Today load_config performs no validation at all on this env var
+        (it isn't even read), so this currently fails with "DID NOT
+        RAISE" rather than a real ConfigError.
+        """
+        env = {
+            "ANTHROPIC_API_KEY": "sk-test",
+            "SAFEWAY_ORDER_VALUE_CAP_USD": raw_value,
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            pytest.raises(ConfigError, match="SAFEWAY_ORDER_VALUE_CAP_USD"),
+        ):
+            load_config()
