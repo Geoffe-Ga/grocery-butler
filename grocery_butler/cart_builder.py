@@ -21,6 +21,8 @@ from grocery_butler.models import (
     ShoppingListItem,
     SubstitutionResult,
 )
+from grocery_butler.product_search import ProductSearchError
+from grocery_butler.safeway_client import SafewayAPIError
 from grocery_butler.units import convert, parse_size
 
 if TYPE_CHECKING:
@@ -179,12 +181,52 @@ class CartBuilder:
     ) -> CartItem | SubstitutionResult | None:
         """Process a single shopping list item into a cart item.
 
+        A ``ProductSearchError`` or ``SafewayAPIError`` raised while
+        resolving, substituting, or otherwise handling this item is
+        recoverable at the per-item level -- it means this one item
+        couldn't be sourced, not that the whole cart build should
+        abort (issue #76) -- so it's caught here and logged. A
+        ``SafewayAuthError`` is deliberately *not* caught: an
+        authentication failure dooms every subsequent request, not
+        just this item, so it propagates to the caller rather than
+        being masked as a single failed item.
+
+        Args:
+            item: The shopping list item to process.
+
+        Returns:
+            CartItem if successful, SubstitutionResult if substituted,
+            or None if no product was found or a recoverable search/API
+            error occurred while processing the item (logged as a
+            warning).
+        """
+        try:
+            return self._build_cart_result(item)
+        except (ProductSearchError, SafewayAPIError) as exc:
+            logger.warning(
+                "Search failed for '%s'; adding to failed items: %s",
+                item.search_term,
+                exc,
+            )
+            return None
+
+    def _build_cart_result(
+        self,
+        item: ShoppingListItem,
+    ) -> CartItem | SubstitutionResult | None:
+        """Resolve a shopping list item into a cart item, without error handling.
+
         Args:
             item: The shopping list item to process.
 
         Returns:
             CartItem if successful, SubstitutionResult if substituted,
             or None if no product found.
+
+        Raises:
+            ProductSearchError: If product search fails.
+            SafewayAPIError: If a Safeway API call fails.
+            SafewayAuthError: If Safeway authentication fails.
         """
         product = self._resolve_product(item)
         if product is None:
