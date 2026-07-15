@@ -518,6 +518,33 @@ class TestMigration007ProductMappingStockSize:
         assert migrate(db_path) == 0
 
 
+class TestMigration008PendingActionsResolver:
+    """Tests for migration 008 (pending_actions.resolver column, issue #75).
+
+    W1: confirm/deny routes must record which caller resolved a staged
+    action. This nullable column is the audit trail for that caller
+    (rows resolved by the system, e.g. TTL expiry, leave it NULL).
+    """
+
+    def test_migration_008_adds_resolver_column(self, db_path: str) -> None:
+        """Test migrate() adds a nullable resolver column to pending_actions.
+
+        Running migrate() a second time afterwards must apply zero
+        additional migrations (idempotency).
+        """
+        migrate(db_path)
+
+        conn = get_connection(db_path)
+        try:
+            cursor = conn.execute("PRAGMA table_info(pending_actions)")
+            columns = {row["name"] for row in cursor.fetchall()}
+        finally:
+            conn.close()
+
+        assert "resolver" in columns
+        assert migrate(db_path) == 0
+
+
 class TestCLI:
     """Tests for the CLI entry point."""
 

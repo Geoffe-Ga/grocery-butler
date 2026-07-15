@@ -465,15 +465,23 @@ unchanged. The blueprint lives in `grocery_butler/api.py` and is registered by
   `grocery_butler.auth_middleware.mint_token`. An unauthenticated
   `GET /healthz` liveness probe is exempt.
 - **Surface:** read endpoints (`/inventory`, `/pantry`, `/recipes`, `/brands`,
-  `/preferences`, `/restock`), compute previews (`/meals/parse`,
-  `/shopping-list/preview`, `/order/preview`), low-stakes writes
-  (`/stock/update`, `/stock/add`, `/restock/clear`, `/recipes/save`,
-  `DELETE /recipes/<id>`), and staged destructive actions (`/order/submit`,
-  `/brands/set`, `/preferences/set` → `/actions/confirm` / `/actions/deny`
-  against the `pending_actions` audit table).
+  `/preferences`, `/restock`, `/actions`, `/actions/<action_id>`), compute
+  previews (`/meals/parse`, `/shopping-list/preview`, `/order/preview`),
+  low-stakes writes (`/stock/update`, `/stock/add`, `/restock/clear`,
+  `/recipes/save`, `DELETE /recipes/<id>`), and staged destructive actions
+  (`/order/submit`, `/brands/set`, `/preferences/set` → `/actions/confirm` /
+  `/actions/deny` against the `pending_actions` audit table). `GET /actions`
+  lists staged/resolved actions (`?limit=`, default 50, cap 200; `?status=`
+  filter), sweeping past-due pending rows to `expired` first -- the three
+  staging routes (`/order/submit`, `/brands/set`, `/preferences/set`) sweep
+  on write too, so a row never sits `pending` past its TTL just because the
+  audit log went unread; `GET /actions/<action_id>` returns one action or a
+  JSON 404.
 - **Safety:** destructive actions follow draft → confirm → execute. Staging
   returns a `pending_confirmation` action id with a 5-minute expiry; nothing
   executes until RubotPaul confirms after Geoff replies "confirm" in chat.
+  Resolved actions record a terminal status of `approved`, `denied`,
+  `expired`, or `failed` (a claimed order whose Safeway submission failed).
 
 ### Discord Bot Commands
 

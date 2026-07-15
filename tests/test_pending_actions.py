@@ -330,7 +330,15 @@ class TestExpirySemantics:
     def test_deadline_passing_does_not_change_status(
         self, store: PendingActionsStore
     ) -> None:
-        """Test rows stay 'pending' until explicitly marked expired."""
+        """Test rows stay 'pending' until explicitly swept or resolved.
+
+        Issue #75 (W4): a past-due row is *not* auto-resolved just by
+        being read -- only an explicit :meth:`PendingActionsStore.sweep_expired`
+        call (or a direct resolution) transitions it. This extends the
+        original "no implicit sweeper" pin with the new explicit-sweep
+        half of the contract, rather than replacing it, since both
+        halves still hold under the new sweep semantics.
+        """
         past = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=1)
         store.insert_pending_action(
             action_id="e5",
@@ -342,6 +350,366 @@ class TestExpirySemantics:
         assert action is not None
         assert action.status is PendingActionStatus.PENDING
         assert action.is_expired() is True
+
+        # Only an explicit sweep flips the row.
+        assert store.sweep_expired() == 1
+        swept = store.get_pending_action("e5")
+        assert swept is not None
+        assert swept.status is PendingActionStatus.EXPIRED
+
+
+# ---------------------------------------------------------------------------
+# W1 (issue #75): requester/resolver persistence
+# ---------------------------------------------------------------------------
+
+
+class TestRequesterAndResolver:
+    """Tests for requester/resolver persistence (W1, issue #75)."""
+
+    def test_insert_pending_action_resolver_defaults_to_none(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test a freshly staged action has no resolver yet."""
+        action = store.insert_pending_action(
+            action_id="rr1",
+            kind="brands_set",
+            payload={},
+            expires_at=_in_five_minutes(),
+        )
+        assert action.resolver is None
+
+    def test_mark_approved_records_resolver(self, store: PendingActionsStore) -> None:
+        """Test approving a row stamps the resolving caller."""
+        store.insert_pending_action(
+            action_id="rr2",
+            kind="brands_set",
+            payload={},
+            expires_at=_in_five_minutes(),
+        )
+        assert store.mark_pending_approved("rr2", resolver="alice") is True
+        action = store.get_pending_action("rr2")
+        assert action is not None
+        assert action.resolver == "alice"
+
+    def test_mark_denied_records_resolver(self, store: PendingActionsStore) -> None:
+        """Test denying a row stamps the resolving caller."""
+        store.insert_pending_action(
+            action_id="rr3",
+            kind="brands_set",
+            payload={},
+            expires_at=_in_five_minutes(),
+        )
+        assert store.mark_pending_denied("rr3", resolver="bob") is True
+        action = store.get_pending_action("rr3")
+        assert action is not None
+        assert action.resolver == "bob"
+
+    def test_mark_expired_leaves_resolver_none(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test expiry is system-initiated, so no resolver is stamped."""
+        store.insert_pending_action(
+            action_id="rr4",
+            kind="brands_set",
+            payload={},
+            expires_at=_in_five_minutes(),
+        )
+        assert store.mark_pending_expired("rr4") is True
+        action = store.get_pending_action("rr4")
+        assert action is not None
+        assert action.resolver is None
+
+
+# ---------------------------------------------------------------------------
+# W3 (issue #75): PendingActionStatus.FAILED and mark_pending_failed
+# ---------------------------------------------------------------------------
+
+
+class TestMarkPendingFailed:
+    """Tests for PendingActionsStore.mark_pending_failed (W3, issue #75)."""
+
+    def _staged(self, store: PendingActionsStore, action_id: str) -> PendingAction:
+        """Stage a fresh pending action for transition tests."""
+        return store.insert_pending_action(
+            action_id=action_id,
+            kind="safeway_order_submit",
+            payload=_payload(),
+            expires_at=_in_five_minutes(),
+        )
+
+    def test_failed_status_member_exists(self) -> None:
+        """Test PendingActionStatus gains a FAILED member."""
+        assert PendingActionStatus.FAILED.value == "failed"
+
+    def test_mark_failed_after_approved_transitions_to_failed(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test an approved row can be marked failed after a post-claim error."""
+        self._staged(store, "mf1")
+        store.mark_pending_approved("mf1", resolver="bot")
+        assert store.mark_pending_failed("mf1") is True
+        action = store.get_pending_action("mf1")
+        assert action is not None
+        assert action.status is PendingActionStatus.FAILED
+        assert action.resolved_at is not None
+        assert action.resolver == "bot"
+
+    def test_mark_failed_from_pending_returns_false(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test a never-claimed row cannot be marked failed directly."""
+        self._staged(store, "mf2")
+        assert store.mark_pending_failed("mf2") is False
+        action = store.get_pending_action("mf2")
+        assert action is not None
+        assert action.status is PendingActionStatus.PENDING
+
+    def test_mark_failed_from_denied_returns_false(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test a denied row cannot be marked failed."""
+        self._staged(store, "mf3")
+        store.mark_pending_denied("mf3", resolver="bot")
+        assert store.mark_pending_failed("mf3") is False
+
+    def test_mark_failed_from_expired_returns_false(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test an expired row cannot be marked failed."""
+        self._staged(store, "mf4")
+        store.mark_pending_expired("mf4")
+        assert store.mark_pending_failed("mf4") is False
+
+    def test_mark_failed_idempotent_second_call_returns_false(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test marking failed twice reports failure the second time."""
+        self._staged(store, "mf5")
+        store.mark_pending_approved("mf5", resolver="bot")
+        assert store.mark_pending_failed("mf5") is True
+        assert store.mark_pending_failed("mf5") is False
+
+    def test_mark_failed_unknown_id_returns_false(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test an unknown action id reports failure, not an error."""
+        assert store.mark_pending_failed("ghost") is False
+
+
+# ---------------------------------------------------------------------------
+# W4 (issue #75): sweep_expired
+# ---------------------------------------------------------------------------
+
+
+class TestSweepExpired:
+    """Tests for PendingActionsStore.sweep_expired (W4, issue #75)."""
+
+    def _stage_past_due(self, store: PendingActionsStore, action_id: str) -> None:
+        """Stage a pending action whose expiry is already in the past."""
+        past = dt.datetime.now(dt.UTC) - dt.timedelta(minutes=1)
+        store.insert_pending_action(
+            action_id=action_id,
+            kind="brands_set",
+            payload={},
+            expires_at=past,
+        )
+
+    def test_sweep_expired_flips_past_due_pending_row(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test a pending row past its deadline flips to expired on sweep."""
+        self._stage_past_due(store, "sw1")
+        count = store.sweep_expired()
+        assert count == 1
+        action = store.get_pending_action("sw1")
+        assert action is not None
+        assert action.status is PendingActionStatus.EXPIRED
+        assert action.resolved_at is not None
+
+    def test_sweep_expired_resolver_stays_none(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test sweeping is system-initiated: resolver stays NULL."""
+        self._stage_past_due(store, "sw2")
+        store.sweep_expired()
+        action = store.get_pending_action("sw2")
+        assert action is not None
+        assert action.resolver is None
+
+    def test_sweep_expired_returns_count_of_affected_rows(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test multiple past-due rows are all counted in one sweep."""
+        for action_id in ("sw3", "sw4", "sw5"):
+            self._stage_past_due(store, action_id)
+        assert store.sweep_expired() == 3
+
+    def test_sweep_expired_is_idempotent(self, store: PendingActionsStore) -> None:
+        """Test a second sweep call finds nothing new to expire."""
+        self._stage_past_due(store, "sw6")
+        assert store.sweep_expired() == 1
+        assert store.sweep_expired() == 0
+
+    def test_sweep_expired_leaves_future_pending_untouched(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test a pending row not yet due is left alone."""
+        store.insert_pending_action(
+            action_id="sw7",
+            kind="brands_set",
+            payload={},
+            expires_at=_in_five_minutes(),
+        )
+        assert store.sweep_expired() == 0
+        action = store.get_pending_action("sw7")
+        assert action is not None
+        assert action.status is PendingActionStatus.PENDING
+
+    def test_sweep_expired_leaves_approved_untouched(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test an already-approved row is never re-resolved by the sweep."""
+        self._stage_past_due(store, "sw8")
+        store.mark_pending_approved("sw8", resolver="bot")
+        assert store.sweep_expired() == 0
+        action = store.get_pending_action("sw8")
+        assert action is not None
+        assert action.status is PendingActionStatus.APPROVED
+
+    def test_sweep_expired_leaves_denied_untouched(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test an already-denied row is never re-resolved by the sweep."""
+        self._stage_past_due(store, "sw9")
+        store.mark_pending_denied("sw9", resolver="bot")
+        assert store.sweep_expired() == 0
+        action = store.get_pending_action("sw9")
+        assert action is not None
+        assert action.status is PendingActionStatus.DENIED
+
+    def test_sweep_expired_accepts_explicit_now(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test an explicit reference time is honored over wall-clock now."""
+        future_deadline = dt.datetime.now(dt.UTC) + dt.timedelta(minutes=10)
+        store.insert_pending_action(
+            action_id="sw10",
+            kind="brands_set",
+            payload={},
+            expires_at=future_deadline,
+        )
+        way_future = future_deadline + dt.timedelta(minutes=1)
+        assert store.sweep_expired(now=way_future) == 1
+        action = store.get_pending_action("sw10")
+        assert action is not None
+        assert action.status is PendingActionStatus.EXPIRED
+
+
+# ---------------------------------------------------------------------------
+# W4 (issue #75): list_pending_actions
+# ---------------------------------------------------------------------------
+
+
+class TestListPendingActions:
+    """Tests for PendingActionsStore.list_pending_actions (W4, issue #75)."""
+
+    def _set_created_at(self, db_path: str, action_id: str, when: dt.datetime) -> None:
+        """Force a row's created_at for deterministic ordering assertions."""
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "UPDATE pending_actions SET created_at = ? WHERE action_id = ?",
+                (when.isoformat(), action_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_list_pending_actions_orders_by_created_at_desc(
+        self, store: PendingActionsStore, db_path: str
+    ) -> None:
+        """Test rows come back newest-created first."""
+        base = dt.datetime.now(dt.UTC)
+        for offset, action_id in enumerate(("la1", "la2", "la3")):
+            store.insert_pending_action(
+                action_id=action_id,
+                kind="brands_set",
+                payload={},
+                expires_at=_in_five_minutes(),
+            )
+            self._set_created_at(
+                db_path, action_id, base + dt.timedelta(minutes=offset)
+            )
+
+        actions = store.list_pending_actions(limit=50, status=None)
+        ids = [a.action_id for a in actions if a.action_id in ("la1", "la2", "la3")]
+        assert ids == ["la3", "la2", "la1"]
+
+    def test_list_pending_actions_respects_limit(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test only the requested number of rows are returned."""
+        for action_id in ("lb1", "lb2", "lb3"):
+            store.insert_pending_action(
+                action_id=action_id,
+                kind="brands_set",
+                payload={},
+                expires_at=_in_five_minutes(),
+            )
+        actions = store.list_pending_actions(limit=2, status=None)
+        assert len(actions) == 2
+
+    def test_list_pending_actions_filters_by_status(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test only rows matching the requested status are returned."""
+        store.insert_pending_action(
+            action_id="lc1",
+            kind="brands_set",
+            payload={},
+            expires_at=_in_five_minutes(),
+        )
+        store.insert_pending_action(
+            action_id="lc2",
+            kind="brands_set",
+            payload={},
+            expires_at=_in_five_minutes(),
+        )
+        store.mark_pending_denied("lc2", resolver="bot")
+
+        actions = store.list_pending_actions(
+            limit=50, status=PendingActionStatus.DENIED
+        )
+        ids = [a.action_id for a in actions]
+        assert ids == ["lc2"]
+
+    def test_list_pending_actions_status_none_returns_all_statuses(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test a None status filter returns rows regardless of status."""
+        store.insert_pending_action(
+            action_id="ld1",
+            kind="brands_set",
+            payload={},
+            expires_at=_in_five_minutes(),
+        )
+        store.insert_pending_action(
+            action_id="ld2",
+            kind="brands_set",
+            payload={},
+            expires_at=_in_five_minutes(),
+        )
+        store.mark_pending_denied("ld2", resolver="bot")
+
+        actions = store.list_pending_actions(limit=50, status=None)
+        ids = {a.action_id for a in actions}
+        assert {"ld1", "ld2"}.issubset(ids)
+
+    def test_list_pending_actions_empty_when_no_rows(
+        self, store: PendingActionsStore
+    ) -> None:
+        """Test an empty table yields an empty list, not an error."""
+        assert store.list_pending_actions(limit=50, status=None) == []
 
 
 # ------------------------------------------------------------------
