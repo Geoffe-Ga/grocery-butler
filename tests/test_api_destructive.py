@@ -508,8 +508,26 @@ class TestOrderSubmitTotalValidationAndCap:
 
     @pytest.mark.parametrize(
         "bad_total",
-        [{"x": 1}, True, [1, 2], "not-a-number"],
-        ids=["dict", "bool", "list", "unparseable-str"],
+        [
+            {"x": 1},
+            True,
+            [1, 2],
+            "not-a-number",
+            float("inf"),
+            float("nan"),
+            "Infinity",
+            "NaN",
+        ],
+        ids=[
+            "dict",
+            "bool",
+            "list",
+            "unparseable-str",
+            "inf",
+            "nan",
+            "inf-str",
+            "nan-str",
+        ],
     )
     def test_order_submit_rejects_non_numeric_total_returns_400(
         self,
@@ -517,17 +535,60 @@ class TestOrderSubmitTotalValidationAndCap:
         auth_headers: dict[str, str],
         bad_total: Any,
     ) -> None:
-        """Test dict/list/bool/unparseable-string totals are rejected with 400.
+        """Test non-numeric and non-finite totals are rejected with 400.
 
         Today's ``body.get("total") or _cart_total(cart)`` accepts any
         truthy value verbatim — a dict or list would even survive
-        ``str()`` into the staged message and audit payload.
+        ``str()`` into the staged message and audit payload. Python's
+        json parser also accepts the non-standard ``Infinity``/``NaN``
+        literals, and ``"Infinity"``/``"NaN"`` strings are valid Decimal
+        literals — quantizing them raises ``InvalidOperation``, so
+        without an explicit finiteness check they crash with an
+        unhandled 500 instead of this clean 400 (Gate 2.5 review).
         """
         body = _order_body()
         body["total"] = bad_total
         response = client.post("/api/v1/order/submit", json=body, headers=auth_headers)
         assert response.status_code == 400
         assert "total" in response.get_json()["error"].lower()
+
+    def test_order_submit_rejects_non_finite_cart_costs_returns_400(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Test a cart item with an Infinity estimated_cost is rejected with 400.
+
+        Python's json parser accepts the non-standard ``Infinity``
+        literal, and a non-finite item cost reaches
+        ``compute_cart_total`` whose cents-quantize step raises an
+        uncaught ``decimal.InvalidOperation`` — an unhandled 500 instead
+        of a clean 400 (Gate 2.5 review). The model layer must reject
+        non-finite monetary fields so ``_parse_cart_payload``'s existing
+        ValidationError handler turns this into a 400.
+        """
+        body = _order_body()
+        body["cart"]["items"][0]["estimated_cost"] = float("inf")
+        del body["total"]
+        response = client.post("/api/v1/order/submit", json=body, headers=auth_headers)
+        assert response.status_code == 400
+        assert "cart" in response.get_json()["error"].lower()
+
+    def test_order_submit_invalid_cap_config_returns_503(
+        self, client: FlaskClient, auth_headers: dict[str, str]
+    ) -> None:
+        """Test an unparseable SAFEWAY_ORDER_VALUE_CAP_USD yields a JSON 503.
+
+        The cap gate reads the env var at staging time; if an operator
+        has set it to garbage the request must fail with a clean JSON
+        503 naming the configuration problem, not an unhandled 500.
+        """
+        body = _order_body()
+        del body["total"]
+        with patch.dict(os.environ, {"SAFEWAY_ORDER_VALUE_CAP_USD": "garbage"}):
+            response = client.post(
+                "/api/v1/order/submit", json=body, headers=auth_headers
+            )
+        assert response.status_code == 503
+        assert "cap" in response.get_json()["error"].lower()
 
     def test_order_submit_accepts_matching_client_total(
         self,

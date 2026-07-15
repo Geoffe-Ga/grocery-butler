@@ -395,7 +395,20 @@ def compute_cart_total(cart: CartSummary) -> Decimal:
     cents. Deliberately never reads ``cart.subtotal`` or
     ``cart.estimated_total`` — those fields may be stale or supplied by
     an untrusted client, so this is the single source of truth for what
-    a cart actually costs (Issue #73).
+    a cart actually costs (Issue #73). All monetary inputs are
+    guaranteed finite by model validation (``allow_inf_nan=False`` on
+    the ``CartSummary`` field tree), so the cents-quantize below cannot
+    raise ``InvalidOperation`` for a validated cart.
+
+    Known residual risk (Issue #120): when the cart itself arrives from
+    an API caller (``POST /order/submit``), the per-item
+    ``estimated_cost``/``fee`` fields this sums are still
+    client-supplied and are not re-verified against the Safeway
+    catalog — a caller could deflate them to slip under the order-value
+    cap. This matches the accepted trust model of the Issue #59
+    (``needs_review``) and Issue #72 (``fulfillment_unverified``) gates;
+    binding submitted carts to server-built previews (or re-verifying
+    prices at submit) is tracked in Issue #120.
 
     Args:
         cart: Cart summary to total.

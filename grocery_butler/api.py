@@ -124,7 +124,11 @@ def _order_value_cap() -> Decimal:
     ``ANTHROPIC_API_KEY`` being configured the way
     :func:`_safeway_pipeline` does — staging (as opposed to confirming)
     an order must work even before the rest of the Safeway integration
-    is configured.
+    is configured. The staging-time cap read here and the confirm-time
+    cap enforced inside :class:`OrderService` (via ``load_config``) use
+    the same env var and parser, which assumes the variable stays
+    static for the lifetime of a staged action — changing it mid-flight
+    could let the two gates diverge.
 
     Returns:
         The parsed, non-negative cap.
@@ -477,7 +481,11 @@ def _parse_total(raw: Any) -> Decimal:
     (dict, list, etc.) is rejected too. Numeric and numeric-string
     values are converted via ``Decimal(str(raw))``, which raises
     ``InvalidOperation`` only for an unparseable string (int/float
-    always stringify to something Decimal accepts).
+    always stringify to something Decimal accepts). Non-finite values
+    are rejected as well: Python's json parser accepts the non-standard
+    ``Infinity``/``NaN`` literals and Decimal accepts ``"Infinity"`` /
+    ``"NaN"`` strings, but quantizing a non-finite Decimal raises
+    ``InvalidOperation`` downstream (Gate 2.5 review, Issue #73).
 
     Args:
         raw: The raw ``total`` value from the request body.
@@ -492,9 +500,12 @@ def _parse_total(raw: Any) -> Decimal:
     if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
         abort(400, description="total must be a number")
     try:
-        return Decimal(str(raw))
+        value = Decimal(str(raw))
     except InvalidOperation:
         abort(400, description="total must be a number")
+    if not value.is_finite():
+        abort(400, description="total must be a finite number")
+    return value
 
 
 def _validate_client_total(body: dict[str, Any], server_total: Decimal) -> None:
