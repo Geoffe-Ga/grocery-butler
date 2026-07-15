@@ -485,7 +485,7 @@ class TestOrderPreview:
         assert response.get_json()["total"] == "3.75"
 
     def test_failed_items_are_serialized_in_cart_response(
-        self, client: FlaskClient, auth_headers: dict[str, str]
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
     ) -> None:
         """A cart with failed_items still serializes as JSON (issue #76).
 
@@ -501,10 +501,11 @@ class TestOrderPreview:
         pipeline = MagicMock()
         pipeline.build_cart_only.return_value = cart
         with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = client.post(
+            response = _post(
+                client,
+                auth_headers,
                 "/api/v1/order/preview",
-                json={"shopping_list": [_make_shopping_item().model_dump(mode="json")]},
-                headers=auth_headers,
+                {"shopping_list": [_make_shopping_item().model_dump(mode="json")]},
             )
 
         assert response.status_code == 200

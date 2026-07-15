@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import logging
 import os
 import uuid
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -53,6 +54,8 @@ if TYPE_CHECKING:
 
     from grocery_butler.models import PendingAction
 
+logger = logging.getLogger(__name__)
+
 api_v1 = Blueprint("api_v1", __name__, url_prefix="/api/v1")
 
 #: How long a staged destructive action stays confirmable.
@@ -86,6 +89,30 @@ def _enforce_bearer_auth() -> None:
     if request.endpoint in _AUTH_EXEMPT_ENDPOINTS:
         return
     require_bearer()
+
+
+# ---------------------------------------------------------------------------
+# Sanitized error messages (Issue #77)
+#
+# These sites can be reached with internal exception/config detail in the
+# message (env var names, vendor error text, stack-trace fragments). The
+# response body must stay terse and stable; the raw detail is logged
+# server-side instead so operators keep it without leaking it to clients.
+# ---------------------------------------------------------------------------
+_SAFEWAY_PIPELINE_UNAVAILABLE_MESSAGE = "safeway pipeline unavailable"
+_CART_BUILD_FAILED_MESSAGE = "cart build failed"
+_ORDER_CONFIG_INVALID_MESSAGE = "order configuration invalid"
+_ORDER_SUBMISSION_FAILED_MESSAGE = "order submission failed"
+
+#: Terse, stable "error" text for each mapped OrderOutcome status string
+#: (see ``_OUTCOME_RESPONSES`` below). Replaces the raw ``error_message``
+#: from the OrderResult, which is logged but never relayed verbatim.
+_OUTCOME_ERROR_MESSAGES: dict[str, str] = {
+    "unknown": (
+        "order outcome unknown — do not resubmit; verify recent Safeway orders"
+    ),
+    "duplicate_prevented": "a recent identical submission is pending or completed",
+}
 
 
 @api_v1.errorhandler(400)
@@ -311,16 +338,25 @@ def post_shopping_list_preview() -> Response:
 
 @api_v1.post("/order/preview")
 def post_order_preview() -> Response | tuple[Response, int]:
-    """Build a Safeway cart for review without submitting an order."""
+    """Build a Safeway cart for review without submitting an order.
+
+    Returns:
+        The built cart and its computed total, or a terse 503 JSON error
+        if the Safeway pipeline could not be constructed or the cart
+        could not be built. The underlying exception detail is logged
+        server-side but never relayed to the client (Issue #77).
+    """
     shopping_list = _parse_shopping_list_payloads(_json_body().get("shopping_list"))
     try:
         pipeline = _safeway_pipeline()
-    except (ConfigError, SafewayPipelineError) as exc:
-        return jsonify(error=f"safeway pipeline unavailable: {exc}"), 503
+    except (ConfigError, SafewayPipelineError):
+        logger.warning("Safeway pipeline unavailable for order preview", exc_info=True)
+        return jsonify(error=_SAFEWAY_PIPELINE_UNAVAILABLE_MESSAGE), 503
     try:
         cart = pipeline.build_cart_only(shopping_list)
-    except SafewayPipelineError as exc:
-        return jsonify(error=f"cart build failed: {exc}"), 503
+    except SafewayPipelineError:
+        logger.exception("Cart build failed for order preview")
+        return jsonify(error=_CART_BUILD_FAILED_MESSAGE), 503
     finally:
         pipeline.close()
     total = order_service.compute_cart_total(cart)
@@ -661,8 +697,9 @@ def post_order_submit() -> Response | tuple[Response, int]:
     override_cap = bool(body.get("override_cap"))
     try:
         _enforce_order_cap(server_total, override_cap)
-    except ConfigError as exc:
-        return jsonify(error=f"order-value cap configuration invalid: {exc}"), 503
+    except ConfigError:
+        logger.exception("Order-value cap configuration invalid")
+        return jsonify(error=_ORDER_CONFIG_INVALID_MESSAGE), 503
     total = str(server_total)
     action_id = _stage_pending(
         "safeway_order_submit",
@@ -774,21 +811,43 @@ def _order_failure_response(
 ) -> tuple[Response, int]:
     """Render the appropriate error response for a failed order submission.
 
+    The raw ``error_message`` surfaced from deep inside the Safeway
+    client/pipeline is logged server-side for operators but never
+    relayed to the client verbatim -- it can carry internal detail
+    (vendor error text, stack-trace fragments) that must not leak into
+    the RubotPaul-facing response body (Issue #77). The response always
+    keeps a stable ``error`` key, and mapped outcomes additionally keep
+    their ``status``/``action_id`` keys so RubotPaul can still route the
+    reply.
+
     Args:
         action: The staged (already-claimed) pending action.
-        error_message: Error message from the OrderResult.
+        error_message: Error message from the OrderResult. Logged, but
+            never relayed verbatim in the response body.
         outcome: The order's OrderOutcome, if known.
 
     Returns:
         A (Response, status_code) tuple: 504 for an unknown (timed-out)
         outcome, 409 for a blocked duplicate, or 502 for any other
-        failure.
+        failure. The ``error`` field is always a terse, stable message.
     """
     mapped = _OUTCOME_RESPONSES.get(outcome) if outcome is not None else None
     if mapped is None:
-        return jsonify(error=error_message), 502
+        logger.error(
+            "Order submission failed for action %s: %s",
+            action.action_id,
+            error_message,
+        )
+        return jsonify(error=_ORDER_SUBMISSION_FAILED_MESSAGE), 502
     status, code = mapped
-    response = jsonify(status=status, action_id=action.action_id, error=error_message)
+    logger.warning(
+        "Order submission failed (%s) for action %s: %s",
+        status,
+        action.action_id,
+        error_message,
+    )
+    terse_message = _OUTCOME_ERROR_MESSAGES[status]
+    response = jsonify(status=status, action_id=action.action_id, error=terse_message)
     return response, code
 
 
@@ -814,10 +873,11 @@ def _confirm_order_submit(
     cart = CartSummary.model_validate(action.payload["cart"])
     try:
         pipeline = _safeway_pipeline()
-    except (ConfigError, SafewayPipelineError) as exc:
+    except (ConfigError, SafewayPipelineError):
         # Not claimed yet: the action stays pending so it can be retried
         # (until it expires) once configuration is fixed.
-        return jsonify(error=f"safeway pipeline unavailable: {exc}"), 503
+        logger.exception("Safeway pipeline unavailable while confirming order")
+        return jsonify(error=_SAFEWAY_PIPELINE_UNAVAILABLE_MESSAGE), 503
     if not pipeline.order_submission_enabled:
         # Issue #60: order submission is descoped for v1.0. Not claimed —
         # the action stays pending so it can be retried once the flag is
@@ -843,8 +903,9 @@ def _confirm_order_submit(
             allow_unverified_fulfillment=True,
             allow_over_cap=bool(action.payload.get("allow_over_cap", False)),
         )
-    except SafewayPipelineError as exc:
-        return jsonify(error=f"order submission failed: {exc}"), 502
+    except SafewayPipelineError:
+        logger.exception("Order submission failed")
+        return jsonify(error=_ORDER_SUBMISSION_FAILED_MESSAGE), 502
     finally:
         pipeline.close()
     if not result.success:

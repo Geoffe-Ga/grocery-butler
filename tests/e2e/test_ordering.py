@@ -143,14 +143,20 @@ def test_order_preview_auth_failure_returns_503(
     no_claude: None,
     safeway_mock: SafewayMockState,
 ) -> None:
-    """A failing Okta authn step surfaces as a 503, not a 500."""
+    """A failing Okta authn step surfaces as a 503, not a 500.
+
+    Issue #77: the body is the terse, stable "cart build failed"
+    message rather than one echoing the underlying Okta/auth exception
+    text -- that detail is logged server-side instead of relayed to the
+    client.
+    """
     safeway_mock.force_auth_fail = True
 
     response = signed_request(
         "POST", "/api/v1/order/preview", _shopping_list_body(["milk"])
     )
     assert response.status_code == 503
-    assert "safeway" in response.get_json()["error"].lower()
+    assert response.get_json()["error"] == "cart build failed"
 
 
 def test_order_submit_confirm_hits_orders_endpoint_with_confirmation(

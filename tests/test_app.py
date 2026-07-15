@@ -624,6 +624,21 @@ class TestErrorHandlers:
         response = client.get("/nonexistent-page")
         assert b"Back to Dashboard" in response.data
 
+    def test_wrong_method_on_html_route_returns_html_405(
+        self, client: FlaskClient
+    ) -> None:
+        """Test a wrong HTTP method on an HTML route stays HTML, not JSON.
+
+        Issue #77's JSON-error contract is scoped to ``/api/v1`` only —
+        this pins that a non-API route (``/`` is GET-only) still gets a
+        werkzeug/Flask HTML error response for a 405, proving the fix
+        doesn't accidentally force JSON errors app-wide.
+        """
+        response = client.delete("/")
+        assert response.status_code == 405
+        assert not response.is_json
+        assert response.content_type.startswith("text/html")
+
 
 # ---------------------------------------------------------------------------
 # TestRecipesPage
