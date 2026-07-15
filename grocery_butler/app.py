@@ -279,51 +279,111 @@ def _register_teardown(app: Flask) -> None:
     app.teardown_appcontext(_close_db)
 
 
+#: Path prefix of the RubotPaul-facing JSON API blueprint. Requests under
+#: this prefix must always get a terse JSON error body -- never Flask's
+#: HTML error page -- even for errors that occur before or outside the
+#: blueprint's own routing (unmatched paths, wrong methods, uncaught
+#: exceptions), which is why this is checked here rather than relying
+#: solely on the blueprint's own ``@api_v1.errorhandler`` handlers
+#: (Issue #77).
+_API_PATH_PREFIX = "/api/v1"
+
+
+def _wants_json_error() -> bool:
+    """Return whether the current request expects a JSON error body.
+
+    Returns:
+        True if the current request path is under ``/api/v1``, else
+        False.
+    """
+    return request.path.startswith(_API_PATH_PREFIX)
+
+
+def _api_or_html_error(
+    code: int, json_message: str, html_message: str
+) -> tuple[Response, int] | tuple[str, int]:
+    """Render a terse JSON error for ``/api/v1`` requests, else the HTML page.
+
+    Args:
+        code: HTTP status code for the error.
+        json_message: Terse message for the ``/api/v1`` JSON body.
+        html_message: Message rendered into the HTML ``error.html`` page.
+
+    Returns:
+        Tuple of (response, status code): a terse JSON body for
+        ``/api/v1`` requests, or the rendered ``error.html`` template
+        for everything else.
+    """
+    if _wants_json_error():
+        return jsonify(error=json_message), code
+    return render_template("error.html", code=code, message=html_message), code
+
+
 def _register_error_handlers(app: Flask) -> None:
     """Register HTTP error handler pages.
+
+    ``/api/v1`` requests get a terse JSON body; every other route keeps
+    rendering the existing ``error.html`` page. This applies to app-level
+    handlers only -- the blueprint's own ``@api_v1.errorhandler`` handlers
+    (400/401/404/409/410) still fire first for in-route aborts, per
+    Flask's most-specific-handler-wins rule, and keep their descriptive
+    JSON bodies unchanged (Issue #77).
 
     Args:
         app: Flask application instance.
     """
 
     @app.errorhandler(400)
-    def bad_request(error: Exception) -> tuple[str, int]:
+    def bad_request(error: Exception) -> tuple[Response, int] | tuple[str, int]:
         """Handle 400 Bad Request errors.
 
         Args:
             error: The exception that triggered the error.
 
         Returns:
-            Tuple of rendered template and HTTP status code.
+            Tuple of (response, status code): terse JSON for
+            ``/api/v1`` requests, rendered HTML otherwise.
         """
-        return render_template("error.html", code=400, message="Bad Request"), 400
+        return _api_or_html_error(400, "bad request", "Bad Request")
 
     @app.errorhandler(404)
-    def not_found(error: Exception) -> tuple[str, int]:
+    def not_found(error: Exception) -> tuple[Response, int] | tuple[str, int]:
         """Handle 404 Not Found errors.
 
         Args:
             error: The exception that triggered the error.
 
         Returns:
-            Tuple of rendered template and HTTP status code.
+            Tuple of (response, status code): terse JSON for
+            ``/api/v1`` requests, rendered HTML otherwise.
         """
-        return render_template("error.html", code=404, message="Page Not Found"), 404
+        return _api_or_html_error(404, "not found", "Page Not Found")
+
+    @app.errorhandler(405)
+    def method_not_allowed(error: Exception) -> tuple[Response, int] | tuple[str, int]:
+        """Handle 405 Method Not Allowed errors.
+
+        Args:
+            error: The exception that triggered the error.
+
+        Returns:
+            Tuple of (response, status code): terse JSON for
+            ``/api/v1`` requests, rendered HTML otherwise.
+        """
+        return _api_or_html_error(405, "method not allowed", "Method Not Allowed")
 
     @app.errorhandler(500)
-    def server_error(error: Exception) -> tuple[str, int]:
+    def server_error(error: Exception) -> tuple[Response, int] | tuple[str, int]:
         """Handle 500 Internal Server Error.
 
         Args:
             error: The exception that triggered the error.
 
         Returns:
-            Tuple of rendered template and HTTP status code.
+            Tuple of (response, status code): terse JSON for
+            ``/api/v1`` requests, rendered HTML otherwise.
         """
-        return (
-            render_template("error.html", code=500, message="Internal Server Error"),
-            500,
-        )
+        return _api_or_html_error(500, "internal server error", "Internal Server Error")
 
 
 def _register_context_processors(app: Flask) -> None:
