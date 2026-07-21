@@ -4,7 +4,7 @@ description: "Level 3 Component Specialist. Select for performance-critical comp
 level: 3
 phase: Plan,Implementation,Cleanup
 tools: Read,Write,Edit,Grep,Glob,Task
-model: sonnet
+model: fable
 delegates_to: []
 receives_from: [chief-architect, refactorer]
 ---
