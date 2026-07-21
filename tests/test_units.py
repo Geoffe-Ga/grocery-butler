@@ -10,9 +10,10 @@ from __future__ import annotations
 import pytest
 
 # The module itself (rather than a `from ... import group_key`) is imported
-# for TestGroupKey below: `group_key` doesn't exist yet (issue #80), and a
-# direct name import would raise ImportError at collection time, failing
-# every test in this file instead of just the new ones.
+# for TestGroupKey below: during the RED-first phase of issue #80,
+# `group_key` did not exist yet, and a direct name import would have raised
+# ImportError at collection time, failing every test in this file instead
+# of just the new ones. The module-attribute pattern is kept for symmetry.
 from grocery_butler import units
 from grocery_butler.models import Unit
 from grocery_butler.units import Dimension, convert, dimension_of, parse_size
@@ -247,16 +248,16 @@ class TestParseSizeNewUnits:
 # Tests: group_key (issue #80)
 # ------------------------------------------------------------------
 #
-# `units.group_key` doesn't exist yet -- it's a new public helper the
-# issue #80 fix will add, mirroring the semantics of
-# `Consolidator._ingredient_group_key`: units with a fixed physical
-# dimension (mass/volume/count) group by dimension so compatible units
-# merge; packaging/"other" units with no fixed dimension group by their
-# exact unit so incompatible packaging (e.g. jar vs. can) stays split.
-# Referenced via `units.group_key(...)` (not a top-level `from ... import
-# group_key`) so a missing attribute fails only these tests, not
-# collection of the whole module -- same pattern as
-# TestDimensionOfNewUnits above.
+# `units.group_key` is the public helper the issue #80 fix added
+# (written RED-first, before the helper existed), mirroring the
+# semantics of `Consolidator._ingredient_group_key`, which now delegates
+# to it: units with a fixed physical dimension (mass/volume/count) group
+# by dimension so compatible units merge; packaging/"other" units with
+# no fixed dimension group by their exact unit so incompatible packaging
+# (e.g. jar vs. can) stays split. Referenced via `units.group_key(...)`
+# (not a top-level `from ... import group_key`) so a missing attribute
+# would fail only these tests, not collection of the whole module --
+# same pattern as TestDimensionOfNewUnits above.
 
 
 class TestGroupKey:

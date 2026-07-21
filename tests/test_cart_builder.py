@@ -1643,10 +1643,10 @@ class TestCartBuilderCacheFlow:
 # item is also swept into ``restock_set`` membership and misfiled into
 # ``restock_cart``, corrupting ``_collect_restock_ingredients`` /
 # ``mark_restocked`` inventory bookkeeping in order_service.py. These
-# tests are written to the fixed contract (group-key based merging,
-# provenance/origin-based classification -- see the architecture plan
-# for issue #80) and are expected to FAIL against the current
-# implementation.
+# tests were written RED-first to the fixed contract (group-key based
+# merging, provenance/origin-based classification -- see the
+# architecture plan for issue #80) and failed against the pre-fix
+# implementation; they now guard against regressing it.
 
 
 class TestBuildCartRestockCollision:
