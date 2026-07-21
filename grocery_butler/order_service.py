@@ -10,10 +10,11 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from grocery_butler.models import CENTS
 from grocery_butler.safeway_client import SafewayAuthError, SafewayTimeoutError
 
 if TYPE_CHECKING:
@@ -63,7 +64,8 @@ class OrderConfirmation:
         order_id: Safeway order identifier.
         status: Order status string.
         estimated_time: Estimated fulfillment time.
-        total: Final order total.
+        total: Final order total as a cents-quantized ``Decimal``
+            (issue #81).
         fulfillment_type: Selected fulfillment method.
         item_count: Number of items in the order.
     """
@@ -71,7 +73,7 @@ class OrderConfirmation:
     order_id: str
     status: str
     estimated_time: str
-    total: float
+    total: Decimal
     fulfillment_type: FulfillmentType
     item_count: int
 
@@ -396,9 +398,10 @@ def compute_cart_total(cart: CartSummary) -> Decimal:
     ``cart.estimated_total`` — those fields may be stale or supplied by
     an untrusted client, so this is the single source of truth for what
     a cart actually costs (Issue #73). All monetary inputs are
-    guaranteed finite by model validation (``allow_inf_nan=False`` on
-    the ``CartSummary`` field tree), so the cents-quantize below cannot
-    raise ``InvalidOperation`` for a validated cart.
+    guaranteed finite ``Decimal`` values by model validation (the
+    ``Money`` type's coercion validator on the ``CartSummary`` field
+    tree — issues #73/#81), so the cents-quantize below cannot raise
+    ``InvalidOperation`` for a validated cart.
 
     Known residual risk (Issue #120): when the cart itself arrives from
     an API caller (``POST /order/submit``), the per-item
@@ -417,11 +420,11 @@ def compute_cart_total(cart: CartSummary) -> Decimal:
         The fee-inclusive total, quantized to cents with ROUND_HALF_UP.
     """
     items_total = sum(
-        (Decimal(str(item.estimated_cost)) for item in cart.items + cart.restock_items),
+        (item.estimated_cost for item in cart.items + cart.restock_items),
         Decimal("0"),
     )
     total = items_total + _recommended_fulfillment_fee(cart)
-    return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return total.quantize(CENTS, rounding=ROUND_HALF_UP)
 
 
 def _recommended_fulfillment_fee(cart: CartSummary) -> Decimal:
@@ -442,7 +445,7 @@ def _recommended_fulfillment_fee(cart: CartSummary) -> Decimal:
     """
     for option in cart.fulfillment_options:
         if option.type == cart.recommended_fulfillment:
-            return Decimal(str(option.fee))
+            return option.fee
     return Decimal("0")
 
 
@@ -459,13 +462,16 @@ def _build_order_payload(
             ledger can correlate repeated attempts.
 
     Returns:
-        Dict suitable for JSON submission.
+        Dict suitable for JSON submission. ``estimatedTotal`` is
+        converted from ``Decimal`` to ``float`` here — the JSON
+        boundary — so the wire contract stays a plain JSON number
+        (issue #81).
     """
     items = _serialize_cart_items(cart.items + cart.restock_items)
     return {
         "items": items,
         "fulfillmentType": cart.recommended_fulfillment.value,
-        "estimatedTotal": cart.estimated_total,
+        "estimatedTotal": float(cart.estimated_total),
         "clientOrderId": idempotency_key,
     }
 
@@ -515,28 +521,41 @@ def _parse_order_response(
         order_id=str(order_id),
         status=str(response.get("status", "confirmed")),
         estimated_time=str(response.get("estimatedTime", "Unknown")),
-        total=_safe_float(response.get("total"), cart.estimated_total),
+        total=_safe_money(response.get("total"), cart.estimated_total),
         fulfillment_type=cart.recommended_fulfillment,
         item_count=total_items,
     )
 
 
-def _safe_float(value: Any, fallback: float) -> float:
-    """Safely convert a value to float, returning fallback on failure.
+def _safe_money(value: Any, fallback: Decimal) -> Decimal:
+    """Safely convert a value to a cents-quantized Decimal (issue #81).
+
+    Conversion goes through ``Decimal(str(value))`` so float inputs are
+    read at their shortest decimal representation (``25.97`` becomes
+    exactly ``Decimal("25.97")``) rather than their binary expansion.
+    Non-finite results are rejected explicitly: ``Decimal("NaN")`` and
+    ``Decimal("Infinity")`` construct successfully, so catching
+    ``InvalidOperation`` alone is not enough.
 
     Args:
         value: Value to convert (may be None, str, or numeric).
-        fallback: Default to return if conversion fails.
+        fallback: Default returned when ``value`` is None, unparseable,
+            or non-finite. Assumed to already be cents-quantized (e.g.
+            ``CartSummary.estimated_total``) and returned as-is.
 
     Returns:
-        Converted float or fallback.
+        The converted value quantized to cents with ROUND_HALF_UP, or
+        ``fallback``.
     """
     if value is None:
         return fallback
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        result = Decimal(str(value))
+    except InvalidOperation:
         return fallback
+    if not result.is_finite():
+        return fallback
+    return result.quantize(CENTS, rounding=ROUND_HALF_UP)
 
 
 def review_block_result(cart: CartSummary) -> OrderResult | None:

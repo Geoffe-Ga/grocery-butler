@@ -334,6 +334,11 @@ def _heuristic_select(
 def _product_to_dict(product: SafewayProduct) -> dict[str, Any]:
     """Convert a SafewayProduct to a dict for JSON serialization.
 
+    Monetary fields are ``Decimal`` on the model (issue #81), which
+    stdlib ``json.dumps`` cannot serialize, so they are converted to
+    ``float`` here — this dict only feeds a Claude prompt, where a
+    plain JSON number is expected.
+
     Args:
         product: The product to convert.
 
@@ -343,8 +348,10 @@ def _product_to_dict(product: SafewayProduct) -> dict[str, Any]:
     return {
         "product_id": product.product_id,
         "name": product.name,
-        "price": product.price,
-        "unit_price": product.unit_price,
+        "price": float(product.price),
+        "unit_price": (
+            float(product.unit_price) if product.unit_price is not None else None
+        ),
         "size": product.size,
         "in_stock": product.in_stock,
     }

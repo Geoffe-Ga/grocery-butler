@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import pytest
@@ -18,11 +19,45 @@ from grocery_butler.db.adapter import (
     IntegrityError,
     PostgresConnection,
     SQLiteConnection,
+    _adapt_sqlite_params,
     _has_executable_sql,
     _inject_returning,
     _translate_placeholders,
     create_connection,
 )
+
+
+class TestAdaptSqliteParams:
+    """Tests for _adapt_sqlite_params Decimal-to-str conversion (issue #81)."""
+
+    def test_no_decimals_returns_params_unchanged(self) -> None:
+        """Test a Decimal-free sequence is returned as the same object."""
+        params = ("alice", 1, 2.5, None)
+        assert _adapt_sqlite_params(params) is params
+
+    def test_decimal_converted_to_exact_string(self) -> None:
+        """Test a Decimal parameter is bound as its exact string form."""
+        assert _adapt_sqlite_params((Decimal("4.15"),)) == ("4.15",)
+
+    def test_mixed_params_only_decimals_converted(self) -> None:
+        """Test non-Decimal values pass through untouched alongside Decimals."""
+        adapted = _adapt_sqlite_params(("milk", Decimal("5.99"), 2, None))
+        assert adapted == ("milk", "5.99", 2, None)
+
+    def test_execute_binds_decimal_via_real_sqlite(self, tmp_path: Path) -> None:
+        """Test a Decimal round-trips through a real SQLite REAL column."""
+        conn = create_connection(str(tmp_path / "money.db"))
+        try:
+            conn.executescript(
+                "CREATE TABLE t (id INTEGER PRIMARY KEY, price REAL);",
+            )
+            conn.execute("INSERT INTO t (price) VALUES (?)", (Decimal("4.15"),))
+            conn.commit()
+            row = conn.execute("SELECT price FROM t WHERE id = ?", (1,)).fetchone()
+            assert row is not None
+            assert Decimal(str(row["price"])) == Decimal("4.15")
+        finally:
+            conn.close()
 
 
 class TestCreateConnection:

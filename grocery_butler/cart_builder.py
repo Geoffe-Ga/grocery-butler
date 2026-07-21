@@ -10,9 +10,11 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Any
 
 from grocery_butler.models import (
+    CENTS,
     CartItem,
     CartSummary,
     FulfillmentOption,
@@ -157,7 +159,7 @@ class CartBuilder:
         recommended = _recommend_fulfillment(fulfillment_options)
         subtotal = _calculate_subtotal(cart_items, restock_cart)
         fee = _get_fulfillment_fee(fulfillment_options, recommended)
-        estimated_total = round(subtotal + fee, 2)
+        estimated_total = (subtotal + fee).quantize(CENTS, rounding=ROUND_HALF_UP)
 
         return CartSummary(
             items=cart_items,
@@ -236,7 +238,9 @@ class CartBuilder:
             return self._handle_out_of_stock(item, product)
 
         decision = _calculate_quantity(item, product, cap=self._max_quantity_per_item)
-        cost = round(product.price * decision.quantity, 2)
+        cost = (product.price * decision.quantity).quantize(
+            CENTS, rounding=ROUND_HALF_UP
+        )
         return CartItem(
             shopping_list_item=item,
             safeway_product=product,
@@ -402,7 +406,7 @@ def _calculate_quantity(
 def _calculate_subtotal(
     items: list[CartItem],
     restock_items: list[CartItem],
-) -> float:
+) -> Decimal:
     """Calculate cart subtotal from all items.
 
     Args:
@@ -410,17 +414,17 @@ def _calculate_subtotal(
         restock_items: Restock queue cart items.
 
     Returns:
-        Rounded subtotal.
+        Subtotal quantized to cents (Decimal, issue #81).
     """
-    total = sum(item.estimated_cost for item in items)
-    total += sum(item.estimated_cost for item in restock_items)
-    return round(total, 2)
+    total = sum((item.estimated_cost for item in items), Decimal("0"))
+    total += sum((item.estimated_cost for item in restock_items), Decimal("0"))
+    return total.quantize(CENTS, rounding=ROUND_HALF_UP)
 
 
 def _get_fulfillment_fee(
     options: list[FulfillmentOption],
     recommended: FulfillmentType,
-) -> float:
+) -> Decimal:
     """Get the fee for the recommended fulfillment type.
 
     Args:
@@ -428,12 +432,12 @@ def _get_fulfillment_fee(
         recommended: The recommended fulfillment type.
 
     Returns:
-        Fee amount, or 0.0 if not found.
+        Fee amount (Decimal, issue #81), or ``Decimal("0")`` if not found.
     """
     for option in options:
         if option.type == recommended:
             return option.fee
-    return 0.0
+    return Decimal("0")
 
 
 def _recommend_fulfillment(
@@ -483,7 +487,10 @@ def _parse_fulfillment_response(
             FulfillmentOption(
                 type=ftype,
                 available=bool(entry.get("available", False)),
-                fee=float(entry.get("fee", 0.0)),
+                # float() first preserves the pre-#81 failure mode for
+                # garbage fees (ValueError/TypeError); Decimal(str(...))
+                # then reads the float at its exact decimal form.
+                fee=Decimal(str(float(entry.get("fee", 0.0)))),
                 windows=windows,
                 next_window=next_win,
             )
@@ -519,7 +526,7 @@ def _substitution_to_cart_item(
 
     product = result.selected.product
     decision = _calculate_quantity(result.original_item, product, cap=cap)
-    cost = round(product.price * decision.quantity, 2)
+    cost = (product.price * decision.quantity).quantize(CENTS, rounding=ROUND_HALF_UP)
     return CartItem(
         shopping_list_item=result.original_item,
         safeway_product=product,

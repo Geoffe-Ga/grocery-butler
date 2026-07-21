@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from grocery_butler.claude_utils import extract_json_text
@@ -96,9 +97,12 @@ def _parse_shopping_item(data: dict[str, object]) -> ShoppingListItem:
     quantity = float(raw_quantity) if isinstance(raw_quantity, (int, float)) else 0.0
 
     raw_price = data.get("estimated_price")
-    estimated_price: float | None = None
-    if isinstance(raw_price, (int, float)):
-        estimated_price = float(raw_price)
+    estimated_price: Decimal | None = None
+    if isinstance(raw_price, (int, float)) and not isinstance(raw_price, bool):
+        # Decimal(str(...)) reads a JSON float at its exact decimal
+        # representation (issue #81); bool is excluded because a
+        # true/false "price" from the model is garbage, not 1.0/0.0.
+        estimated_price = Decimal(str(raw_price))
 
     raw_from_meals = data.get("from_meals", [])
     from_meals: list[str] = (

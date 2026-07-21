@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
@@ -555,7 +556,7 @@ class TestShoppingListItem:
             from_meals=["Cereal", "Baking"],
             estimated_price=4.99,
         )
-        assert item.estimated_price == 4.99
+        assert item.estimated_price == Decimal("4.99")
         assert len(item.from_meals) == 2
 
 
@@ -663,7 +664,7 @@ class TestSafewayProduct:
             size="16 oz",
             in_stock=False,
         )
-        assert product.unit_price == 0.28
+        assert product.unit_price == Decimal("0.28")
         assert product.in_stock is False
 
 
@@ -751,7 +752,7 @@ class TestCartItem:
             estimated_cost=5.99,
         )
         assert cart_item.quantity_to_order == 1
-        assert cart_item.estimated_cost == 5.99
+        assert cart_item.estimated_cost == Decimal("5.99")
 
     def test_default_review_fields_are_unset(self) -> None:
         """Test needs_review/review_reason default to False and empty string.
