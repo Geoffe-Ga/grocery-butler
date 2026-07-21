@@ -20,7 +20,8 @@ from grocery_butler.models import (
     parse_unit,
 )
 from grocery_butler.prompt_loader import load_prompt
-from grocery_butler.units import convert, dimension_of
+from grocery_butler.units import convert
+from grocery_butler.units import group_key as _units_group_key
 
 if TYPE_CHECKING:
     from grocery_butler.config import Config
@@ -322,11 +323,13 @@ class Consolidator:
     def _ingredient_group_key(ingredient: str, unit: Unit) -> tuple[str, str]:
         """Build the composite merge key for an ingredient/unit pairing.
 
-        Units with a fixed physical dimension (mass, volume, count) are
-        grouped by dimension so compatible units (e.g. cup and gallon) merge
-        into a single line item. Packaging/"other" units with no fixed
-        dimension are grouped by their exact unit instead, so incompatible
-        packaging (e.g. jar vs. can) stays split into separate line items.
+        Delegates to :func:`grocery_butler.units.group_key` (issue #80),
+        which groups units with a fixed physical dimension (mass, volume,
+        count) by dimension so compatible units (e.g. cup and gallon)
+        merge into a single line item, and groups packaging/"other" units
+        with no fixed dimension by their exact unit instead, so
+        incompatible packaging (e.g. jar vs. can) stays split into
+        separate line items.
 
         Args:
             ingredient: Raw ingredient name (not yet lowercased).
@@ -336,10 +339,7 @@ class Consolidator:
             A ``(ingredient_lower, group_token)`` tuple suitable for use as
             a merge dict key.
         """
-        dimension = dimension_of(unit)
-        if dimension is not None:
-            return (ingredient.lower(), f"dim:{dimension.value}")
-        return (ingredient.lower(), f"unit:{unit.value}")
+        return _units_group_key(ingredient, unit)
 
     @staticmethod
     def _merge_quantity(entry: dict[str, object], item: Ingredient) -> None:

@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import pytest
 
+# The module itself (rather than a `from ... import group_key`) is imported
+# for TestGroupKey below: `group_key` doesn't exist yet (issue #80), and a
+# direct name import would raise ImportError at collection time, failing
+# every test in this file instead of just the new ones.
+from grocery_butler import units
 from grocery_butler.models import Unit
 from grocery_butler.units import Dimension, convert, dimension_of, parse_size
 
@@ -236,3 +241,57 @@ class TestParseSizeNewUnits:
     def test_parses_quart_abbreviation(self) -> None:
         """Test '2 qt' parses to (2.0, Unit.QUART)."""
         assert parse_size("2 qt") == (2.0, Unit.QUART)
+
+
+# ------------------------------------------------------------------
+# Tests: group_key (issue #80)
+# ------------------------------------------------------------------
+#
+# `units.group_key` doesn't exist yet -- it's a new public helper the
+# issue #80 fix will add, mirroring the semantics of
+# `Consolidator._ingredient_group_key`: units with a fixed physical
+# dimension (mass/volume/count) group by dimension so compatible units
+# merge; packaging/"other" units with no fixed dimension group by their
+# exact unit so incompatible packaging (e.g. jar vs. can) stays split.
+# Referenced via `units.group_key(...)` (not a top-level `from ... import
+# group_key`) so a missing attribute fails only these tests, not
+# collection of the whole module -- same pattern as
+# TestDimensionOfNewUnits above.
+
+
+class TestGroupKey:
+    """Tests for the new units.group_key helper (issue #80)."""
+
+    def test_dimensioned_units_group_by_dimension_not_exact_unit(self) -> None:
+        """Test cup and gallon (both volume) produce the same group key.
+
+        Dimensioned units must group by physical dimension, not exact
+        unit, so compatible units (e.g. cup and gallon) merge into a
+        single shopping-list/cart line.
+        """
+        assert units.group_key("milk", Unit.CUP) == units.group_key("milk", Unit.GAL)
+
+    def test_group_key_lowercases_ingredient_name(self) -> None:
+        """Test the ingredient name is lowercased for case-insensitive matching."""
+        assert units.group_key("MILK", Unit.CUP) == units.group_key("milk", Unit.CUP)
+
+    def test_dimensioned_group_key_token_is_dimension_prefixed(self) -> None:
+        """Test a dimensioned unit's group token starts with 'dim:'."""
+        _, token = units.group_key("milk", Unit.CUP)
+        assert token == "dim:volume"
+
+    def test_packaging_units_group_by_exact_unit_jar_vs_can(self) -> None:
+        """Test jar and can (both dimensionless packaging) produce different keys.
+
+        Packaging/"other" units have no fixed physical size, so
+        incompatible packaging (e.g. jar vs. can) must stay split into
+        separate line items rather than merging.
+        """
+        assert units.group_key("pickles", Unit.JAR) != units.group_key(
+            "pickles", Unit.CAN
+        )
+
+    def test_packaging_group_key_token_is_unit_prefixed(self) -> None:
+        """Test a packaging unit's group token starts with 'unit:'."""
+        _, token = units.group_key("pickles", Unit.JAR)
+        assert token == "unit:jar"

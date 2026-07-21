@@ -15,6 +15,7 @@ from grocery_butler.cart_builder import (
     _calculate_quantity,
     _calculate_subtotal,
     _get_fulfillment_fee,
+    _merge_restock_into_meal,
     _parse_fulfillment_response,
     _recommend_fulfillment,
 )
@@ -28,6 +29,7 @@ from grocery_butler.models import (
     SubstitutionOption,
     SubstitutionResult,
     SubstitutionSuitability,
+    Unit,
 )
 from grocery_butler.product_search import CachedMapping, ProductSearchError
 from grocery_butler.safeway_client import SafewayAPIError, SafewayAuthError
@@ -110,6 +112,34 @@ def _make_cart_item(
         safeway_product=_make_product(price=price),
         quantity_to_order=quantity,
         estimated_cost=round(price * quantity, 2),
+    )
+
+
+def _make_milk_item(
+    quantity: float = 1.0,
+    unit: str = "gal",
+    search_term: str = "whole milk",
+    from_meals: list[str] | None = None,
+) -> ShoppingListItem:
+    """Create a "milk" ShoppingListItem for restock-collision tests (issue #80).
+
+    Args:
+        quantity: Desired quantity.
+        unit: Unit of measurement.
+        search_term: Search term.
+        from_meals: Provenance meal names.
+
+    Returns:
+        ShoppingListItem for testing milk name collisions between a
+        meal-plan item and a restock-queue item.
+    """
+    return ShoppingListItem(
+        ingredient="milk",
+        quantity=quantity,
+        unit=unit,
+        category=IngredientCategory.DAIRY,
+        search_term=search_term,
+        from_meals=from_meals or ["Pancake Breakfast"],
     )
 
 
@@ -1597,3 +1627,261 @@ class TestCartBuilderCacheFlow:
         assert substitute_item.estimated_cost == round(10.99 * 2, 2)
         assert result.subtotal == round(10.99 * 2, 2)
         assert result.substituted_items == [sub_result]
+
+
+# ------------------------------------------------------------------
+# Tests: CartBuilder.build_cart restock/meal ingredient-name collision
+# (issue #80)
+# ------------------------------------------------------------------
+#
+# Reproduction guards for issue #80: build_cart classified restock
+# membership with a `restock_set: set[str]` built from ingredient NAME
+# alone (``is_restock = item.ingredient in restock_set``). When a
+# meal-plan item and a restock item share an ingredient name (e.g.
+# "milk"), the bug has two symptoms: (1) both copies are kept as
+# separate cart lines -- a double order -- and (2) the *regular* meal
+# item is also swept into ``restock_set`` membership and misfiled into
+# ``restock_cart``, corrupting ``_collect_restock_ingredients`` /
+# ``mark_restocked`` inventory bookkeeping in order_service.py. These
+# tests are written to the fixed contract (group-key based merging,
+# provenance/origin-based classification -- see the architecture plan
+# for issue #80) and are expected to FAIL against the current
+# implementation.
+
+
+class TestBuildCartRestockCollision:
+    """Tests for build_cart resolving meal/restock ingredient-name collisions.
+
+    See issue #80.
+    """
+
+    def _make_builder(self, product: SafewayProduct) -> CartBuilder:
+        """Create a CartBuilder that resolves every item to *product*.
+
+        Args:
+            product: The product every search/select call resolves to,
+                regardless of which shopping list item is being
+                processed.
+
+        Returns:
+            CartBuilder wired with fully mocked search, selector,
+            substitution, and Safeway client dependencies.
+        """
+        mock_search = MagicMock()
+        mock_search.get_cached_product.return_value = None
+        mock_search.search_products.return_value = [product]
+
+        mock_selector = MagicMock()
+        mock_selector.select_product.return_value = _MockSelectionResult(
+            item=_make_item(), product=product, reasoning="Test selection"
+        )
+
+        mock_substitution = MagicMock()
+        mock_client = MagicMock()
+        mock_client.store_id = "1234"
+        mock_client.get.return_value = {}
+
+        return CartBuilder(
+            search_service=mock_search,
+            product_selector=mock_selector,
+            substitution_service=mock_substitution,
+            safeway_client=mock_client,
+        )
+
+    def test_collision_same_ingredient_produces_single_cart_line(self) -> None:
+        """Test a meal item and restock item sharing a group key merge to one line.
+
+        Reproduction of issue #80: today the meal "milk 1 gal" and the
+        restock "milk 1 gal" are kept as two separate cart lines
+        instead of merging into a single line.
+        """
+        product = _make_product(price=3.99, size="1 gal")
+        builder = self._make_builder(product)
+        meal = _make_milk_item(quantity=1.0, unit="gal")
+        restock = _make_milk_item(quantity=1.0, unit="gal")
+
+        result = builder.build_cart([meal], restock_items=[restock])
+
+        assert len(result.items) + len(result.restock_items) == 1
+
+    def test_collision_line_is_restock_and_marks_inventory_once(self) -> None:
+        """Test the merged collision line lands in restock_items exactly once.
+
+        Reproduction of issue #80's inventory-corruption consequence:
+        today both the meal and restock copies land in
+        ``restock_items``, so ``mark_restocked`` (via
+        ``_collect_restock_ingredients``) would double-update inventory
+        for what is physically a single restock.
+        """
+        product = _make_product(price=3.99, size="1 gal")
+        builder = self._make_builder(product)
+        meal = _make_milk_item(quantity=1.0, unit="gal")
+        restock = _make_milk_item(quantity=1.0, unit="gal")
+
+        result = builder.build_cart([meal], restock_items=[restock])
+
+        assert len(result.restock_items) == 1
+        assert [
+            item.shopping_list_item.ingredient for item in result.restock_items
+        ] == ["milk"]
+
+    def test_collision_sums_quantities(self) -> None:
+        """Test the merged line's quantity covers both the meal and restock need.
+
+        1 gal (meal) + 1 gal (restock) against a "1 gal" product must
+        order 2 units in the single merged line -- enough to satisfy
+        both needs.
+        """
+        product = _make_product(price=3.99, size="1 gal")
+        builder = self._make_builder(product)
+        meal = _make_milk_item(quantity=1.0, unit="gal")
+        restock = _make_milk_item(quantity=1.0, unit="gal")
+
+        result = builder.build_cart([meal], restock_items=[restock])
+        merged_lines = result.items + result.restock_items
+
+        assert len(merged_lines) == 1
+        assert merged_lines[0].quantity_to_order == 2
+
+    def test_regular_item_sharing_name_not_misfiled_incompatible_units(
+        self,
+    ) -> None:
+        """Test incompatible-unit collisions stay split, classified by origin.
+
+        Reproduction of issue #80's misfiling defect: a meal item
+        "milk 2 cup" and a restock item "milk 1 bottle" have
+        incompatible group keys (dimensioned volume vs. dimensionless
+        packaging), so they must stay as two separate lines -- the
+        meal line in ``cart.items``, the restock line in
+        ``cart.restock_items``. Today, both are misclassified into
+        ``restock_items`` because classification keys on ingredient
+        name alone, regardless of unit compatibility.
+        """
+        product = _make_product(price=3.99, size="1 gal")
+        builder = self._make_builder(product)
+        meal = _make_milk_item(quantity=2.0, unit="cup")
+        restock = _make_milk_item(quantity=1.0, unit="bottle")
+
+        result = builder.build_cart([meal], restock_items=[restock])
+
+        assert len(result.items) == 1
+        assert len(result.restock_items) == 1
+        assert result.items[0].shopping_list_item.unit == Unit.CUP
+        assert result.restock_items[0].shopping_list_item.unit == Unit.BOTTLE
+
+    def test_merged_line_provenance_includes_meal_and_restock(self) -> None:
+        """Test the merged line's from_meals records both the meal and "restock".
+
+        Provenance for a merged collision line must include the
+        originating meal name(s) plus the literal string "restock" so
+        the cart display and any downstream provenance tracking can
+        still tell what was fused together.
+        """
+        product = _make_product(price=3.99, size="1 gal")
+        builder = self._make_builder(product)
+        meal = _make_milk_item(
+            quantity=1.0, unit="gal", from_meals=["Pancake Breakfast"]
+        )
+        restock = _make_milk_item(quantity=1.0, unit="gal")
+
+        result = builder.build_cart([meal], restock_items=[restock])
+        merged_lines = result.items + result.restock_items
+
+        assert len(merged_lines) == 1
+        from_meals = merged_lines[0].shopping_list_item.from_meals
+        assert "Pancake Breakfast" in from_meals
+        assert "restock" in from_meals
+
+    def test_no_collision_preserves_existing_separation(self) -> None:
+        """Test distinct ingredients still split correctly between the two lists.
+
+        A meal item for "eggs" and a restock item for "milk" share no
+        group key. This is not a reproduction of the bug -- today's
+        name-based classification already separates these correctly --
+        it's a regression guard so the issue #80 fix doesn't disturb
+        the existing, already-correct no-collision case.
+        """
+        product = _make_product(price=3.99, size="1 gal")
+        builder = self._make_builder(product)
+        meal = _make_item(ingredient="eggs", search_term="eggs")
+        restock = _make_milk_item(quantity=1.0, unit="gal")
+
+        result = builder.build_cart([meal], restock_items=[restock])
+
+        assert len(result.items) == 1
+        assert result.items[0].shopping_list_item.ingredient == "eggs"
+        assert len(result.restock_items) == 1
+        assert result.restock_items[0].shopping_list_item.ingredient == "milk"
+
+    def test_merged_quantity_exceeding_cap_flags_review(self) -> None:
+        """Test a merged quantity over the cap is capped and flagged for review.
+
+        8 gal (meal) + 8 gal (restock) against a "1 gal" product needs
+        16 units, which exceeds ``MAX_QUANTITY_PER_ITEM`` (10) -- the
+        merged line must be capped at 10 and flagged
+        ``review_reason="quantity_capped"``.
+        """
+        product = _make_product(price=3.99, size="1 gal")
+        builder = self._make_builder(product)
+        meal = _make_milk_item(quantity=8.0, unit="gal")
+        restock = _make_milk_item(quantity=8.0, unit="gal")
+
+        result = builder.build_cart([meal], restock_items=[restock])
+        merged_lines = result.items + result.restock_items
+
+        assert len(merged_lines) == 1
+        merged = merged_lines[0]
+        assert merged.quantity_to_order == MAX_QUANTITY_PER_ITEM
+        assert merged.needs_review is True
+        assert merged.review_reason == "quantity_capped"
+
+
+# ------------------------------------------------------------------
+# Tests: _merge_restock_into_meal (issue #80)
+# ------------------------------------------------------------------
+#
+# Direct test of the pure helper's "restock" marker dedup branch, which
+# isn't exercised through build_cart: build_cart only ever calls the
+# helper with a meal item that hasn't already been merged (see
+# _match_restock_to_meal), so a meal item whose from_meals already
+# contains "restock" only arises when the helper is invoked directly
+# with that precondition -- covered here for branch completeness.
+
+
+class TestMergeRestockIntoMeal:
+    """Direct tests for the _merge_restock_into_meal helper (issue #80)."""
+
+    def test_from_meals_dedup_skips_existing_restock_marker(self) -> None:
+        """Test the "restock" marker isn't duplicated if already present.
+
+        Covers the branch where ``meal_item.from_meals`` already
+        contains the literal ``"restock"`` marker -- it must not be
+        appended a second time.
+        """
+        meal_item = _make_milk_item(
+            quantity=1.0, unit="gal", from_meals=["Pancake Breakfast", "restock"]
+        )
+        restock_item = _make_milk_item(quantity=1.0, unit="gal")
+
+        merged = _merge_restock_into_meal(meal_item, restock_item)
+
+        assert merged.from_meals == ["Pancake Breakfast", "restock"]
+        assert merged.quantity == 2.0
+
+    def test_incompatible_units_fall_back_to_raw_quantity_sum(self) -> None:
+        """Test the defensive fallback when convert returns None.
+
+        The caller (``_merge_cart_inputs``) only pairs items sharing a
+        group key, which guarantees ``convert`` succeeds -- but if the
+        helper is ever invoked outside that precondition (e.g. cups vs.
+        a dimensionless packaging unit), it must degrade gracefully by
+        adding the raw quantity unconverted, mirroring
+        ``Consolidator._merge_quantity``'s defensive fallback.
+        """
+        meal_item = _make_milk_item(quantity=2.0, unit="cup")
+        restock_item = _make_milk_item(quantity=1.0, unit="bottle")
+
+        merged = _merge_restock_into_meal(meal_item, restock_item)
+
+        assert merged.quantity == 3.0
+        assert merged.unit == Unit.CUP
