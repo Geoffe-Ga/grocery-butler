@@ -14,6 +14,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from grocery_butler.consolidator import Consolidator
+from grocery_butler.db import init_db
 from grocery_butler.meal_parser import MealParser
 from grocery_butler.models import (
     CartItem,
@@ -1016,6 +1017,15 @@ def main(argv: list[str] | None = None) -> None:
 def _dispatch(args: argparse.Namespace) -> int:
     """Dispatch a parsed command to the appropriate handler.
 
+    Issue #78: initializes the database schema once, here at the
+    shared dispatch point, before any handler constructs a store.
+    ``init_db()`` is itself a cheap run-once guard (subsequent calls
+    made by handlers' own store constructors are no-ops), so this does
+    not duplicate migration work. The ``bot`` command is excluded: it
+    builds no store directly in this module and instead delegates
+    entirely to :func:`grocery_butler.bot.create_bot`, which performs
+    its own ``init_db()`` call.
+
     Args:
         args: Parsed command-line arguments.
 
@@ -1023,6 +1033,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         Exit code from the handler.
     """
     command: str = args.command
+    if command != "bot":
+        cfg = _load_config_safe()
+        init_db(cfg.database_path if cfg else "mealbot.db")
+
     if command == "plan":
         return _handle_plan(args)
     if command == "order":

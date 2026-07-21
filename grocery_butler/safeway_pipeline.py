@@ -11,6 +11,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from grocery_butler.cart_builder import CartBuilder
+from grocery_butler.db import init_db
 from grocery_butler.order_service import (
     ORDER_SUBMISSION_DISABLED_MESSAGE,
     OrderOutcome,
@@ -88,6 +89,11 @@ class SafewayPipeline:
         Raises:
             SafewayPipelineError: If required Safeway config is missing.
         """
+        # Issue #78: explicit schema init before any store is built
+        # below. init_db() is a run-once guard, so the stores'
+        # own init_db() calls are cheap no-ops.
+        init_db(db_path)
+
         if not config.safeway_username or not config.safeway_password:
             raise SafewayPipelineError(
                 "Safeway credentials required: set SAFEWAY_USERNAME "

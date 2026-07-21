@@ -511,6 +511,7 @@ def create_bot(config: Config) -> discord.Client:
         Configured Discord client ready to run.
     """
     from grocery_butler.consolidator import Consolidator
+    from grocery_butler.db import init_db
     from grocery_butler.meal_parser import MealParser
     from grocery_butler.pantry_manager import PantryManager
     from grocery_butler.recipe_store import RecipeStore
@@ -527,6 +528,10 @@ def create_bot(config: Config) -> discord.Client:
 
     # Initialize backend services
     db_path = config.database_path
+    # Issue #78: explicit schema init before any store is constructed.
+    # init_db() is a run-once guard, so the store constructors' own
+    # init_db() calls below are cheap no-ops.
+    init_db(db_path)
     recipe_store = RecipeStore(db_path)
     pantry_manager = PantryManager(db_path)
     meal_parser = MealParser(recipe_store)
