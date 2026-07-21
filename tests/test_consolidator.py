@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
@@ -365,7 +366,7 @@ class TestParseShoppingItem:
         assert result.category == IngredientCategory.MEAT
         assert result.search_term == "boneless chicken thighs"
         assert result.from_meals == ["Chicken Tacos"]
-        assert result.estimated_price == 8.99
+        assert result.estimated_price == Decimal("8.99")
 
     def test_defaults_for_missing_fields(self):
         """Test default values when fields are missing."""

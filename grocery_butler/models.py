@@ -8,12 +8,78 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, PlainSerializer, field_validator
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Money
+# ---------------------------------------------------------------------------
+
+#: Cent-precision quantum used to round every monetary amount to exactly
+#: two decimal places (issue #81).
+CENTS = Decimal("0.01")
+
+
+def _coerce_money(v: Any) -> Any:
+    """Coerce a raw value into a :class:`~decimal.Decimal` for a Money field.
+
+    ``bool`` is rejected explicitly even though Python treats ``bool`` as a
+    subtype of ``int`` -- ``True``/``False`` are never legitimate monetary
+    values. A :class:`~decimal.Decimal` instance passes through unchanged.
+    ``int``, ``float``, and ``str`` are coerced via ``Decimal(str(v))`` (the
+    ``str()`` round-trip avoids binary-float imprecision leaking into the
+    Decimal representation). Any other type is returned unchanged so
+    Pydantic's own type validation can reject it with its usual error.
+    Non-finite results (``NaN``, ``Infinity``, ``-Infinity``) are rejected
+    to preserve the issue #73 ``allow_inf_nan=False`` semantics that this
+    validator now owns instead of a bare ``Field`` constraint.
+
+    Args:
+        v: The raw value supplied for a Money field.
+
+    Returns:
+        A finite ``Decimal``, or ``v`` unchanged if it isn't a type this
+        coercion understands (letting Pydantic reject it downstream).
+
+    Raises:
+        ValueError: If ``v`` is a ``bool``, an unparseable numeric string,
+            or coerces to a non-finite ``Decimal``.
+    """
+    if isinstance(v, bool):
+        msg = "bool is not a valid monetary value"
+        raise ValueError(msg)
+    if isinstance(v, Decimal):
+        result = v
+    elif isinstance(v, (int, float, str)):
+        try:
+            result = Decimal(str(v))
+        except InvalidOperation as exc:
+            msg = f"{v!r} is not a valid monetary value"
+            raise ValueError(msg) from exc
+    else:
+        return v
+    if not result.is_finite():
+        msg = "monetary value must be finite"
+        raise ValueError(msg)
+    return result
+
+
+#: A monetary amount stored as a finite :class:`~decimal.Decimal` for exact
+#: cent-level arithmetic, coerced from int/float/str/Decimal on input via
+#: :func:`_coerce_money` (rejecting ``bool`` and non-finite values -- issue
+#: #73's semantics live here now) and serialized back to a plain JSON
+#: ``float`` on output, since neither JSON nor most HTTP client libraries
+#: understand ``Decimal`` natively (issue #81).
+Money = Annotated[
+    Decimal,
+    BeforeValidator(_coerce_money),
+    PlainSerializer(float, return_type=float, when_used="json"),
+]
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -330,7 +396,7 @@ class ShoppingListItem(BaseModel):
     category: IngredientCategory
     search_term: str
     from_meals: list[str]
-    estimated_price: float | None = None
+    estimated_price: Money | None = None
 
     @field_validator("unit", mode="before")
     @classmethod
@@ -407,8 +473,8 @@ class SafewayProduct(BaseModel):
 
     product_id: str
     name: str
-    price: float
-    unit_price: float | None = None
+    price: Money
+    unit_price: Money | None = None
     size: str
     in_stock: bool = True
 
@@ -439,10 +505,12 @@ class CartItem(BaseModel):
         shopping_list_item: The originating shopping list item.
         safeway_product: The matched Safeway product.
         quantity_to_order: Number of product units to order.
-        estimated_cost: Estimated cost for ``quantity_to_order`` units.
-            Must be finite — JSON's non-standard ``Infinity``/``NaN``
-            literals are rejected at validation (issue #73), keeping
-            non-finite values out of server-side total computation.
+        estimated_cost: Estimated cost for ``quantity_to_order`` units, as
+            a ``Decimal`` (issue #81). Must be finite — JSON's
+            non-standard ``Infinity``/``NaN`` literals are rejected at
+            validation by the ``Money`` type's coercion validator (issue
+            #73), keeping non-finite values out of server-side total
+            computation.
         needs_review: Whether the item needs human review (e.g. an
             unparseable product size, incomparable units, a quantity
             capped by the per-item maximum, or an auto-selected
@@ -456,7 +524,7 @@ class CartItem(BaseModel):
     shopping_list_item: ShoppingListItem
     safeway_product: SafewayProduct
     quantity_to_order: int
-    estimated_cost: float = Field(allow_inf_nan=False)
+    estimated_cost: Money
     needs_review: bool = False
     review_reason: str = ""
 
@@ -464,14 +532,15 @@ class CartItem(BaseModel):
 class FulfillmentOption(BaseModel):
     """A fulfillment option (pickup or delivery) with scheduling.
 
-    The ``fee`` must be finite — JSON's non-standard ``Infinity``/``NaN``
-    literals are rejected at validation (issue #73), keeping non-finite
-    values out of server-side total computation.
+    The ``fee`` is a ``Decimal`` (issue #81) and must be finite — JSON's
+    non-standard ``Infinity``/``NaN`` literals are rejected at validation
+    by the ``Money`` type's coercion validator (issue #73), keeping
+    non-finite values out of server-side total computation.
     """
 
     type: FulfillmentType
     available: bool
-    fee: float = Field(allow_inf_nan=False)
+    fee: Money
     windows: list[dict[str, Any]]
     next_window: str | None = None
 
@@ -485,14 +554,14 @@ class CartSummary(BaseModel):
         substituted_items: Out-of-stock items with substitution results.
         skipped_items: Items explicitly skipped by the caller.
         restock_items: Restock-queue cart items.
-        subtotal: Sum of all item costs before fulfillment fees. Must
-            be finite (issue #73).
+        subtotal: Sum of all item costs before fulfillment fees, as a
+            ``Decimal`` (issue #81). Must be finite (issue #73).
         fulfillment_options: Fulfillment options fetched from Safeway, or
             an empty list when the fetch failed (see
             ``fulfillment_unverified``).
         recommended_fulfillment: The recommended fulfillment type.
-        estimated_total: Subtotal plus the recommended fulfillment fee.
-            Must be finite (issue #73).
+        estimated_total: Subtotal plus the recommended fulfillment fee,
+            as a ``Decimal`` (issue #81). Must be finite (issue #73).
         fulfillment_unverified: True when Safeway's fulfillment options
             could not be fetched, so ``fulfillment_options`` is empty and
             ``estimated_total`` excludes any fulfillment fee (issue #72).
@@ -507,10 +576,10 @@ class CartSummary(BaseModel):
     substituted_items: list[SubstitutionResult]
     skipped_items: list[ShoppingListItem] = []
     restock_items: list[CartItem]
-    subtotal: float = Field(allow_inf_nan=False)
+    subtotal: Money
     fulfillment_options: list[FulfillmentOption]
     recommended_fulfillment: FulfillmentType
-    estimated_total: float = Field(allow_inf_nan=False)
+    estimated_total: Money
     fulfillment_unverified: bool = False
 
 

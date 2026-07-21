@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -497,33 +498,36 @@ def _parse_single_product(item: dict[str, Any]) -> SafewayProduct | None:
     if not product_id or not name:
         return None
 
-    price = _parse_price(item)
+    unit_price = _safe_float(item.get("unitPrice"))
     return SafewayProduct(
         product_id=str(product_id),
         name=str(name),
-        price=price,
-        unit_price=_safe_float(item.get("unitPrice")),
+        price=_parse_price(item),
+        unit_price=Decimal(str(unit_price)) if unit_price is not None else None,
         size=str(item.get("size", "")),
         in_stock=item.get("inStock", True) is not False,
     )
 
 
-def _parse_price(item: dict[str, Any]) -> float:
+def _parse_price(item: dict[str, Any]) -> Decimal:
     """Extract the best available price from a product entry.
 
-    Prefers ``salePrice`` over ``price`` over ``basePrice``.
+    Prefers ``salePrice`` over ``price`` over ``basePrice``. The value
+    is converted via ``Decimal(str(...))`` so a JSON float is read at
+    its exact decimal representation (issue #81).
 
     Args:
         item: Product dict from the Nimbus response.
 
     Returns:
-        Price as a float, defaulting to 0.0 if unparseable.
+        Price as a ``Decimal``, defaulting to ``Decimal("0")`` if
+        unparseable.
     """
     for key in ("salePrice", "price", "basePrice"):
         value = _safe_float(item.get(key))
         if value is not None and value > 0:
-            return value
-    return 0.0
+            return Decimal(str(value))
+    return Decimal("0")
 
 
 def _safe_float(value: float | int | str | None) -> float | None:
@@ -567,7 +571,12 @@ def _row_to_cached_mapping(row: DictRow) -> CachedMapping:
         product=SafewayProduct(
             product_id=row["safeway_product_id"],
             name=row["safeway_product_name"],
-            price=row["safeway_price"] or 0.0,
+            # SQLite stores the Decimal price in a REAL (float64) column
+            # (see db.adapter._adapt_sqlite_params); Decimal(str(...))
+            # recovers the original digits via Python's shortest
+            # round-trip float repr, which is reliable for cent-level
+            # prices (issue #81).
+            price=Decimal(str(row["safeway_price"] or 0)),
             size=row["safeway_product_size"] or "",
             in_stock=True if in_stock_value is None else bool(in_stock_value),
         ),

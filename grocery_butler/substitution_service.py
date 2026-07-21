@@ -171,10 +171,13 @@ class SubstitutionService:
         Returns:
             Formatted prompt string.
         """
+        # ``price`` is a Decimal on the model (issue #81); stdlib
+        # ``json.dumps`` can't serialize Decimal, so convert to float at
+        # this JSON (prompt) boundary.
         alt_dicts = [
             {
                 "name": p.name,
-                "price": p.price,
+                "price": float(p.price),
                 "size": p.size,
                 "product_id": p.product_id,
             }

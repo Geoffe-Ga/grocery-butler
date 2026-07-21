@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
@@ -416,7 +417,9 @@ class TestGetFulfillmentFee:
                 windows=[],
             ),
         ]
-        assert _get_fulfillment_fee(options, FulfillmentType.DELIVERY) == 9.95
+        assert _get_fulfillment_fee(options, FulfillmentType.DELIVERY) == Decimal(
+            "9.95"
+        )
 
     def test_missing_type(self) -> None:
         """Test returns 0 when type not found."""
@@ -453,7 +456,7 @@ class TestParseFulfillmentResponse:
         assert len(result) == 2
         assert result[0].type == FulfillmentType.PICKUP
         assert result[0].next_window == "Today 4-6pm"
-        assert result[1].fee == 9.95
+        assert result[1].fee == Decimal("9.95")
         assert result[1].next_window is None
 
     def test_empty_response(self) -> None:
@@ -536,7 +539,7 @@ class TestBuildCart:
         assert len(result.items) == 1
         assert result.items[0].safeway_product.product_id == "P001"
         assert result.items[0].quantity_to_order == 1
-        assert result.items[0].estimated_cost == 8.99
+        assert result.items[0].estimated_cost == Decimal("8.99")
         assert result.failed_items == []
 
     def test_no_products_found(self) -> None:
@@ -1155,7 +1158,7 @@ class TestBuildCartSubstitutionPricing:
         substitute_item = cart.items[0]
         assert substitute_item.safeway_product.product_id == "ALT1"
         assert substitute_item.quantity_to_order == 2
-        assert substitute_item.estimated_cost == round(10.99 * 2, 2)
+        assert substitute_item.estimated_cost == Decimal("21.98")
 
     def test_substitution_priced_into_subtotal(self) -> None:
         """Test the substitute's cost is included in cart.subtotal."""
@@ -1170,7 +1173,7 @@ class TestBuildCartSubstitutionPricing:
 
         cart = builder.build_cart([_make_item()])
 
-        assert cart.subtotal == round(10.99 * 2, 2)
+        assert cart.subtotal == Decimal("21.98")
 
     def test_substitution_flagged_for_review(self) -> None:
         """Test the substitute CartItem is always flagged for review.
@@ -1226,9 +1229,9 @@ class TestBuildCartSubstitutionPricing:
 
         cart = builder.build_cart([_make_item()])
 
-        expected_subtotal = round(10.99 * 2, 2)
         assert cart.recommended_fulfillment == FulfillmentType.DELIVERY
-        assert cart.estimated_total == round(expected_subtotal + 9.95, 2)
+        # $21.98 substitution subtotal plus the $9.95 delivery fee.
+        assert cart.estimated_total == Decimal("31.93")
 
     def test_substitution_still_listed_in_substituted_items(self) -> None:
         """Test substituted_items still records the substitution (regression).
@@ -1282,7 +1285,7 @@ class TestBuildCartSubstitutionPricing:
         assert substitute_item.safeway_product.product_id == "ALT1"
         assert substitute_item.needs_review is True
         assert substitute_item.review_reason == "substitution"
-        assert cart.subtotal == round(10.99 * 2, 2)
+        assert cart.subtotal == Decimal("21.98")
         assert cart.estimated_total == cart.subtotal
 
     def test_no_alternative_substitution_not_added_to_items(self) -> None:
@@ -1513,7 +1516,7 @@ class TestCartBuilderCacheFlow:
         result = builder.build_cart([item])
 
         assert len(result.items) == 1
-        assert result.items[0].estimated_cost == 5.49
+        assert result.items[0].estimated_cost == Decimal("5.49")
 
     def test_no_product_selected_returns_failed(self) -> None:
         """Test a cache miss with no selected product fails without saving."""
@@ -1594,6 +1597,6 @@ class TestCartBuilderCacheFlow:
         assert substitute_item.needs_review is True
         assert substitute_item.review_reason == "substitution"
         assert substitute_item.quantity_to_order == 2
-        assert substitute_item.estimated_cost == round(10.99 * 2, 2)
-        assert result.subtotal == round(10.99 * 2, 2)
+        assert substitute_item.estimated_cost == Decimal("21.98")
+        assert result.subtotal == Decimal("21.98")
         assert result.substituted_items == [sub_result]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from unittest.mock import patch
 
@@ -154,7 +155,7 @@ class TestParseSearchResults:
         assert len(result) == 1
         assert result[0].product_id == "00012345"
         assert result[0].name == "Whole Milk 1 Gallon"
-        assert result[0].price == 4.99
+        assert result[0].price == Decimal("4.99")
         assert result[0].size == "1 gal"
         assert result[0].in_stock is True
 
@@ -226,7 +227,7 @@ class TestParseSingleProduct:
         result = _parse_single_product(item)
 
         assert result is not None
-        assert result.price == 2.99
+        assert result.price == Decimal("2.99")
 
     def test_unit_price_parsed(self) -> None:
         """Test that unitPrice is parsed when present."""
@@ -240,7 +241,7 @@ class TestParseSingleProduct:
         result = _parse_single_product(item)
 
         assert result is not None
-        assert result.unit_price == 0.16
+        assert result.unit_price == Decimal("0.16")
 
 
 # ------------------------------------------------------------------
@@ -328,7 +329,7 @@ class TestSearchProducts:
 
         assert len(results) == 1
         assert results[0].product_id == "001"
-        assert results[0].price == 3.99
+        assert results[0].price == Decimal("3.99")
         client.close()
 
     @patch("grocery_butler.safeway_client.time.sleep")
@@ -412,7 +413,7 @@ class TestCacheOperations:
         assert cached is not None
         assert cached.product.product_id == "UPC001"
         assert cached.product.name == "Organic Whole Milk"
-        assert cached.product.price == 5.99
+        assert cached.product.price == Decimal("5.99")
         assert cached.is_pinned is False
         assert cached.times_selected == 1
 
@@ -595,7 +596,7 @@ class TestCacheOperations:
         cached = service.get_cached_mapping("whole milk")
 
         assert cached is not None
-        assert cached.product.price == 5.49
+        assert cached.product.price == Decimal("5.49")
         assert cached.product.size == "0.5 gal"
         assert cached.product.in_stock is False
 
@@ -630,7 +631,7 @@ class TestCacheOperations:
 
         assert cached is not None
         assert cached.is_pinned is True
-        assert cached.product.price == 5.79
+        assert cached.product.price == Decimal("5.79")
         assert cached.product.size == "0.5 gal"
         assert cached.product.in_stock is False
 
@@ -839,7 +840,7 @@ class TestReverifyProduct:
         result = service.reverify_product(cached)
 
         assert result.product_id == "P1"
-        assert result.price == 5.49
+        assert result.price == Decimal("5.49")
         assert result.size == "2 lb"
         assert result.in_stock is True
         client.close()
@@ -868,7 +869,7 @@ class TestReverifyProduct:
         result = service.reverify_product(cached)
 
         assert result.product_id == "P1"
-        assert result.price == 3.99
+        assert result.price == Decimal("3.99")
         assert result.size == "1 lb"
         assert result.in_stock is False
         client.close()
@@ -968,7 +969,7 @@ class TestRowToCachedMapping:
             assert result.ingredient_description == "milk"
             assert result.product.product_id == "UPC1"
             assert result.product.name == "Test Milk"
-            assert result.product.price == 3.99
+            assert result.product.price == Decimal("3.99")
             assert result.product.size == "1 gal"
             assert result.product.in_stock is False
             assert result.is_pinned is True

@@ -20,7 +20,7 @@ from grocery_butler.order_service import (
     _build_order_payload,
     _collect_restock_ingredients,
     _parse_order_response,
-    _safe_float,
+    _safe_money,
     _serialize_cart_items,
 )
 
@@ -228,7 +228,7 @@ class TestBuildOrderPayload:
 
         assert "items" in result
         assert result["fulfillmentType"] == "pickup"
-        assert result["estimatedTotal"] == cart.estimated_total
+        assert result["estimatedTotal"] == float(cart.estimated_total)
 
     def test_includes_restock_items(self) -> None:
         """Test restock items are included in payload."""
@@ -262,7 +262,7 @@ class TestBuildOrderPayload:
 
         product_ids = [i["productId"] for i in result["items"]]
         assert "ALT1" in product_ids
-        assert result["estimatedTotal"] == cart.estimated_total
+        assert result["estimatedTotal"] == float(cart.estimated_total)
 
 
 # ------------------------------------------------------------------
@@ -288,7 +288,7 @@ class TestParseOrderResponse:
         assert result.order_id == "ORD-12345"
         assert result.status == "confirmed"
         assert result.estimated_time == "Today 4-6pm"
-        assert result.total == 25.99
+        assert result.total == Decimal("25.99")
 
     def test_error_response(self) -> None:
         """Test error status returns None."""
@@ -1015,36 +1015,43 @@ class TestSubmissionDisabledGate:
 
 
 # ------------------------------------------------------------------
-# Tests: _safe_float
+# Tests: _safe_money
 # ------------------------------------------------------------------
 
 
-class TestSafeFloat:
-    """Tests for _safe_float."""
+class TestSafeMoney:
+    """Tests for _safe_money (see tests/test_money.py for more).
 
-    def test_valid_float(self) -> None:
-        """Test valid float value passes through."""
-        assert _safe_float(25.99, 0.0) == 25.99
+    ``_safe_money`` replaced the float-era ``_safe_float`` for issue
+    #81; the core Decimal semantics (string/None/garbage/NaN/quantize)
+    are covered in ``tests/test_money.py`` — these cases keep the
+    float-input, int-input, and empty-string coverage the old
+    ``_safe_float`` tests provided.
+    """
 
-    def test_valid_int(self) -> None:
-        """Test integer value converts to float."""
-        assert _safe_float(10, 0.0) == 10.0
+    def test_valid_float_becomes_exact_decimal(self) -> None:
+        """Test a float value converts to its exact decimal reading."""
+        assert _safe_money(25.99, Decimal("0")) == Decimal("25.99")
 
-    def test_valid_string(self) -> None:
-        """Test numeric string converts to float."""
-        assert _safe_float("12.50", 0.0) == 12.50
+    def test_valid_int_becomes_decimal(self) -> None:
+        """Test an integer value converts to a cents-quantized Decimal."""
+        assert _safe_money(10, Decimal("0")) == Decimal("10.00")
+
+    def test_valid_string_becomes_decimal(self) -> None:
+        """Test a numeric string converts to a Decimal."""
+        assert _safe_money("12.50", Decimal("0")) == Decimal("12.50")
 
     def test_none_returns_fallback(self) -> None:
         """Test None returns fallback."""
-        assert _safe_float(None, 42.0) == 42.0
+        assert _safe_money(None, Decimal("42.00")) == Decimal("42.00")
 
     def test_invalid_string_returns_fallback(self) -> None:
         """Test non-numeric string returns fallback."""
-        assert _safe_float("N/A", 99.0) == 99.0
+        assert _safe_money("N/A", Decimal("99.00")) == Decimal("99.00")
 
     def test_empty_string_returns_fallback(self) -> None:
         """Test empty string returns fallback."""
-        assert _safe_float("", 5.0) == 5.0
+        assert _safe_money("", Decimal("5.00")) == Decimal("5.00")
 
 
 # ------------------------------------------------------------------

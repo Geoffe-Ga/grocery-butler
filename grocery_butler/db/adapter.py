@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -162,6 +163,36 @@ class DatabaseConnection(Protocol):
 # ------------------------------------------------------------------
 
 
+def _adapt_sqlite_params(params: Sequence[Any]) -> Sequence[Any]:
+    """Convert parameter values sqlite3 can't bind natively.
+
+    ``sqlite3`` has no built-in adapter for :class:`~decimal.Decimal`
+    (money fields are Decimal end-to-end per issue #81), so Decimal
+    values are bound as their string representation. SQLite's column
+    type affinity then converts the text to the column's declared type
+    (e.g. ``"4.15"`` -> ``4.15`` in a ``REAL`` column). Note ``REAL``
+    is IEEE-754 binary64, not true decimal storage: the read path's
+    ``Decimal(str(...))`` recovers the original digits via Python's
+    shortest-round-trip float repr, which is reliable for cent-level
+    money values but is not an exactness guarantee for arbitrary
+    precision. A local conversion is used instead of the process-global
+    ``sqlite3.register_adapter`` so behavior stays scoped to this
+    adapter.
+
+    Args:
+        params: Parameter values as supplied by business logic.
+
+    Returns:
+        The original sequence if no Decimal is present, otherwise a
+        tuple with each Decimal replaced by ``str(value)``.
+    """
+    if not any(isinstance(value, Decimal) for value in params):
+        return params
+    return tuple(
+        str(value) if isinstance(value, Decimal) else value for value in params
+    )
+
+
 class SQLiteCursorResult:
     """Wraps a ``sqlite3.Cursor`` to satisfy :class:`CursorResult`."""
 
@@ -242,7 +273,7 @@ class SQLiteConnection:
         Returns:
             A SQLiteCursorResult wrapping the cursor.
         """
-        cursor = self._conn.execute(sql, params)
+        cursor = self._conn.execute(sql, _adapt_sqlite_params(params))
         return SQLiteCursorResult(cursor)
 
     def executescript(self, sql: str) -> None:
