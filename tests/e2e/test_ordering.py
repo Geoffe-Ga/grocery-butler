@@ -7,7 +7,7 @@ real; only the httpx transport inside ``SafewayClient`` is mocked.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -15,8 +15,6 @@ from grocery_butler.safeway_client import OKTA_CLIENT_ID
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from flask.testing import FlaskClient
 
     from tests.e2e.conftest import SafewayMockState
 
@@ -49,17 +47,13 @@ def _shopping_list_body(ingredients: list[str]) -> dict[str, object]:
 
 
 def test_order_preview_happy_path_traverses_full_pipeline(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     no_claude: None,
     safeway_mock: SafewayMockState,
 ) -> None:
     """A clean shopping list builds a cart and hits every pipeline stage."""
-    headers = signed_headers()
-    response = client.post(
-        "/api/v1/order/preview",
-        json=_shopping_list_body(["milk", "bread"]),
-        headers=headers,
+    response = signed_request(
+        "POST", "/api/v1/order/preview", _shopping_list_body(["milk", "bread"])
     )
     assert response.status_code == 200
     body = response.get_json()
@@ -77,8 +71,7 @@ def test_order_preview_happy_path_traverses_full_pipeline(
 
 
 def test_order_preview_substitution_reflected_in_response(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     no_claude: None,
     safeway_mock: SafewayMockState,
 ) -> None:
@@ -94,7 +87,6 @@ def test_order_preview_substitution_reflected_in_response(
     substitution), while ``substituted_items`` continues to carry the
     same provenance record as before.
     """
-    headers = signed_headers()
     safeway_mock.oos_once.add("bell pepper")
     safeway_mock.available_products["bell pepper"] = [
         {
@@ -106,10 +98,8 @@ def test_order_preview_substitution_reflected_in_response(
         },
     ]
 
-    response = client.post(
-        "/api/v1/order/preview",
-        json=_shopping_list_body(["bell pepper"]),
-        headers=headers,
+    response = signed_request(
+        "POST", "/api/v1/order/preview", _shopping_list_body(["bell pepper"])
     )
     assert response.status_code == 200
     cart = response.get_json()["cart"]
@@ -132,19 +122,15 @@ def test_order_preview_substitution_reflected_in_response(
 
 
 def test_order_preview_empty_search_yields_failed_item(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     no_claude: None,
     safeway_mock: SafewayMockState,
 ) -> None:
     """An ingredient with no search results ends up in failed_items."""
-    headers = signed_headers()
     safeway_mock.force_search_empty = True
 
-    response = client.post(
-        "/api/v1/order/preview",
-        json=_shopping_list_body(["unobtainium"]),
-        headers=headers,
+    response = signed_request(
+        "POST", "/api/v1/order/preview", _shopping_list_body(["unobtainium"])
     )
     assert response.status_code == 200
     cart = response.get_json()["cart"]
@@ -153,8 +139,7 @@ def test_order_preview_empty_search_yields_failed_item(
 
 
 def test_order_preview_auth_failure_returns_503(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     no_claude: None,
     safeway_mock: SafewayMockState,
 ) -> None:
@@ -165,38 +150,31 @@ def test_order_preview_auth_failure_returns_503(
     text -- that detail is logged server-side instead of relayed to the
     client.
     """
-    headers = signed_headers()
     safeway_mock.force_auth_fail = True
 
-    response = client.post(
-        "/api/v1/order/preview",
-        json=_shopping_list_body(["milk"]),
-        headers=headers,
+    response = signed_request(
+        "POST", "/api/v1/order/preview", _shopping_list_body(["milk"])
     )
     assert response.status_code == 503
     assert response.get_json()["error"] == "cart build failed"
 
 
 def test_order_submit_confirm_hits_orders_endpoint_with_confirmation(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     no_claude: None,
     safeway_mock: SafewayMockState,
 ) -> None:
     """Confirming a staged, non-substituted cart really submits the order."""
-    headers = signed_headers()
-    preview = client.post(
-        "/api/v1/order/preview",
-        json=_shopping_list_body(["milk", "eggs"]),
-        headers=headers,
+    preview = signed_request(
+        "POST", "/api/v1/order/preview", _shopping_list_body(["milk", "eggs"])
     )
     body = preview.get_json()
     assert body["cart"]["substituted_items"] == []
 
-    submitted = client.post(
+    submitted = signed_request(
+        "POST",
         "/api/v1/order/submit",
-        json={"cart": body["cart"], "total": body["total"]},
-        headers=headers,
+        {"cart": body["cart"], "total": body["total"]},
     )
     submit_body = submitted.get_json()
     action_id = submit_body["action_id"]
@@ -212,10 +190,8 @@ def test_order_submit_confirm_hits_orders_endpoint_with_confirmation(
     assert "eggs" in staged_message
     assert "incomparable_units" in staged_message
 
-    confirmed = client.post(
-        "/api/v1/actions/confirm",
-        json={"action_id": action_id},
-        headers=headers,
+    confirmed = signed_request(
+        "POST", "/api/v1/actions/confirm", {"action_id": action_id}
     )
     assert confirmed.status_code == 200
     result = confirmed.get_json()["result"]

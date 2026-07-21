@@ -25,7 +25,8 @@ if TYPE_CHECKING:
     from flask.testing import FlaskClient
 
 from grocery_butler.app import create_app
-from grocery_butler.auth_middleware import SECRET_ENV_VAR, mint_token
+from grocery_butler.auth_middleware import SECRET_ENV_VAR
+from tests.conftest import bearer_header
 
 TEST_SECRET = "test-shared-secret"
 
@@ -77,11 +78,8 @@ class TestSingleProcessServesBothSurfaces:
         assert html_response.status_code == 200
         assert "text/html" in html_response.content_type
 
-        token = mint_token("rubotpaul")
-        api_response = client.get(
-            "/api/v1/inventory",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        headers = bearer_header("rubotpaul", "GET", "/api/v1/inventory")
+        api_response = client.get("/api/v1/inventory", headers=headers)
         assert api_response.status_code == 200
         assert api_response.is_json
         assert api_response.get_json() == {"items": []}

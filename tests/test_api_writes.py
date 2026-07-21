@@ -1,7 +1,16 @@
-"""Tests for the /api/v1 low-stakes write endpoints (grocery_butler.api)."""
+"""Tests for the /api/v1 low-stakes write endpoints (grocery_butler.api).
+
+Issue #74: every bearer token minted in this module is now bound to the
+exact (method, path, body) of the request it authorizes, via the shared
+``tests.conftest.bearer_header`` helper. A single static header cannot
+cover the many different requests exercised here, so the
+``auth_headers`` fixture is a per-request minting factory rather than a
+static header dict.
+"""
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from typing import TYPE_CHECKING, Any
@@ -10,13 +19,16 @@ from unittest.mock import patch
 import pytest
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from flask import Flask
     from flask.testing import FlaskClient
 
+    AuthHeaderFactory = Callable[[str, str, bytes], dict[str, str]]
+
 from grocery_butler.app import create_app
-from grocery_butler.auth_middleware import SECRET_ENV_VAR, mint_token
+from grocery_butler.auth_middleware import SECRET_ENV_VAR
 from grocery_butler.models import (
     Ingredient,
     IngredientCategory,
@@ -26,6 +38,7 @@ from grocery_butler.models import (
 )
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
+from tests.conftest import bearer_header
 
 TEST_SECRET = "test-shared-secret"
 SECRET_ENV = {SECRET_ENV_VAR: TEST_SECRET}
@@ -76,11 +89,26 @@ def recipe_store(db_path: str) -> RecipeStore:
 
 
 @pytest.fixture()
-def auth_headers() -> dict[str, str]:
-    """Return a valid Authorization header minted with the test secret."""
-    with patch.dict(os.environ, SECRET_ENV):
-        token = mint_token("rubotpaul")
-    return {"Authorization": f"Bearer {token}"}
+def auth_headers() -> AuthHeaderFactory:
+    """Return a factory that mints a bearer header for one exact request.
+
+    A single static header cannot authorize every request exercised in
+    this module -- each write endpoint call has its own method, path,
+    and body, and the request-bound token contract (issue #74) signs
+    all three together. Callers invoke the returned factory once per
+    request, e.g. ``auth_headers("POST", "/api/v1/stock/add", body)``.
+
+    Returns:
+        A callable ``(method, path, body=b"") -> {"Authorization": ...}``
+        that mints tokens under the test shared secret.
+    """
+
+    def _make(method: str, path: str, body: bytes = b"") -> dict[str, str]:
+        """Mint a bearer header bound to the given method/path/body."""
+        with patch.dict(os.environ, SECRET_ENV):
+            return bearer_header("rubotpaul", method, path, body)
+
+    return _make
 
 
 @pytest.fixture()
@@ -117,11 +145,31 @@ def sample_meal() -> ParsedMeal:
 def _post(
     client: FlaskClient,
     path: str,
-    headers: dict[str, str],
+    auth_headers: AuthHeaderFactory,
     body: dict[str, Any],
 ) -> Any:
-    """POST a JSON body with auth headers."""
-    return client.post(path, json=body, headers=headers)
+    """POST a JSON-serializable body with a token bound to the exact bytes sent.
+
+    Serializes ``body`` exactly once so the identical bytes are both
+    sent as the request payload and hashed into the bearer token's
+    binding -- the two must match byte-for-byte for the server's HMAC
+    verification to succeed (issue #74).
+
+    Args:
+        client: Flask test client.
+        path: Request path to POST to.
+        auth_headers: Factory fixture minting a bearer header for one
+            exact (method, path, body) triple.
+        body: JSON-serializable request payload.
+
+    Returns:
+        The Flask test client's response.
+    """
+    serialized = json.dumps(body).encode()
+    headers = auth_headers("POST", path, serialized)
+    return client.post(
+        path, data=serialized, content_type="application/json", headers=headers
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +205,7 @@ def test_write_endpoints_require_bearer(
 def test_stock_update_writes_status(
     client: FlaskClient,
     pantry_mgr: PantryManager,
-    auth_headers: dict[str, str],
+    auth_headers: AuthHeaderFactory,
     sample_item: InventoryItem,
     token: str,
     expected: InventoryStatus,
@@ -181,7 +229,7 @@ def test_stock_update_writes_status(
 def test_stock_update_rejects_bad_status(
     client: FlaskClient,
     pantry_mgr: PantryManager,
-    auth_headers: dict[str, str],
+    auth_headers: AuthHeaderFactory,
     sample_item: InventoryItem,
 ) -> None:
     """A status outside in/out/low/good is a 400 and writes nothing."""
@@ -200,7 +248,7 @@ def test_stock_update_rejects_bad_status(
 
 
 def test_stock_update_rejects_non_string_status(
-    client: FlaskClient, auth_headers: dict[str, str]
+    client: FlaskClient, auth_headers: AuthHeaderFactory
 ) -> None:
     """A non-string status is a 400, not a server error."""
     with patch.dict(os.environ, SECRET_ENV):
@@ -214,7 +262,7 @@ def test_stock_update_rejects_non_string_status(
 
 
 def test_stock_update_requires_item(
-    client: FlaskClient, auth_headers: dict[str, str]
+    client: FlaskClient, auth_headers: AuthHeaderFactory
 ) -> None:
     """A missing item is a 400."""
     with patch.dict(os.environ, SECRET_ENV):
@@ -225,7 +273,7 @@ def test_stock_update_requires_item(
 
 
 def test_stock_update_unknown_item_404(
-    client: FlaskClient, auth_headers: dict[str, str]
+    client: FlaskClient, auth_headers: AuthHeaderFactory
 ) -> None:
     """Updating an untracked item is a JSON 404."""
     with patch.dict(os.environ, SECRET_ENV):
@@ -240,12 +288,16 @@ def test_stock_update_unknown_item_404(
 
 
 def test_stock_update_rejects_non_object_body(
-    client: FlaskClient, auth_headers: dict[str, str]
+    client: FlaskClient, auth_headers: AuthHeaderFactory
 ) -> None:
     """A non-object JSON body is a 400."""
     with patch.dict(os.environ, SECRET_ENV):
+        serialized = json.dumps(["milk"]).encode()
         response = client.post(
-            "/api/v1/stock/update", json=["milk"], headers=auth_headers
+            "/api/v1/stock/update",
+            data=serialized,
+            content_type="application/json",
+            headers=auth_headers("POST", "/api/v1/stock/update", serialized),
         )
     assert response.status_code == 400
 
@@ -256,7 +308,7 @@ def test_stock_update_rejects_non_object_body(
 
 
 def test_stock_add_creates_item(
-    client: FlaskClient, pantry_mgr: PantryManager, auth_headers: dict[str, str]
+    client: FlaskClient, pantry_mgr: PantryManager, auth_headers: AuthHeaderFactory
 ) -> None:
     """A valid add returns 201 and persists the item."""
     with patch.dict(os.environ, SECRET_ENV):
@@ -285,7 +337,7 @@ def test_stock_add_creates_item(
     ],
 )
 def test_stock_add_requires_item_and_category(
-    client: FlaskClient, auth_headers: dict[str, str], body: dict[str, Any]
+    client: FlaskClient, auth_headers: AuthHeaderFactory, body: dict[str, Any]
 ) -> None:
     """Missing item or category is a 400."""
     with patch.dict(os.environ, SECRET_ENV):
@@ -294,7 +346,7 @@ def test_stock_add_requires_item_and_category(
 
 
 def test_stock_add_rejects_unknown_category(
-    client: FlaskClient, auth_headers: dict[str, str]
+    client: FlaskClient, auth_headers: AuthHeaderFactory
 ) -> None:
     """A category outside IngredientCategory is a 400."""
     with patch.dict(os.environ, SECRET_ENV):
@@ -310,7 +362,7 @@ def test_stock_add_rejects_unknown_category(
 def test_stock_add_duplicate_conflict(
     client: FlaskClient,
     pantry_mgr: PantryManager,
-    auth_headers: dict[str, str],
+    auth_headers: AuthHeaderFactory,
     sample_item: InventoryItem,
 ) -> None:
     """Adding an already-tracked ingredient is a 409."""
@@ -333,7 +385,7 @@ def test_stock_add_duplicate_conflict(
 def test_restock_clear_empties_queue(
     client: FlaskClient,
     pantry_mgr: PantryManager,
-    auth_headers: dict[str, str],
+    auth_headers: AuthHeaderFactory,
     sample_item: InventoryItem,
 ) -> None:
     """Clearing the restock queue moves low/out items back to on_hand."""
@@ -377,7 +429,7 @@ def _recipe_body(**overrides: Any) -> dict[str, Any]:
 
 
 def test_recipes_save_persists_recipe(
-    client: FlaskClient, recipe_store: RecipeStore, auth_headers: dict[str, str]
+    client: FlaskClient, recipe_store: RecipeStore, auth_headers: AuthHeaderFactory
 ) -> None:
     """A valid save returns 201 and persists purchase + pantry splits."""
     with patch.dict(os.environ, SECRET_ENV):
@@ -394,7 +446,7 @@ def test_recipes_save_persists_recipe(
 def test_recipes_save_duplicate_conflict(
     client: FlaskClient,
     recipe_store: RecipeStore,
-    auth_headers: dict[str, str],
+    auth_headers: AuthHeaderFactory,
     sample_meal: ParsedMeal,
 ) -> None:
     """Saving a recipe whose name already exists is a 409."""
@@ -460,7 +512,7 @@ def test_recipes_save_raced_duplicate_returns_409(
     ],
 )
 def test_recipes_save_requires_name_and_ingredients(
-    client: FlaskClient, auth_headers: dict[str, str], body: dict[str, Any]
+    client: FlaskClient, auth_headers: AuthHeaderFactory, body: dict[str, Any]
 ) -> None:
     """Missing name or ingredients is a 400."""
     with patch.dict(os.environ, SECRET_ENV):
@@ -473,7 +525,7 @@ def test_recipes_save_requires_name_and_ingredients(
     ["penne", [{"ingredient": "penne"}], [42]],
 )
 def test_recipes_save_rejects_invalid_ingredients(
-    client: FlaskClient, auth_headers: dict[str, str], ingredients: Any
+    client: FlaskClient, auth_headers: AuthHeaderFactory, ingredients: Any
 ) -> None:
     """Non-list or non-Ingredient payloads are a 400."""
     with patch.dict(os.environ, SECRET_ENV):
@@ -488,7 +540,7 @@ def test_recipes_save_rejects_invalid_ingredients(
 
 @pytest.mark.parametrize("servings", ["four", 0, -2, True])
 def test_recipes_save_rejects_bad_servings(
-    client: FlaskClient, auth_headers: dict[str, str], servings: Any
+    client: FlaskClient, auth_headers: AuthHeaderFactory, servings: Any
 ) -> None:
     """A non-positive-int servings override is a 400."""
     with patch.dict(os.environ, SECRET_ENV):
@@ -502,7 +554,7 @@ def test_recipes_save_rejects_bad_servings(
 
 
 def test_recipes_save_honors_servings(
-    client: FlaskClient, recipe_store: RecipeStore, auth_headers: dict[str, str]
+    client: FlaskClient, recipe_store: RecipeStore, auth_headers: AuthHeaderFactory
 ) -> None:
     """An explicit servings override is persisted."""
     with patch.dict(os.environ, SECRET_ENV):
@@ -523,23 +575,29 @@ def test_recipes_save_honors_servings(
 def test_recipes_delete_removes_recipe(
     client: FlaskClient,
     recipe_store: RecipeStore,
-    auth_headers: dict[str, str],
+    auth_headers: AuthHeaderFactory,
     sample_meal: ParsedMeal,
 ) -> None:
     """Deleting an existing recipe returns 204 and removes it."""
     recipe_id = recipe_store.save_recipe(sample_meal)
+    recipe_path = f"/api/v1/recipes/{recipe_id}"
     with patch.dict(os.environ, SECRET_ENV):
-        response = client.delete(f"/api/v1/recipes/{recipe_id}", headers=auth_headers)
+        response = client.delete(
+            recipe_path, headers=auth_headers("DELETE", recipe_path)
+        )
     assert response.status_code == 204
     assert response.data == b""
     assert recipe_store.get_recipe_by_id(recipe_id) is None
 
 
 def test_recipes_delete_unknown_404(
-    client: FlaskClient, auth_headers: dict[str, str]
+    client: FlaskClient, auth_headers: AuthHeaderFactory
 ) -> None:
     """Deleting an unknown recipe id is a JSON 404."""
     with patch.dict(os.environ, SECRET_ENV):
-        response = client.delete("/api/v1/recipes/999", headers=auth_headers)
+        response = client.delete(
+            "/api/v1/recipes/999",
+            headers=auth_headers("DELETE", "/api/v1/recipes/999"),
+        )
     assert response.status_code == 404
     assert "error" in response.get_json()

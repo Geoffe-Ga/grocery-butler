@@ -9,14 +9,12 @@ the preference's real database id instead of ``loop.index``).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from flask.testing import FlaskClient
 
 pytestmark = pytest.mark.e2e
 
@@ -37,49 +35,39 @@ def _brand_body() -> dict[str, str]:
 
 
 def test_brands_set_then_confirm_is_applied(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     no_claude: None,
 ) -> None:
     """Confirming a staged brand rule persists it to the real RecipeStore."""
-    headers = signed_headers()
-    staged = client.post("/api/v1/brands/set", json=_brand_body(), headers=headers)
+    staged = signed_request("POST", "/api/v1/brands/set", _brand_body())
     assert staged.status_code == 200
     body = staged.get_json()
     assert body["status"] == "pending_confirmation"
     action_id = body["action_id"]
 
-    confirmed = client.post(
-        "/api/v1/actions/confirm",
-        json={"action_id": action_id},
-        headers=headers,
+    confirmed = signed_request(
+        "POST", "/api/v1/actions/confirm", {"action_id": action_id}
     )
     assert confirmed.status_code == 200
     assert confirmed.get_json()["status"] == "approved"
 
-    listed = client.get("/api/v1/brands", headers=headers)
+    listed = signed_request("GET", "/api/v1/brands")
     brands = [b["brand"] for b in listed.get_json()["brands"]]
     assert "Organic Valley" in brands
 
 
 def test_brands_set_then_deny_is_not_applied(
-    client: FlaskClient,
-    signed_headers: Callable[..., dict[str, str]],
+    signed_request: Callable[..., Any],
     no_claude: None,
 ) -> None:
     """Denying a staged brand rule leaves the RecipeStore untouched."""
-    headers = signed_headers()
-    staged = client.post("/api/v1/brands/set", json=_brand_body(), headers=headers)
+    staged = signed_request("POST", "/api/v1/brands/set", _brand_body())
     action_id = staged.get_json()["action_id"]
 
-    denied = client.post(
-        "/api/v1/actions/deny",
-        json={"action_id": action_id},
-        headers=headers,
-    )
+    denied = signed_request("POST", "/api/v1/actions/deny", {"action_id": action_id})
     assert denied.status_code == 200
     assert denied.get_json()["status"] == "denied"
 
-    listed = client.get("/api/v1/brands", headers=headers)
+    listed = signed_request("GET", "/api/v1/brands")
     brands = [b["brand"] for b in listed.get_json()["brands"]]
     assert "Organic Valley" not in brands

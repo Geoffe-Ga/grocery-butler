@@ -39,9 +39,10 @@ if TYPE_CHECKING:
     from flask.testing import FlaskClient
 
 from grocery_butler.app import create_app
-from grocery_butler.auth_middleware import SECRET_ENV_VAR, mint_token
+from grocery_butler.auth_middleware import SECRET_ENV_VAR
 from grocery_butler.models import IngredientCategory, InventoryItem, InventoryStatus
 from grocery_butler.pantry_manager import PantryManager
+from tests.conftest import bearer_header
 
 #: A source address outside every default and custom-CIDR range used below.
 PUBLIC_ADDR = "203.0.113.7"
@@ -188,6 +189,10 @@ def seeded_item(app: Flask, pantry_mgr: PantryManager) -> InventoryItem:
 def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Return a valid Authorization header minted with a test shared secret.
 
+    Bound to a bodyless ``GET /api/v1/inventory`` -- the only request
+    this fixture is ever attached to in this module (issue #74: bearer
+    tokens are now bound to their exact method/path/body).
+
     Args:
         monkeypatch: Pytest's monkeypatch fixture.
 
@@ -196,8 +201,7 @@ def auth_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
         ``TEST_SECRET``.
     """
     monkeypatch.setenv(SECRET_ENV_VAR, TEST_SECRET)
-    token = mint_token("rubotpaul")
-    return {"Authorization": f"Bearer {token}"}
+    return bearer_header("rubotpaul", "GET", "/api/v1/inventory")
 
 
 # ---------------------------------------------------------------------------

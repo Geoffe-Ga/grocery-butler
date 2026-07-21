@@ -16,7 +16,7 @@ import uuid
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
-from flask import Blueprint, abort, current_app, jsonify, request
+from flask import Blueprint, abort, current_app, g, jsonify, request
 from pydantic import ValidationError
 
 from grocery_butler import order_service
@@ -62,6 +62,62 @@ LOG = logging.getLogger("api")
 
 #: How long a staged destructive action stays confirmable.
 CONFIRMATION_TTL = dt.timedelta(minutes=5)
+
+#: Endpoints on this blueprint exempt from the auth-by-default hook below.
+#: Intentionally empty: every route on ``api_v1`` requires a bearer token.
+#: This is the explicit opt-out seam for a future unauthenticated route
+#: (e.g. a webhook) -- health endpoints are registered at the app level
+#: in ``grocery_butler.app``, not on this blueprint, so they never need
+#: an entry here.
+_AUTH_EXEMPT_ENDPOINTS: frozenset[str] = frozenset()
+
+
+@api_v1.before_request
+def _enforce_bearer_auth() -> None:
+    """Require a valid bearer token for every request on this blueprint.
+
+    Issue #74 AC#2: auth-by-default. Previously each view called
+    ``require_bearer()`` individually, so a route that forgot the call
+    would silently ship unauthenticated. This ``before_request`` hook is
+    now the single enforcement point for the whole blueprint; routes no
+    longer call ``require_bearer()`` themselves. The verified caller_id
+    is bound to ``flask.g`` so views that stamp the audit trail
+    (requester/resolver, issue #75 W1) can read it via
+    :func:`_request_caller_id` without re-verifying the token.
+
+    Raises:
+        werkzeug.exceptions.HTTPException: Aborts with 401 (via
+            :func:`grocery_butler.auth_middleware.require_bearer`) when
+            the request's bearer token is missing or invalid for this
+            exact request.
+    """
+    if request.endpoint in _AUTH_EXEMPT_ENDPOINTS:
+        return
+    g.caller_id = require_bearer()
+
+
+def _request_caller_id() -> str:
+    """Return the caller_id the auth hook verified for this request.
+
+    :func:`_enforce_bearer_auth` binds the token's caller_id to
+    ``flask.g`` before any view runs, so views that record the caller in
+    the pending-actions audit trail (issue #75 W1) read it here instead
+    of re-verifying the bearer token themselves.
+
+    Returns:
+        The caller_id embedded in the request's validated bearer token.
+
+    Raises:
+        werkzeug.exceptions.HTTPException: Aborts with 401 if no
+            caller_id is bound to this request — e.g. a future
+            auth-exempt endpoint mistakenly asking for a caller
+            identity it never authenticated.
+    """
+    caller_id = getattr(g, "caller_id", None)
+    if not isinstance(caller_id, str):
+        abort(401, description="missing bearer token")
+    return caller_id
+
 
 # ---------------------------------------------------------------------------
 # Sanitized error messages (Issue #77)
@@ -200,7 +256,6 @@ def _brand(pref: BrandPreference) -> dict[str, Any]:
 @api_v1.get("/inventory")
 def get_inventory() -> Response:
     """Return all tracked inventory items."""
-    require_bearer()
     items = _pantry_manager().get_inventory()
     return jsonify(items=[_item(i) for i in items])
 
@@ -208,21 +263,18 @@ def get_inventory() -> Response:
 @api_v1.get("/pantry")
 def get_pantry() -> Response:
     """Return all pantry staples."""
-    require_bearer()
     return jsonify(staples=_recipe_store().get_pantry_staples())
 
 
 @api_v1.get("/recipes")
 def list_recipes() -> Response:
     """Return summary rows for all saved recipes."""
-    require_bearer()
     return jsonify(recipes=_recipe_store().list_recipes())
 
 
 @api_v1.get("/recipes/<int:recipe_id>")
 def get_recipe(recipe_id: int) -> Response | tuple[Response, int]:
     """Return one full recipe by id, or a JSON 404 if unknown."""
-    require_bearer()
     meal = _recipe_store().get_recipe_by_id(recipe_id)
     if meal is None:
         return jsonify(error="recipe not found"), 404
@@ -232,7 +284,6 @@ def get_recipe(recipe_id: int) -> Response | tuple[Response, int]:
 @api_v1.get("/brands")
 def list_brands() -> Response:
     """Return all brand preference rules."""
-    require_bearer()
     prefs = _recipe_store().get_brand_preferences()
     return jsonify(brands=[_brand(p) for p in prefs])
 
@@ -240,14 +291,12 @@ def list_brands() -> Response:
 @api_v1.get("/preferences")
 def get_preferences() -> Response:
     """Return all app-level preferences as a flat object."""
-    require_bearer()
     return jsonify(_recipe_store().get_all_preferences())
 
 
 @api_v1.get("/restock")
 def get_restock() -> Response:
     """Return the restock queue (items low or out)."""
-    require_bearer()
     items = _pantry_manager().get_restock_queue()
     return jsonify(items=[_item(i) for i in items])
 
@@ -293,7 +342,6 @@ def _parse_shopping_list_payloads(raw_items: Any) -> list[ShoppingListItem]:
 @api_v1.post("/meals/parse")
 def post_meals_parse() -> Response:
     """Parse free-text meal names into structured ingredient lists."""
-    require_bearer()
     text = str(_json_body().get("text", "")).strip()
     if not text:
         abort(400, description="text required")
@@ -304,7 +352,6 @@ def post_meals_parse() -> Response:
 @api_v1.post("/shopping-list/preview")
 def post_shopping_list_preview() -> Response:
     """Consolidate meals into a shopping list without persisting anything."""
-    require_bearer()
     body = _json_body()
     meals = _parse_meal_payloads(body.get("meals", []))
     include_restock = bool(body.get("include_restock", True))
@@ -327,7 +374,6 @@ def post_order_preview() -> Response | tuple[Response, int]:
         could not be built. The underlying exception detail is logged
         server-side but never relayed to the client (Issue #77).
     """
-    require_bearer()
     shopping_list = _parse_shopping_list_payloads(_json_body().get("shopping_list"))
     try:
         pipeline = _safeway_pipeline()
@@ -387,7 +433,6 @@ def _parse_servings(body: dict[str, Any]) -> int:
 @api_v1.post("/stock/update")
 def post_stock_update() -> Response:
     """Set a tracked item's stock status; writes immediately."""
-    require_bearer()
     body = _json_body()
     status = body.get("status")
     if not isinstance(status, str) or status not in _STATUS_TOKENS:
@@ -406,7 +451,6 @@ def post_stock_update() -> Response:
 @api_v1.post("/stock/add")
 def post_stock_add() -> tuple[Response, int]:
     """Start tracking a new inventory item; writes immediately."""
-    require_bearer()
     body = _json_body()
     name = _required_text(body, "item", "item and category required")
     raw_category = _required_text(body, "category", "item and category required")
@@ -430,7 +474,6 @@ def post_stock_add() -> tuple[Response, int]:
 @api_v1.post("/restock/clear")
 def post_restock_clear() -> Response:
     """Move every low/out item back to on_hand; writes immediately."""
-    require_bearer()
     cleared = _pantry_manager().clear_restock_queue()
     return jsonify(ok=True, cleared=cleared)
 
@@ -438,7 +481,6 @@ def post_restock_clear() -> Response:
 @api_v1.post("/recipes/save")
 def post_recipes_save() -> tuple[Response, int]:
     """Save a new recipe; 409 if the name is already taken."""
-    require_bearer()
     body = _json_body()
     name = _required_text(body, "name", "name and ingredients required")
     ingredients = _parse_ingredient_payloads(body.get("ingredients"))
@@ -464,7 +506,6 @@ def post_recipes_save() -> tuple[Response, int]:
 @api_v1.delete("/recipes/<int:recipe_id>")
 def delete_recipe(recipe_id: int) -> tuple[str, int]:
     """Delete a recipe by id; 404 if unknown."""
-    require_bearer()
     store = _recipe_store()
     if store.get_recipe_by_id(recipe_id) is None:
         abort(404, description="recipe not found")
@@ -728,11 +769,17 @@ def post_order_submit() -> Response | tuple[Response, int]:
     ``override_cap`` truthy, in which case the override is persisted in
     the staged payload for :func:`_confirm_order_submit` to forward.
 
+    Authentication is enforced blueprint-wide by the
+    :func:`_enforce_bearer_auth` ``before_request`` hook (Issue #74), so
+    this route no longer calls ``require_bearer()`` itself; the caller
+    identity stamped as requester (issue #75 W1) comes from the hook via
+    :func:`_request_caller_id`.
+
     Returns:
         The staged-action JSON response, or a 503 JSON error if the
         order-value cap configuration itself is invalid.
     """
-    caller_id = require_bearer()
+    caller_id = _request_caller_id()
     body = _json_body()
     cart = _parse_cart_payload(body)
     server_total = order_service.compute_cart_total(cart)
@@ -769,7 +816,7 @@ def post_order_submit() -> Response | tuple[Response, int]:
 @api_v1.post("/brands/set")
 def post_brands_set() -> Response:
     """Stage a brand preference rule for confirmation."""
-    caller_id = require_bearer()
+    caller_id = _request_caller_id()
     body = _json_body()
     try:
         pref = BrandPreference.model_validate(body)
@@ -802,7 +849,7 @@ def _parse_preferences_payload(body: dict[str, Any]) -> dict[str, str]:
 @api_v1.post("/preferences/set")
 def post_preferences_set() -> Response:
     """Stage app-level preference changes for confirmation."""
-    caller_id = require_bearer()
+    caller_id = _request_caller_id()
     preferences = _parse_preferences_payload(_json_body())
     action_id = _stage_pending(
         "preferences_set", {"preferences": preferences}, requester=caller_id
@@ -1058,7 +1105,7 @@ _CONFIRM_EXECUTORS: dict[
 @api_v1.post("/actions/confirm")
 def post_actions_confirm() -> Response | tuple[Response, int]:
     """Execute a staged action exactly once after chat confirmation."""
-    caller_id = require_bearer()
+    caller_id = _request_caller_id()
     action = _load_pending_action(_json_body())
     store = _pending_store()
     if action.status is not PendingActionStatus.PENDING:
@@ -1081,7 +1128,7 @@ def post_actions_deny() -> Response:
     check the TTL — a denied-after-expiry action records the user's
     explicit "no" rather than a timeout.
     """
-    resolver = require_bearer()
+    resolver = _request_caller_id()
     action = _load_pending_action(_json_body())
     if not _pending_store().mark_pending_denied(action.action_id, resolver=resolver):
         abort(409, description="action already resolved")
@@ -1139,8 +1186,9 @@ def get_actions() -> Response:
 
     Reading the audit log first sweeps any past-due pending rows to
     ``expired`` so the returned statuses are current, not stale.
+    Authentication is enforced by the blueprint's
+    :func:`_enforce_bearer_auth` hook (Issue #74).
     """
-    require_bearer()
     limit, status = _parse_actions_query()
     store = _pending_store()
     _sweep_expired(store)
@@ -1152,8 +1200,11 @@ def get_actions() -> Response:
 
 @api_v1.get("/actions/<action_id>")
 def get_action(action_id: str) -> Response | tuple[Response, int]:
-    """Return one staged/resolved action by id, or a JSON 404 (W4)."""
-    require_bearer()
+    """Return one staged/resolved action by id, or a JSON 404 (W4).
+
+    Authentication is enforced by the blueprint's
+    :func:`_enforce_bearer_auth` hook (Issue #74).
+    """
     action = _pending_store().get_pending_action(action_id)
     if action is None:
         return jsonify(error="unknown action_id"), 404
