@@ -23,7 +23,7 @@ from grocery_butler.models import (
 )
 from grocery_butler.product_search import ProductSearchError
 from grocery_butler.safeway_client import SafewayAPIError
-from grocery_butler.units import convert, parse_size
+from grocery_butler.units import convert, group_key, parse_size
 
 if TYPE_CHECKING:
     from grocery_butler.product_search import ProductSearchService
@@ -113,6 +113,20 @@ class CartBuilder:
         also remain listed in ``substituted_items`` as a display and
         provenance record.
 
+        A meal item and a restock item that share a
+        :func:`~grocery_butler.units.group_key` (same ingredient name and
+        a compatible unit) are merged into a single consolidated cart
+        line before processing, rather than kept as two separate lines.
+        The merged line is classified as restock so ``mark_restocked``
+        bookkeeping stays correct -- without merging, a colliding pair
+        would both be ordered (a duplicate purchase) and, depending on
+        iteration order, could misfile the meal-sourced copy into
+        ``restock_items`` too, double-updating inventory (issue #80).
+        Items whose group keys don't match (including same-name items
+        with incompatible units) are never merged and are classified
+        purely by provenance -- which list they came from -- never by
+        ingredient name.
+
         Args:
             items: Shopping list items to add to cart.
             restock_items: Optional restock queue items.
@@ -125,16 +139,10 @@ class CartBuilder:
         substituted: list[SubstitutionResult] = []
         restock_cart: list[CartItem] = []
 
-        all_items = list(items)
-        restock_set: set[str] = set()
-        if restock_items:
-            for ri in restock_items:
-                all_items.append(ri)
-                restock_set.add(ri.ingredient)
+        pairs = _merge_cart_inputs(items, restock_items or [])
 
-        for item in all_items:
+        for item, is_restock in pairs:
             result = self._process_item(item)
-            is_restock = item.ingredient in restock_set
 
             if result is None:
                 failed.append(item)
@@ -353,6 +361,121 @@ class CartBuilder:
 #: (or fractionally above, due to floating-point noise) an exact multiple
 #: of the product size don't round up to one unit too many.
 _QUANTITY_EPSILON = 1e-9
+
+
+def _merge_restock_into_meal(
+    meal_item: ShoppingListItem,
+    restock_item: ShoppingListItem,
+) -> ShoppingListItem:
+    """Merge a colliding restock item into its matching meal item's line.
+
+    Callers must only invoke this once :func:`_merge_cart_inputs` has
+    confirmed the two items share a
+    :func:`~grocery_butler.units.group_key`, which guarantees
+    :func:`~grocery_butler.units.convert` returns a non-``None`` result
+    (same dimension, or an identical packaging unit). If that
+    precondition is ever violated and ``convert`` returns ``None``, the
+    raw quantity is added unconverted as a defensive fallback --
+    mirroring :meth:`Consolidator._merge_quantity`. ``restock_item``'s
+    quantity is converted into ``meal_item``'s unit and added; unit,
+    search_term, and category all come from ``meal_item`` so the merged
+    line still resolves to the same product. Provenance is ``meal_item``'s
+    ``from_meals`` with the literal marker ``"restock"`` appended
+    (deduplicated, order-preserving) regardless of ``restock_item``'s own
+    ``from_meals``, so the merged line always records that a restock need
+    was folded in.
+
+    Args:
+        meal_item: The meal-sourced shopping list item.
+        restock_item: The colliding restock-sourced shopping list item.
+
+    Returns:
+        A new ``ShoppingListItem`` for the merged line. Neither input is
+        mutated.
+    """
+    converted = convert(restock_item.quantity, restock_item.unit, meal_item.unit)
+    added = converted if converted is not None else restock_item.quantity
+
+    merged_from_meals = list(meal_item.from_meals)
+    if "restock" not in merged_from_meals:
+        merged_from_meals.append("restock")
+
+    return meal_item.model_copy(
+        update={
+            "quantity": meal_item.quantity + added,
+            "from_meals": merged_from_meals,
+        }
+    )
+
+
+def _match_restock_to_meal(
+    restock_item: ShoppingListItem,
+    pairs: list[tuple[ShoppingListItem, bool]],
+    key_to_index: dict[tuple[str, str], int],
+) -> bool:
+    """Merge a restock item into its matching meal pair, if one is free.
+
+    Updates ``pairs`` in place at the matched index when a compatible,
+    not-yet-merged meal pair is found.
+
+    Args:
+        restock_item: The restock-sourced shopping list item to place.
+        pairs: The in-progress list of (item, is_restock) pairs, indexed
+            by ``key_to_index``. Mutated in place on a successful merge.
+        key_to_index: Maps each meal item's group key to its index in
+            ``pairs``.
+
+    Returns:
+        True if ``restock_item`` was merged into an existing meal pair;
+        False if it should instead be appended as its own restock pair.
+    """
+    index = key_to_index.get(group_key(restock_item.ingredient, restock_item.unit))
+    if index is None or pairs[index][1]:
+        return False
+
+    meal_item, _ = pairs[index]
+    pairs[index] = (_merge_restock_into_meal(meal_item, restock_item), True)
+    return True
+
+
+def _merge_cart_inputs(
+    items: list[ShoppingListItem],
+    restock_items: list[ShoppingListItem],
+) -> list[tuple[ShoppingListItem, bool]]:
+    """Merge meal and restock shopping-list items, resolving name collisions.
+
+    Regular meal items come first, keyed by
+    :func:`~grocery_butler.units.group_key`. Each restock item is checked
+    against those keys: a compatible collision (matching group key, so
+    same ingredient name and dimension, or an identical packaging unit)
+    replaces the meal item's pair with a single merged, restock-classified
+    pair (see :func:`_merge_restock_into_meal`) whose quantity covers both
+    needs. An incompatible collision (matching name but a different group
+    key -- e.g. "milk" in cups vs. "milk" in bottles) or no collision at
+    all leaves the meal pair untouched and appends the restock item as its
+    own ``(item, True)`` pair. Classification is always by provenance --
+    which input list an item came from -- never by ingredient name
+    (issue #80).
+
+    Args:
+        items: Shopping list items sourced from meal plans.
+        restock_items: Shopping list items sourced from the restock queue.
+
+    Returns:
+        Ordered list of ``(item, is_restock)`` pairs. Never mutates the
+        input items.
+    """
+    pairs: list[tuple[ShoppingListItem, bool]] = [(item, False) for item in items]
+    key_to_index: dict[tuple[str, str], int] = {}
+    for index, item in enumerate(items):
+        key_to_index.setdefault(group_key(item.ingredient, item.unit), index)
+
+    extra: list[tuple[ShoppingListItem, bool]] = []
+    for restock in restock_items:
+        if not _match_restock_to_meal(restock, pairs, key_to_index):
+            extra.append((restock, True))
+
+    return pairs + extra
 
 
 def _calculate_quantity(

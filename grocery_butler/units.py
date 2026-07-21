@@ -16,6 +16,11 @@ unit-aware primitives that make quantity calculations dimensionally sound:
   confidently resolve -- unlike
   :func:`grocery_butler.models.parse_unit`, it never falls back to
   :attr:`~grocery_butler.models.Unit.EACH` for unrecognized unit tokens.
+* :func:`group_key` builds the composite merge key used to decide whether
+  two (ingredient, unit) pairs should be combined into a single shopping
+  list / cart line -- introduced to fix issue #80, where classifying a
+  meal/restock ingredient collision by name alone caused duplicate
+  purchases and corrupted inventory updates.
 """
 
 from __future__ import annotations
@@ -119,6 +124,34 @@ def convert(quantity: float, from_unit: Unit, to_unit: Unit) -> float | None:
 
     base_quantity = quantity * from_factor
     return base_quantity / to_factor
+
+
+def group_key(name: str, unit: Unit) -> tuple[str, str]:
+    """Build the composite merge key for a name/unit pairing.
+
+    Units with a fixed physical dimension (mass, volume, count) are
+    grouped by dimension so compatible units (e.g. cup and gallon) merge
+    into a single line item. Packaging/"other" units with no fixed
+    dimension are grouped by their exact unit instead, so incompatible
+    packaging (e.g. jar vs. can) stays split into separate line items.
+
+    Used both to consolidate meal ingredients into a shopping list (see
+    :meth:`grocery_butler.consolidator.Consolidator._ingredient_group_key`,
+    which delegates here) and to resolve meal/restock ingredient
+    collisions when building a cart (issue #80).
+
+    Args:
+        name: Raw ingredient/item name (not yet lowercased).
+        unit: The item's parsed unit.
+
+    Returns:
+        A ``(name_lower, group_token)`` tuple suitable for use as a merge
+        dict key.
+    """
+    dimension = dimension_of(unit)
+    if dimension is not None:
+        return (name.lower(), f"dim:{dimension.value}")
+    return (name.lower(), f"unit:{unit.value}")
 
 
 # ---------------------------------------------------------------------------
