@@ -6,11 +6,49 @@ tokens in tests (issue #74): every test module that needs an
 :func:`bearer_header` rather than hand-rolling ``mint_token`` calls, so
 the whole suite stays in sync with the ``RequestBinding`` contract in
 ``grocery_butler.auth_middleware``.
+
+Also hosts the Issue #78 autouse fixture: ``grocery_butler.db`` has a
+run-once ``init_db`` guard (a module-level ``_initialized_paths``
+registry) that persists for the lifetime of the Python process --
+including across tests within the same pytest session. Without a reset
+between tests, one test's ``init_db(path)`` call could make a later,
+unrelated test's ``init_db(path)`` call silently short-circuit (or vice
+versa for ``:memory:``), producing order-dependent test pollution. The
+``_reset_db_init_state`` fixture resets that state via
+``grocery_butler.db._reset_init_state()`` before and after every test.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+import pytest
+
+import grocery_butler.db as db_module
 from grocery_butler.auth_middleware import RequestBinding, mint_token
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+@pytest.fixture(autouse=True)
+def _reset_db_init_state() -> Iterator[None]:
+    """Reset grocery_butler.db's run-once init state around each test.
+
+    Looked up via ``getattr`` so a rename or removal of the test-only
+    ``_reset_init_state`` hook degrades this fixture to a no-op instead
+    of failing test collection (Issue #78).
+
+    Yields:
+        None. Control returns to the test between the pre- and
+        post-test resets.
+    """
+    reset = getattr(db_module, "_reset_init_state", None)
+    if reset is not None:
+        reset()
+    yield
+    if reset is not None:
+        reset()
 
 
 def bearer_header(

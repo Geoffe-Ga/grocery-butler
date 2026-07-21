@@ -267,11 +267,27 @@ class SQLiteConnection:
 # ------------------------------------------------------------------
 
 
+# Issue #78: concurrent callers (e.g. several gunicorn workers or
+# in-process threads racing migrate()) open their own SQLite connections
+# before grocery_butler.db.migrate's cross-process fcntl.flock even gets
+# a chance to serialize them -- opening a connection and flipping a
+# fresh database file's journal mode to WAL both briefly need SQLite's
+# own internal lock, independent of that flock. Python's sqlite3 default
+# busy-wait window is only 5 seconds, which is occasionally too short
+# under heavy multi-thread contention (e.g. 8 workers racing a first
+# boot) and surfaces as a transient "database is locked" OperationalError
+# even though the flock-guarded critical section itself is serialized
+# correctly. A longer busy timeout lets SQLite's own busy handler retry
+# for up to 30s instead of failing fast.
+_SQLITE_BUSY_TIMEOUT_SECONDS: float = 30.0
+
+
 def _create_sqlite_connection(db_path: str) -> SQLiteConnection:
     """Create a configured SQLite connection.
 
-    Enables WAL journal mode, foreign key enforcement, and sets
-    the row factory to ``sqlite3.Row`` for dict-like access.
+    Enables WAL journal mode, foreign key enforcement, a generous busy
+    timeout (see :data:`_SQLITE_BUSY_TIMEOUT_SECONDS`), and sets the row
+    factory to ``sqlite3.Row`` for dict-like access.
 
     Args:
         db_path: File path, or ``:memory:`` for in-memory databases.
@@ -280,9 +296,13 @@ def _create_sqlite_connection(db_path: str) -> SQLiteConnection:
         A configured SQLiteConnection.
     """
     if db_path == ":memory:":
-        raw = sqlite3.connect("file::memory:?cache=shared", uri=True)
+        raw = sqlite3.connect(
+            "file::memory:?cache=shared",
+            uri=True,
+            timeout=_SQLITE_BUSY_TIMEOUT_SECONDS,
+        )
     else:
-        raw = sqlite3.connect(db_path)
+        raw = sqlite3.connect(db_path, timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
     raw.execute("PRAGMA journal_mode=WAL")
     raw.execute("PRAGMA foreign_keys=ON")
     raw.row_factory = sqlite3.Row
