@@ -15,6 +15,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from grocery_butler.claude_utils import extract_json_text
 from grocery_butler.db import get_connection, init_db
 from grocery_butler.models import (
     InventoryItem,
@@ -388,7 +389,9 @@ def _format_inventory_context(items: list[InventoryItem]) -> str:
 def _parse_claude_response(text: str) -> list[InventoryUpdate]:
     """Parse Claude's JSON response into InventoryUpdate objects.
 
-    Filters out low-confidence matches (< 0.8).
+    Strips markdown code fences (e.g. ```json ... ```) before parsing,
+    since Claude sometimes wraps its JSON output that way. Filters out
+    low-confidence matches (< 0.8).
 
     Args:
         text: Raw text response from Claude API.
@@ -400,7 +403,7 @@ def _parse_claude_response(text: str) -> list[InventoryUpdate]:
         json.JSONDecodeError: If the response is not valid JSON.
         ValueError: If the JSON structure is invalid.
     """
-    data = json.loads(text)
+    data = json.loads(extract_json_text(text))
     if not isinstance(data, list):
         raise ValueError("Expected a JSON array")
 
