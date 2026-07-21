@@ -4,7 +4,7 @@ description: "Level 3 Component Specialist. Select for component documentation. 
 level: 3
 phase: Package,Cleanup
 tools: Read,Write,Edit,Grep,Glob,Task
-model: sonnet
+model: fable
 delegates_to: []
 receives_from: [chief-architect, refactorer]
 ---
