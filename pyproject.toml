@@ -128,6 +128,10 @@ warn_return_any = false
 [tool.ruff]
 line-length = 88
 target-version = "py311"
+# Recent Ruff releases format Python code blocks inside Markdown. Docs, skills
+# and plans are prose with illustrative snippets, not code we format, so the
+# formatter and linter only look at Python files.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = [

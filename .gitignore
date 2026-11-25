@@ -21,5 +21,3 @@ htmlcov/
 
 *.db
 *.sqlite3
-
-.secrets.baseline
