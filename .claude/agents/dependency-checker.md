@@ -4,7 +4,7 @@ description: "Reviews dependency management, version pinning, environment reprod
 level: 3
 phase: Cleanup
 tools: Read,Grep,Glob
-model: sonnet
+model: haiku
 delegates_to: []
 receives_from: [quality-reviewer]
 ---
