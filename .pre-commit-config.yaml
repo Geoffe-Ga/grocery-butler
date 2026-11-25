@@ -38,14 +38,16 @@ repos:
     args:
     - --fix
   - id: ruff-format
-- repo: https://github.com/pre-commit/mirrors-mypy
-  rev: v1.8.0
+# mypy runs through the repo's own script so the hook, check-all.sh and CI
+# share one configuration (pyproject.toml) and one environment (.venv).
+- repo: local
   hooks:
   - id: mypy
-    additional_dependencies:
-    - types-all
-    args:
-    - --strict
+    name: mypy (scripts/typecheck.sh)
+    entry: ./scripts/typecheck.sh
+    language: system
+    types: [python]
+    pass_filenames: false
 - repo: https://github.com/PyCQA/bandit
   rev: 1.7.7
   hooks:
