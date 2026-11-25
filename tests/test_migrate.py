@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from contextlib import closing
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -443,8 +444,7 @@ class TestMigrate:
         """
         migrate(db_path)
 
-        conn = get_connection(db_path)
-        try:
+        with closing(get_connection(db_path)) as conn:
             conn.execute("DELETE FROM schema_migrations WHERE version = ?", (3,))
             conn.commit()
 
@@ -463,20 +463,15 @@ class TestMigrate:
                 (recipe_id, "flour", 2.0, "cups", "pantry_dry", 0.5),
             )
             conn.commit()
-        finally:
-            conn.close()
 
         count = migrate(db_path)
         assert count == 1
 
-        conn = get_connection(db_path)
-        try:
+        with closing(get_connection(db_path)) as conn:
             row = conn.execute(
                 "SELECT unit FROM recipe_ingredients WHERE recipe_id = ?",
                 (recipe_id,),
             ).fetchone()
-        finally:
-            conn.close()
 
         assert row is not None
         assert row["unit"] == Unit.CUP.value
@@ -500,14 +495,15 @@ class TestMigration007ProductMappingStockSize:
     def test_migration_007_adds_product_mapping_columns(self, db_path: str) -> None:
         """Test migrate() adds safeway_product_size/safeway_in_stock columns.
 
-        Running migrate() a second time afterwards must apply zero
-        additional migrations (idempotency).
+        Migration 009 later archives the table under a new name, so the
+        columns are checked there. Running migrate() a second time
+        afterwards must apply zero additional migrations (idempotency).
         """
         migrate(db_path)
 
         conn = get_connection(db_path)
         try:
-            cursor = conn.execute("PRAGMA table_info(product_mapping)")
+            cursor = conn.execute("PRAGMA table_info(archived_product_mapping)")
             columns = {row["name"] for row in cursor.fetchall()}
         finally:
             conn.close()
@@ -543,6 +539,80 @@ class TestMigration008PendingActionsResolver:
 
         assert "resolver" in columns
         assert migrate(db_path) == 0
+
+
+def _table_names(db_path: str) -> set[str]:
+    """Return the names of every table in a SQLite database."""
+    conn = get_connection(db_path)
+    try:
+        cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        return {row["name"] for row in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
+class TestMigration009ArchiveRetailerTables:
+    """Tests for migration 009 (archive the retired Safeway tables).
+
+    ADR 0001 removed the private Safeway runtime. Its two tables are
+    renamed with an ``archived_`` prefix rather than dropped, so any
+    historical rows survive for audit or export, and nothing in the
+    application reads or writes them any more.
+    """
+
+    _RETIRED = ("product_mapping", "order_submissions")
+
+    def test_fresh_database_has_only_archived_tables(self, db_path: str) -> None:
+        """A fresh migrate() leaves no live retailer table behind."""
+        migrate(db_path)
+        tables = _table_names(db_path)
+        for name in self._RETIRED:
+            assert name not in tables
+            assert f"archived_{name}" in tables
+
+    def test_existing_rows_are_preserved(self, db_path: str) -> None:
+        """Rows written before 009 survive in the archived tables."""
+        before_009 = [m for m in _discover_migrations(is_pg=False) if m[0] < 9]
+        with patch(
+            "grocery_butler.db.migrate._discover_migrations",
+            return_value=before_009,
+        ):
+            migrate(db_path)
+
+        with closing(get_connection(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO product_mapping "
+                "(ingredient_description, safeway_product_id, safeway_product_name) "
+                "VALUES ('milk', 'SW-1', 'Whole Milk')"
+            )
+            conn.execute(
+                "INSERT INTO order_submissions "
+                "(idempotency_key, cart_fingerprint, status, order_id) "
+                "VALUES ('key-1', 'fp-1', 'confirmed', 'ORD-1')"
+            )
+            conn.commit()
+
+        assert migrate(db_path) == 1
+
+        with closing(get_connection(db_path)) as conn:
+            mapping = conn.execute(
+                "SELECT safeway_product_id FROM archived_product_mapping"
+            ).fetchall()
+            orders = conn.execute(
+                "SELECT order_id, status FROM archived_order_submissions"
+            ).fetchall()
+
+        assert [row["safeway_product_id"] for row in mapping] == ["SW-1"]
+        assert [(row["order_id"], row["status"]) for row in orders] == [
+            ("ORD-1", "confirmed")
+        ]
+        assert migrate(db_path) == 0
+
+    @pytest.mark.parametrize("is_pg", [False, True])
+    def test_migration_009_exists_for_both_dialects(self, is_pg: bool) -> None:
+        """Both SQLite and PostgreSQL ship the archive migration."""
+        names = {name for v, name, _ in _discover_migrations(is_pg=is_pg) if v == 9}
+        assert names == {"archive_retailer_tables"}
 
 
 class TestCLI:

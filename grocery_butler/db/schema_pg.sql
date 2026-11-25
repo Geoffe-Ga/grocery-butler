@@ -77,9 +77,9 @@ CREATE TABLE IF NOT EXISTS preferences (
     value TEXT NOT NULL
 );
 
--- Future use: Safeway product mapping cache.
--- Nothing writes to this yet; included so the schema is ready for Phase 3.
-CREATE TABLE IF NOT EXISTS product_mapping (
+-- Archived Safeway product cache (migration 009, ADR 0001). Kept for
+-- historical rows only; nothing reads or writes it.
+CREATE TABLE IF NOT EXISTS archived_product_mapping (
     id SERIAL PRIMARY KEY,
     ingredient_description TEXT NOT NULL,
     safeway_product_id TEXT NOT NULL,
@@ -92,8 +92,8 @@ CREATE TABLE IF NOT EXISTS product_mapping (
     is_pinned BOOLEAN DEFAULT FALSE
 );
 
-CREATE INDEX IF NOT EXISTS idx_product_mapping_ingredient
-    ON product_mapping(ingredient_description);
+CREATE INDEX IF NOT EXISTS idx_archived_product_mapping_ingredient
+    ON archived_product_mapping(ingredient_description);
 
 -- Generated shopping lists (Issue #65): persisted server-side so lists of
 -- any size are visible to every household member, instead of living in a
