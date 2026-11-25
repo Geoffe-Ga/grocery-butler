@@ -1,6 +1,7 @@
 # grocery-butler
 
-> A grocery ERP for the household — built to protect invisible labor.
+> The household's replenishment memory: what we keep, what we probably have,
+> what we need, and why. Operated by OpenClaw, controlled by people.
 
 ## Mission
 
@@ -8,40 +9,48 @@ Households run on a quiet, unrecognized layer of work: someone notices the
 peanut butter is low, mentally cross-references it against tomorrow's lunches,
 remembers that one kid won't eat the crunchy kind, checks last week's receipt
 to avoid double-buying, and threads it all into a coherent shopping trip. That
-labor is largely **invisible** — it doesn't show up on a calendar, doesn't get
+labor is largely **invisible**. It doesn't show up on a calendar, doesn't get
 billed, and doesn't get thanked. When the person doing it is unavailable, sick,
 or finally tired of doing it, the household feels the absence immediately.
 
-**Grocery Butler** treats household provisioning as a first-class business
-process. Inventory, recipes, brand preferences, pantry staples, and ordering
-are stored in a real database, exposed through real interfaces (web, chat, and
-CLI), and orchestrated like an ERP system would orchestrate a supply chain.
+**Grocery Butler** is the household's durable system of record for that work.
+It helps a household answer four questions reliably:
 
-The goal is not to "add an app" to someone's life. The goal is to make the
-invisible work **visible, sharable, and partially automatable**, so that:
+1. What do we usually keep?
+2. What do we probably have right now, and how certain are we?
+3. What needs attention or replenishment?
+4. How can a human approve and complete that replenishment through an
+   authorized retailer experience?
+
+It does **not** promise perfect perpetual inventory or autonomous purchasing.
+Household inventory is noisy: packages are partly full, items move, receipts
+differ from orders, and people forget to report what they used. The useful
+product is a low-friction replenishment memory that makes uncertainty visible
+and takes the invisible labor off one person's shoulders, so that:
 
 - The mental load can be **handed off** without losing context.
-- Multiple household members can **contribute** ("we're out of milk") via the
-  channels they already use (Discord, web, terminal).
+- Multiple household members can **contribute** ("we're out of milk") through
+  OpenClaw, the web dashboard, or the terminal.
 - Decisions made once (preferred brands, default servings, dietary
   restrictions) **persist** instead of being rediscovered every week.
-- The boring parts (consolidating ingredients across meals, mapping a recipe
-  to a Safeway cart, picking sane substitutions) are handled by **the
-  software**, not by a human's evening.
+- A human still decides **what gets purchased**, every time, in the
+  retailer's own checkout.
 
-This is a small system with a serious intention: give back the hours that
-"just keeping the house running" silently consumes.
+The product direction, epics, and delivery sequence live in
+[`docs/OPENCLAW_ERP_BACKLOG.md`](docs/OPENCLAW_ERP_BACKLOG.md). Architecture
+decisions are recorded in [`docs/adr/`](docs/adr/README.md).
 
 ## Table of Contents
 
 - [What It Does](#what-it-does)
 - [Architecture](#architecture)
+- [Retailer Integration Status](#retailer-integration-status)
 - [Code Choices](#code-choices)
 - [Installation](#installation)
 - [Running the System](#running-the-system)
 - [API Documentation](#api-documentation)
   - [HTTP / Web API](#http--web-api)
-  - [RubotPaul Integration (/api/v1)](#rubotpaul-integration-apiv1)
+  - [OpenClaw Integration (/api/v1)](#openclaw-integration-apiv1)
   - [Discord Bot Commands](#discord-bot-commands)
   - [Command-Line Interface](#command-line-interface)
   - [Python Module API](#python-module-api)
@@ -52,69 +61,82 @@ This is a small system with a serious intention: give back the hours that
 
 ## What It Does
 
-Grocery Butler implements the full provisioning loop for a household:
+Grocery Butler runs the household side of the provisioning loop:
 
-1. **Capture recipes** — describe a meal in natural language; Claude parses it
+1. **Capture recipes.** Describe a meal in natural language; Claude parses it
    into structured ingredients with quantities, units, and categories.
-2. **Track real inventory** — the household marks items as `on_hand`, `low`,
-   or `out` from any channel. Items go onto the **restock queue** automatically.
-3. **Plan a week** — given a list of meal names, the system pulls saved recipes
+2. **Track inventory.** The household marks items as `on_hand`, `low`, or
+   `out` from any channel. Items go onto the **restock queue** automatically.
+3. **Plan a week.** Given a list of meal names, the system pulls saved recipes
    (or parses new ones), scales them to your default servings, and emits a
-   consolidated shopping list grouped by store aisle.
-4. **Respect what's already true** — pantry staples are excluded by default,
+   consolidated, retailer-neutral shopping list grouped by store aisle.
+4. **Respect what's already true.** Pantry staples are excluded by default,
    restock items are added unconditionally, and brand preferences and dietary
    rules are applied at consolidation time.
-5. **Order through Safeway** — the optional Safeway pipeline maps shopping
-   list items to real products, suggests substitutions for out-of-stock items
-   via Claude, builds a cart, and submits the order for pickup or delivery.
+5. **Hand off, don't check out.** The shopping list is the end of Grocery
+   Butler's job today. You (or OpenClaw, in your own logged-in session) take
+   it to any store; the retailer's own surface owns the cart, payment, and
+   checkout. See [Retailer Integration Status](#retailer-integration-status).
+
+The target workflow the backlog builds toward adds photo-based inventory
+capture through OpenClaw, an append-only observation ledger with confidence
+and provenance, explicit replenishment needs, and reconciliation of what
+actually arrived. See
+[Target workflow](docs/OPENCLAW_ERP_BACKLOG.md#target-workflow).
 
 ## Architecture
 
-Grocery Butler is intentionally a **small monolith with three front doors**.
-A single shared database, a single domain layer, and three thin adapters that
-serve the channels people actually use.
+Grocery Butler is a **small monolith with one source of truth**. A single
+shared database and domain layer sit behind thin channel adapters. OpenClaw
+(today through RubotPaul, the household's OpenClaw assistant) is the primary
+operator; the web dashboard and CLI cover direct use.
 
 ```
-                        +-----------------------+
-                        |     Anthropic API     |
-                        |   (Claude — parsing,  |
-                        |    consolidation,     |
-                        |    substitutions)     |
-                        +-----------+-----------+
-                                    |
-                                    v
-+---------+     +---------+     +---------+     +-----------------+
-| Flask   |     | Discord |     |   CLI   |     |  Safeway HTTP   |
-|  web    |     |   bot   |     |  argp.  |     |  client (httpx) |
-| (app.py)|     | (bot.py)|     |(cli.py) |     |(safeway_client) |
-+----+----+     +----+----+     +----+----+     +--------+--------+
-     |               |               |                   ^
-     +-------+-------+---------------+                   |
-             |                                           |
-             v                                           |
-     +-------------------+   +----------------+          |
-     |  Domain services  |-->|  SafewayPipeline|---------+
-     |                   |   +----------------+
-     |  - MealParser     |
-     |  - Consolidator   |
-     |  - PantryManager  |
-     |  - RecipeStore    |
-     +---------+---------+
-               |
-               v
-        +-------------+
-        |  db/adapter |   SQLite (dev) / Postgres (prod)
-        +-------------+
+   +-------------------+        +-----------------------+
+   |     OpenClaw      |        |     Anthropic API     |
+   |   (RubotPaul):    |        |  (Claude: parsing and |
+   |  chat, photos,    |        |    consolidation)     |
+   |  approvals        |        +-----------+-----------+
+   +---------+---------+                    |
+             | /api/v1 (HMAC, tailnet)      |
+             v                              v
++-----------------+   +---------+   +-------------------+
+|  Flask web +    |   |   CLI   |   |  Domain services  |
+|  /api/v1        |-->| (cli.py)|-->|  - MealParser     |
+|  (app.py,       |   +---------+   |  - Consolidator   |
+|   api.py)       |---------------->|  - PantryManager  |
++-----------------+                 |  - RecipeStore    |
+                                    |  - PendingActions |
+                                    +---------+---------+
+                                              |
+                                              v
+                                       +-------------+
+                                       |  db/adapter |  SQLite (dev) /
+                                       +-------------+  Postgres (prod)
+
+   Retailer checkout: outside the system. The household (or OpenClaw in the
+   user's own session) completes it on the retailer's authorized surface.
 ```
+
+### Ownership boundary
+
+| Grocery Butler owns | OpenClaw owns | The retailer owns |
+|---------------------|---------------|-------------------|
+| Canonical household items and staple policies | Conversation and multimodal input | Catalog, prices, promotions, availability |
+| Inventory state, confidence, and provenance | Turning photos, voice, and chat into *proposed* observations | Authentication and account security |
+| Preferences, brands, dietary rules, substitutions | Targeted clarification when confidence is low | Cart, fulfillment slots, payment, checkout |
+| Replenishment needs and their reasons | Orchestrating review and approval | Final order and fulfillment truth |
+| Retailer-neutral shopping plans | Operating an authorized retailer surface when permitted | |
+| Drafts, approvals, audit history, reconciliation | Reporting results back for reconciliation | |
 
 ### Layers
 
-**Adapters (channels)** — `app.py` (Flask), `bot.py` (Discord), `cli.py`
-(argparse). These are intentionally thin: they parse channel-specific input,
-call into the domain services, and format output for the channel. No business
-rules live here.
+**Adapters (channels).** `api.py` (the `/api/v1` blueprint OpenClaw calls),
+`app.py` (Flask HTML dashboard), and `cli.py` (argparse). `bot.py` (Discord)
+is retired from production. Adapters parse channel-specific input, call into
+the domain services, and format output. No business rules live here.
 
-**Domain services** — the heart of the system:
+**Domain services**, the heart of the system:
 
 | Module | Responsibility |
 |--------|---------------|
@@ -122,23 +144,24 @@ rules live here.
 | `recipe_store.py` | Persistence for recipes, pantry staples, brand preferences, and user preferences. |
 | `pantry_manager.py` | Household inventory CRUD, restock queue, and natural-language inventory updates. |
 | `consolidator.py` | Merge ingredients across multiple meals into a single deduplicated shopping list, applying pantry staples and restock overrides. |
+| `pending_actions.py` | Draft → confirm → execute audit trail for staged, human-confirmed changes. |
 
-**Safeway pipeline** — `safeway_pipeline.py` wires together
-`safeway_client.py`, `product_search.py`, `product_selector.py`,
-`substitution_service.py`, `cart_builder.py`, and `order_service.py` into a
-two-step `build_cart` -> `submit_order` flow. The pipeline is optional; the
-core meal-planning system runs without any Safeway credentials.
+**Fulfillment adapters** come next (backlog P1.11, P1.12): a retailer-neutral
+interface with per-adapter declared capabilities (`export_list`,
+`open_search`, `draft_cart`, `deep_link_cart`, `read_cart`, `read_order`,
+`import_receipt`), starting with a plain list export that works with any
+store. Core logic never imports a retailer-specific model.
 
-**Persistence** — `db/adapter.py` provides a thin abstraction over `sqlite3`
+**Persistence.** `db/adapter.py` provides a thin abstraction over `sqlite3`
 and `psycopg2` so the same code runs locally on SQLite (with WAL mode for
-concurrent reader/writer between Flask and the Discord bot) and in production
-on Railway Postgres. Schema is defined declaratively in `db/schema.sql` and
-`db/schema_pg.sql`, with one-shot data migrations in `db/migrate.py`.
+concurrent readers and writers) and in production on Railway Postgres. Schema
+changes are numbered SQL migrations in `db/migrations/`, applied by
+`db/migrate.py`.
 
 ### Process Topology
 
-In production (Railway), the system builds and runs from the `Dockerfile` —
-there's no separate build/release configuration to keep in sync. The image
+In production (Railway), the system builds and runs from the `Dockerfile`;
+there's no separate build or release configuration to keep in sync. The image
 boots into `docker-entrypoint.sh`, which applies any pending schema
 migrations (`python -m grocery_butler.db.migrate`, reading `DATABASE_URL`)
 before anything else starts. If a migration fails, `set -eu` aborts the boot
@@ -149,72 +172,61 @@ the container's only long-lived process, serving both the kitchen-phone HTML
 UI and the HMAC-authenticated `/api/v1` blueprint.
 
 There is no separate worker process in production. The Discord bot
-(`python -m grocery_butler.bot`) is retired from deployment — RubotPaul is
+(`python -m grocery_butler.bot`) is retired from deployment: RubotPaul is
 the household's Discord interface now, and it drives grocery-butler through
 `/api/v1` instead. The bot module stays in the codebase and can still be run
 locally (see [Discord bot (local only)](#discord-bot-local-only--retired-from-production)).
 The CLI is invoked ad-hoc as a single-shot process (no daemon).
 
-See [Deploying to Railway](#deploying-to-railway) for the environment
-variables and setup steps that go with this topology.
+Production needs **no retailer configuration**. See
+[Deploying to Railway](#deploying-to-railway) for the environment variables
+and setup steps that go with this topology.
 
 ### Key Design Rules
 
+The full list is in the backlog's
+[Safety and product principles](docs/OPENCLAW_ERP_BACKLOG.md#safety-and-product-principles).
+The ones the current code already enforces or must never break:
+
 1. **Inventory status overrides pantry staples.** Salt is normally excluded as
    a pantry staple, but if the household marks salt as `out`, it goes onto
-   the order. This rule is enforced inside `Consolidator`, not at the call site.
+   the list. This rule is enforced inside `Consolidator`, not at the call site.
 2. **Claude is a parser, not a planner.** The LLM extracts structure from
-   natural language (recipes, inventory updates, substitution choices). It
-   does not own state. State lives in the database.
-3. **Channels are interchangeable.** Anything you can do in the web UI you can
-   do from the CLI or from Discord. No channel is privileged.
-4. **The Safeway integration is optional.** Removing it leaves a fully usable
-   meal-planning + inventory tracking system.
+   natural language (recipes, inventory updates). It does not own state.
+   State lives in the database.
+3. **Evidence before mutation.** A photo or model inference creates a
+   *proposal*; it never silently overwrites inventory.
+4. **Draft → confirm → execute.** Money-moving or destructive actions always
+   require explicit human confirmation against an immutable draft. Approval
+   to hand off a plan is not approval to purchase; purchase approval belongs
+   in the retailer's authorized surface.
+5. **Retailers are adapters.** Core inventory and replenishment logic must not
+   import retailer-specific models.
+6. **Never claim a purchase without evidence.** A draft list, a browser click,
+   or a retailer acknowledgment is not a completed order.
 
-### Safeway Order Submission Status (v1.0)
+## Retailer Integration Status
 
-The Safeway integration's **checkout API surface is unverified** against the
-live Safeway/Albertsons API (Issue #60). Concretely: the Okta auth flow uses
-an `aus`-prefixed `OKTA_CLIENT_ID`, which looks like an authorization-server
-id rather than a client id, and `/abs/pub/web/orders` has no modeled payment
-method or delivery/pickup slot reservation. No real order has ever been
-confirmed to go through this client.
+**Grocery Butler has no retailer integration, and does not support one built
+on private APIs.** The earlier Safeway integration, which talked to
+Safeway's undocumented web API with stored account credentials, was never
+verified against a real order and has been retired. See
+[ADR 0001](docs/adr/0001-pivot-from-private-safeway-api-to-authorized-fulfillment-adapters.md)
+for why.
 
-For v1.0, real order submission is **disabled by default** and fails safe:
+What that means today:
 
-- **Building and reviewing a cart still works** end-to-end —
-  `SafewayPipeline.build_cart_only` (Python API), CLI
-  `order review`/`order submit --dry-run`, `/order review` (Discord), and
-  the RubotPaul `/order/preview` endpoint all function normally.
-- **Submitting an order does not.** `OrderService.submit_order`,
-  `SafewayPipeline.submit_cart`/`run()`, CLI `order submit`, `/order submit`
-  (Discord), and the RubotPaul `/order/submit` → `/actions/confirm` flow all
-  return a failed result, raise, or respond `501`, with an actionable
-  message pointing at manual checkout — instead of silently pretending to
-  place an order.
-- **Checkout for v1.0 is manual**: build and review the cart in-app, then
-  complete the purchase yourself on safeway.com or in the Safeway app.
+- There is **no** Safeway (or other retailer) username, password, store id, or
+  order-submission flag to configure. Don't add one.
+- Grocery Butler **cannot** build, review, or submit a retailer cart. Its
+  output is a retailer-neutral shopping list; checkout happens in the
+  retailer's own app or site, by a person.
+- New fulfillment paths arrive only as authorized adapters (a list export
+  first, then options chosen after the terms review in backlog P2.2). No
+  adapter is built from undocumented endpoints.
 
-Set `SAFEWAY_ORDER_SUBMISSION_ENABLED=true` (see `.env.example`) to lift the
-guard once the checklist below is complete. **Do not enable it in
-production before that.**
-
-**Human verification checklist** (gates enabling the flag — see Issue #60):
-
-- [ ] Verify the Okta `authn`/`authorize` flow against real credentials. The
-      `aus`-prefixed `OKTA_CLIENT_ID` is likely an authorization-server id,
-      not a `0oa` client id — capture the real value from web-app network
-      traffic.
-- [ ] Verify each endpoint against the live API —
-      `/api/v2/grocerystore/search`,
-      `/abs/pub/web/stores/{id}/fulfillment`, `/abs/pub/web/orders` — and
-      check in recorded request/response fixtures for tests.
-- [ ] Model the checkout requirements this client currently omits (payment
-      method selection, delivery/pickup slot reservation, address/contact),
-      or make an explicit decision to keep the descope.
-- [ ] Record one successful end-to-end order against a real account (see
-      the manual verification checklist in #32 and the automated test plan
-      in #31).
+The live-API verification plans that used to live here (#31, #32, #60) are
+superseded by the ADR.
 
 ## Code Choices
 
@@ -244,9 +256,10 @@ and easy to operate alone.**
 ### Chat
 
 - **discord.py 2.x** — slash commands via `app_commands.CommandTree`, grouped
-  by feature (`/stock`, `/pantry`, `/brands`, `/recipes`, `/preferences`,
-  `/order`). Permission is delegated to Discord's native `manage_guild` so
-  server admins control access through the Integrations UI.
+  by feature (`/stock`, `/pantry`, `/brands`, `/recipes`, `/preferences`).
+  Retired from production in favor of OpenClaw (RubotPaul). Permission is
+  delegated to Discord's native `manage_guild` so server admins control
+  access through the Integrations UI.
 
 ### LLM
 
@@ -254,35 +267,23 @@ and easy to operate alone.**
   - Recipe parsing: structured extraction with JSON schemas.
   - Inventory natural language: "we ran out of milk and the bread is going
     stale" -> a list of `InventoryUpdate` records.
-  - Substitution selection: rank Safeway alternatives for an out-of-stock item.
   - Prompt templates live in `grocery_butler/prompts/` and are loaded by
     `prompt_loader.py` so they can be edited without code changes.
 
 ### Data
 
 - **Pydantic v2** — all domain objects (`Ingredient`, `ParsedMeal`,
-  `ShoppingListItem`, `InventoryItem`, `BrandPreference`, `SafewayProduct`,
-  `CartSummary`, ...) are Pydantic models. Field validators normalize messy
+  `ShoppingListItem`, `InventoryItem`, `BrandPreference`, `PendingAction`,
+  ...) are Pydantic models. Field validators normalize messy
   inputs (e.g. `"lbs"` -> `Unit.LB`) at the edge so the rest of the system
   works with clean enums.
 - **`StrEnum` for vocabularies** — `IngredientCategory`, `InventoryStatus`,
-  `Unit`, `BrandPreferenceType`, `BrandMatchType`, `FulfillmentType`,
-  `PriceSensitivity`, `OrganicPreference`, `SubstitutionSuitability`. The
+  `Unit`, `BrandPreferenceType`, `BrandMatchType`, `PendingActionStatus`. The
   string value matches the database value, so enum members can be compared
   directly with stored strings.
 - **SQLite (dev) + Postgres (prod)** — same schema, same code, swapped via
-  the `db/adapter.py` shim. SQLite uses WAL mode so the Flask process and the
-  Discord worker can read/write concurrently.
-
-### HTTP
-
-- **httpx** for the Safeway client — async-capable and gives precise control
-  over headers, timeouts, and bearer-token auth. Safeway's web API is not
-  officially documented; the client authenticates via an Okta-issued bearer
-  token (no cookie session). The full auth flow and every endpoint are
-  **unverified** against the live Safeway/Albertsons API — see
-  [Safeway Order Submission Status (v1.0)](#safeway-order-submission-status-v10)
-  and Issue #60.
+  the `db/adapter.py` shim. SQLite uses WAL mode so concurrent readers and
+  writers don't block each other.
 
 ### Quality tooling
 
@@ -327,14 +328,11 @@ $EDITOR .env
 |----------|---------------|---------|
 | `ANTHROPIC_API_KEY` | Always | Claude API access for parsing and consolidation. Missing key logs a startup warning and degrades to stub/saved-recipe paths rather than blocking boot. |
 | `APP_ENV` | Set by the Docker image | Set to `production` in the runtime image; arms fail-fast startup checks for `FLASK_SECRET_KEY` and `RUBOTPAUL_SHARED_SECRET` (see [Fail-fast startup checks](#fail-fast-startup-checks), issue #64). Leave unset for local dev. |
-| `RUBOTPAUL_SHARED_SECRET` | RubotPaul API | HMAC secret for `/api/v1` bearer tokens (shared with RubotPaul). Required at boot when `APP_ENV=production`; otherwise only enforced per-request (401). |
+| `RUBOTPAUL_SHARED_SECRET` | OpenClaw API | HMAC secret for `/api/v1` bearer tokens (shared with RubotPaul, the household's OpenClaw assistant). Required at boot when `APP_ENV=production`; otherwise only enforced per-request (401). |
 | `DISCORD_BOT_TOKEN` | Local bot runs only | Authenticates the (retired-from-production) Discord bot. |
 | `FLASK_SECRET_KEY` | Web (production) | Stable session signing key. Required at boot when `APP_ENV=production`; in dev, an unset key falls back to a random per-process key (see [Fail-fast startup checks](#fail-fast-startup-checks)). |
 | `DATABASE_PATH` | SQLite (dev) | Path to the local SQLite file. Defaults to `mealbot.db`. |
 | `DATABASE_URL` | Postgres (prod) | Connection URL injected by Railway Postgres. |
-| `SAFEWAY_USERNAME` | Ordering only | Safeway account email. |
-| `SAFEWAY_PASSWORD` | Ordering only | Safeway account password. |
-| `SAFEWAY_STORE_ID` | Ordering only | Safeway store ID for product searches. |
 | `DEFAULT_SERVINGS` | Optional | Default recipe scaling target (default `4`). |
 | `DEFAULT_UNITS` | Optional | `imperial` or `metric` (default `imperial`). |
 
@@ -365,7 +363,7 @@ python -m grocery_butler.bot
 The bot connects with `DISCORD_BOT_TOKEN` and registers slash commands on
 startup. In production this process no longer runs: RubotPaul owns the
 Discord side and talks to grocery-butler through the
-[RubotPaul integration API](#rubotpaul-integration-apiv1).
+[OpenClaw integration API](#openclaw-integration-apiv1).
 
 ### CLI
 
@@ -447,7 +445,7 @@ routes are server-rendered HTML except where noted.
 | `GET` | `/preferences` | Render the preferences form. |
 | `POST` | `/preferences` | Form: `default_servings`, `default_units`, `dietary_restrictions`. |
 
-### RubotPaul Integration (/api/v1)
+### OpenClaw Integration (/api/v1)
 
 RubotPaul (the household's OpenClaw assistant) drives grocery-butler through a
 JSON API served by the same web process as the HTML UI — the web UI is
@@ -466,14 +464,14 @@ unchanged. The blueprint lives in `grocery_butler/api.py` and is registered by
   `GET /healthz` liveness probe is exempt.
 - **Surface:** read endpoints (`/inventory`, `/pantry`, `/recipes`, `/brands`,
   `/preferences`, `/restock`, `/actions`, `/actions/<action_id>`), compute
-  previews (`/meals/parse`, `/shopping-list/preview`, `/order/preview`),
+  previews (`/meals/parse`, `/shopping-list/preview`),
   low-stakes writes (`/stock/update`, `/stock/add`, `/restock/clear`,
   `/recipes/save`, `DELETE /recipes/<id>`), and staged destructive actions
-  (`/order/submit`, `/brands/set`, `/preferences/set` → `/actions/confirm` /
+  (`/brands/set`, `/preferences/set` → `/actions/confirm` /
   `/actions/deny` against the `pending_actions` audit table). `GET /actions`
   lists staged/resolved actions (`?limit=`, default 50, cap 200; `?status=`
-  filter), sweeping past-due pending rows to `expired` first -- the three
-  staging routes (`/order/submit`, `/brands/set`, `/preferences/set`) sweep
+  filter), sweeping past-due pending rows to `expired` first -- the
+  staging routes (`/brands/set`, `/preferences/set`) sweep
   on write too, so a row never sits `pending` past its TTL just because the
   audit log went unread; `GET /actions/<action_id>` returns one action or a
   JSON 404.
@@ -481,7 +479,8 @@ unchanged. The blueprint lives in `grocery_butler/api.py` and is registered by
   returns a `pending_confirmation` action id with a 5-minute expiry; nothing
   executes until RubotPaul confirms after Geoff replies "confirm" in chat.
   Resolved actions record a terminal status of `approved`, `denied`,
-  `expired`, or `failed` (a claimed order whose Safeway submission failed).
+  `expired`, or `failed` (a claimed action whose execution failed). Rows
+  from the retired Safeway order flow remain in the audit table as history.
 
 ### Discord Bot Commands
 
@@ -547,13 +546,6 @@ be re-mapped per role via Server Settings -> Integrations.
 | `/preferences show` | Show current user preferences. |
 | `/preferences set <key> <value>` | Update a preference (`default_servings`, `default_units`, `dietary_restrictions`). |
 
-#### `/order`
-
-| Command | Description |
-|---------|-------------|
-| `/order review <meals>` | Build a Safeway cart from the given meals and show the summary without submitting. |
-| `/order submit <meals>` | Build and submit a Safeway order. |
-
 In addition, sending free-text DMs to the bot triggers natural-language
 inventory parsing (e.g. "we ran out of milk and eggs" -> two `InventoryUpdate`
 records applied to `household_inventory`).
@@ -605,17 +597,6 @@ python -m grocery_butler pantry add <ingredient> [--category <cat>]
 python -m grocery_butler pantry remove <ingredient>
 ```
 
-#### `order`
-
-```
-python -m grocery_butler order review --meals "tacos,pasta"
-python -m grocery_butler order review --items "milk:1:gal,eggs:12:each"
-python -m grocery_butler order submit --meals "..."
-```
-
-Builds (and optionally submits) a Safeway cart. Requires
-`SAFEWAY_USERNAME`/`SAFEWAY_PASSWORD`/`SAFEWAY_STORE_ID` in the environment.
-
 #### `bot`
 
 ```
@@ -634,7 +615,6 @@ from grocery_butler.recipe_store import RecipeStore
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.meal_parser import MealParser
 from grocery_butler.consolidator import Consolidator
-from grocery_butler.safeway_pipeline import SafewayPipeline
 
 cfg = load_config()
 store = RecipeStore(cfg.database_path)
@@ -647,11 +627,6 @@ shopping_list = Consolidator().consolidate_simple(
     restock_queue=pantry.get_restock_queue(),
     pantry_staples=store.get_pantry_staple_names(),
 )
-
-# Optional: build and submit a Safeway order
-pipeline = SafewayPipeline(cfg, cfg.database_path)
-cart = pipeline.build_cart(shopping_list)
-result = pipeline.submit_order(cart)
 ```
 
 #### Key classes
@@ -662,13 +637,6 @@ result = pipeline.submit_order(cart)
 | `PantryManager` | `pantry_manager` | Inventory CRUD, restock queue, NL inventory updates via Claude. |
 | `MealParser` | `meal_parser` | Resolve meal names to `ParsedMeal` (saved recipe or LLM-parsed). |
 | `Consolidator` | `consolidator` | Merge meal ingredients into a deduplicated `ShoppingListItem` list. |
-| `SafewayPipeline` | `safeway_pipeline` | End-to-end Safeway ordering: cart build + order submit. |
-| `SafewayClient` | `safeway_client` | Low-level httpx client for Safeway's API. |
-| `ProductSearchService` | `product_search` | Search Safeway products for a shopping list item. |
-| `ProductSelector` | `product_selector` | Pick the best Safeway product given brand prefs and price sensitivity. |
-| `SubstitutionService` | `substitution_service` | Claude-driven substitution suggestions for out-of-stock items. |
-| `CartBuilder` | `cart_builder` | Assemble a `CartSummary` from selected products. |
-| `OrderService` | `order_service` | Submit an assembled cart to Safeway. |
 
 ## Data Model
 
@@ -683,14 +651,14 @@ public ones:
 | `InventoryItem` | A tracked household item with `status` (`on_hand`/`low`/`out`). |
 | `InventoryUpdate` | NL-parsed status change with confidence. |
 | `BrandPreference` | A `preferred`/`avoid` rule scoped to category or ingredient. |
-| `SafewayProduct` | A real Safeway catalog product. |
-| `SubstitutionOption` / `SubstitutionResult` | Substitution candidates and outcomes. |
-| `CartItem` / `CartSummary` | A populated Safeway cart ready for submission. |
-| `FulfillmentOption` | Pickup or delivery window with fee. |
 
 Vocabulary enums (`StrEnum`): `IngredientCategory`, `InventoryStatus`, `Unit`,
-`BrandPreferenceType`, `BrandMatchType`, `PriceSensitivity`,
-`OrganicPreference`, `FulfillmentType`, `SubstitutionSuitability`.
+`BrandPreferenceType`, `BrandMatchType`, `PendingActionStatus`.
+
+The backlog's next domain concepts (`HouseholdItem`, `InventoryObservation`,
+`ReplenishmentNeed`, `ShoppingPlan`, `FulfillmentDraft`, and others) are
+described in
+[Domain model changes](docs/OPENCLAW_ERP_BACKLOG.md#domain-model-changes).
 
 The full schema is in `grocery_butler/db/schema.sql` (SQLite) and
 `grocery_butler/db/schema_pg.sql` (Postgres). The most important rule is
@@ -698,7 +666,7 @@ encoded in the schema's comments:
 
 > Inventory status OVERRIDES pantry staple exclusion.
 > If salt is a pantry staple AND inventory says `out`, it gets INCLUDED in
-> the order. If an item is a pantry staple AND NOT tracked in inventory,
+> the shopping list. If an item is a pantry staple AND NOT tracked in inventory,
 > assume `on_hand`.
 
 ## Development
@@ -742,13 +710,8 @@ grocery-butler/
 │   ├── recipe_store.py         # Recipes + staples + brand prefs
 │   ├── pantry_manager.py       # Inventory CRUD + NL parsing
 │   ├── consolidator.py         # Multi-meal -> shopping list
-│   ├── safeway_client.py       # Safeway HTTP client (httpx)
-│   ├── product_search.py       # Search Safeway products
-│   ├── product_selector.py     # Brand/price-aware product picking
-│   ├── substitution_service.py # Claude-driven substitutions
-│   ├── cart_builder.py         # Assemble CartSummary
-│   ├── order_service.py        # Submit Safeway orders
-│   ├── safeway_pipeline.py     # End-to-end ordering pipeline
+│   ├── pending_actions.py      # Draft -> confirm -> execute audit trail
+│   ├── api.py                  # /api/v1 blueprint (OpenClaw)
 │   ├── db/
 │   │   ├── adapter.py          # SQLite/Postgres adapter
 │   │   ├── migrate.py          # Schema migrations
@@ -761,6 +724,10 @@ grocery-butler/
 ├── scripts/                    # Quality control scripts
 ├── .github/workflows/          # CI/CD pipelines
 ├── .claude/                    # AI subagents and skills
+├── docs/
+│   ├── OPENCLAW_ERP_BACKLOG.md # Product backlog and delivery sequence
+│   └── adr/                    # Architecture decision records
+├── plans/                      # Historical build plans (superseded)
 ├── pyproject.toml              # Tool configuration
 ├── Dockerfile                  # Railway build + runtime image
 ├── docker-entrypoint.sh        # Runs migrations, then execs gunicorn
@@ -795,7 +762,8 @@ process to deploy alongside the web service.
 
 ### Required environment variables
 
-Set these in your Railway project settings. `APP_ENV=production` is baked
+No retailer credentials are needed, or supported. Set these in your Railway
+project settings. `APP_ENV=production` is baked
 into the `Dockerfile` and doesn't need to be set separately — it's what
 arms the fail-fast checks below.
 
@@ -803,11 +771,8 @@ arms the fail-fast checks below.
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL connection URL (auto-injected by Railway Postgres plugin). |
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude-powered features. |
-| `RUBOTPAUL_SHARED_SECRET` | Yes (RubotPaul API) | HMAC secret for `/api/v1` bearer tokens; must match RubotPaul's copy. |
+| `RUBOTPAUL_SHARED_SECRET` | Yes (OpenClaw API) | HMAC secret for `/api/v1` bearer tokens; must match RubotPaul's copy. |
 | `FLASK_SECRET_KEY` | Yes (web) | Stable secret key for Flask sessions (generate once, reuse). |
-| `SAFEWAY_USERNAME` | Yes (ordering) | Safeway account username. |
-| `SAFEWAY_PASSWORD` | Yes (ordering) | Safeway account password. |
-| `SAFEWAY_STORE_ID` | Yes (ordering) | Safeway store ID for product searches. |
 | `PORT` | Auto | Injected by Railway for the web process. |
 | `TAILNET_GUARD_ENABLED` | No (defaults secure) | Kill switch for the network boundary guard (below); the guard is active unless explicitly set to `false`/`0`/`no` (case-insensitive). |
 | `TAILNET_GUARD_ALLOWED_CIDRS` | No (defaults secure) | Comma-separated CIDR allow-list for the network boundary guard (below); replaces (does not extend) the default `127.0.0.0/8,::1/128,100.64.0.0/10`. An explicitly-empty value trusts nothing (full lockout, logged at startup) — delete the variable to restore defaults. |

@@ -1,5 +1,12 @@
 # MealBot Implementation Roadmap
 
+> **Superseded (2026-11-25).** This is the original build plan. Its Safeway
+> ordering phase was retired by
+> [ADR 0001](../docs/adr/0001-pivot-from-private-safeway-api-to-authorized-fulfillment-adapters.md),
+> and the current roadmap is
+> [`docs/OPENCLAW_ERP_BACKLOG.md`](../docs/OPENCLAW_ERP_BACKLOG.md). Kept for
+> history; don't plan new work from it.
+
 ## Dependency Graph & Execution Order
 
 ```

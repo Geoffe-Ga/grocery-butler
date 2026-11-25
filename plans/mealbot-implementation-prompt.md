@@ -1,5 +1,12 @@
 # MealBot Implementation Prompt
 
+> **Superseded (2026-11-25).** This is the original build plan. Its Safeway
+> ordering phase was retired by
+> [ADR 0001](../docs/adr/0001-pivot-from-private-safeway-api-to-authorized-fulfillment-adapters.md),
+> and the current roadmap is
+> [`docs/OPENCLAW_ERP_BACKLOG.md`](../docs/OPENCLAW_ERP_BACKLOG.md). Kept for
+> history; don't plan new work from it.
+
 You are building **MealBot**, a meal planning and household inventory system. This is a personal project that will eventually automate grocery ordering from Safeway, but for now we are building the core intelligence: meal decomposition, recipe memory, pantry inventory, ingredient consolidation, and a web dashboard — with a Discord bot as the conversational interface.
 
 ## What to Build Now (Phases 1, 2, and 2.5)
