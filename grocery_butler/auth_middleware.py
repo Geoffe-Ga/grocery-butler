@@ -8,8 +8,8 @@ Usage (Flask):
 
     from grocery_butler.auth_middleware import require_bearer
 
-    @app.post("/api/v1/order/submit")
-    def submit_order():
+    @app.post("/api/v1/stock/update")
+    def update_stock():
         require_bearer()  # raises 401 if invalid
         ...
 
@@ -40,9 +40,8 @@ Security posture (issue #74)
   against the *same* endpoint again before it expires. This is
   mitigated in depth by the pending-action state machine: destructive
   operations stage first and only execute via ``/actions/confirm``,
-  which claims the row exactly once (a second confirm returns 409), and
-  the staged ``action_id`` doubles as the Safeway idempotency key. A
-  replayed confirm therefore cannot double-submit. A nonce cache would
+  which claims the row exactly once (a second confirm returns 409). A
+  replayed confirm therefore cannot apply a change twice. A nonce cache would
   close this window fully but is deliberately out of scope for #74.
 * **Distinct confirm credential / second factor: DEFERRED.** A second
   secret held by the same calling principal (RubotPaul) would add
@@ -183,20 +182,24 @@ def _verify_token(
     now = now if now is not None else time.time()
     parts = token.split(".")
     if len(parts) != 3:
-        raise AuthError("malformed token")
+        msg = "malformed token"
+        raise AuthError(msg)
     caller_id, ts_str, sig = parts
     try:
         ts = int(ts_str)
     except ValueError as exc:
-        raise AuthError("malformed timestamp") from exc
+        msg = "malformed timestamp"
+        raise AuthError(msg) from exc
 
     # Asymmetric: reject expired tokens, tolerate small forward clock skew only.
     # Using abs() here would let an attacker with a fast clock mint long-lived
     # tokens.
     if now - ts > MAX_TOKEN_AGE_SECONDS:
-        raise AuthError("token expired")
+        msg = "token expired"
+        raise AuthError(msg)
     if ts - now > MAX_TOKEN_FUTURE_SKEW_SECONDS:
-        raise AuthError("token from future")
+        msg = "token from future"
+        raise AuthError(msg)
 
     expected = hmac.new(
         _shared_secret(),
@@ -204,7 +207,8 @@ def _verify_token(
         hashlib.sha256,
     ).hexdigest()
     if not hmac.compare_digest(expected, sig):
-        raise AuthError("bad signature")
+        msg = "bad signature"
+        raise AuthError(msg)
 
     return caller_id
 

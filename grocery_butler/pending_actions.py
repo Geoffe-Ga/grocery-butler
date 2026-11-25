@@ -1,11 +1,10 @@
 """Data access layer for staged pending actions.
 
 The ``pending_actions`` table is the server-side staging area and audit
-log for destructive operations (Safeway order submissions, brand and
-preference changes). Rows are inserted as ``pending`` and resolved to
-``approved``, ``denied``, or ``expired`` exactly once; an ``approved``
-row may additionally transition to ``failed`` if execution errors out
-after being claimed.
+log for destructive operations (brand and preference changes). Rows are
+inserted as ``pending`` and resolved to ``approved``, ``denied``, or
+``expired`` exactly once; an ``approved`` row may additionally transition
+to ``failed`` if execution errors out after being claimed.
 
 Uses the same connection-per-operation pattern as
 :class:`grocery_butler.recipe_store.RecipeStore`, so it works against
@@ -86,7 +85,7 @@ class PendingActionsStore:
 
         Args:
             action_id: Unique identifier (typically a UUID4 string).
-            kind: Action kind, e.g. ``safeway_order_submit``.
+            kind: Action kind, e.g. ``brands_set``.
             payload: JSON-serializable action payload.
             expires_at: Deadline after which the action should not run.
             requester: Origin of the request (defaults to ``rubotpaul``).
@@ -210,7 +209,7 @@ class PendingActionsStore:
         Guarded on ``status = 'approved'`` (not ``'pending'``): this
         transition only ever applies to a row that was already claimed
         by :meth:`mark_pending_approved` and then failed during
-        execution (e.g. the Safeway submission raised or reported
+        execution (e.g. applying the change raised or reported
         failure). The resolver already stamped by the approval is left
         untouched.
 

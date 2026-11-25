@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
-from decimal import Decimal
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -28,8 +28,6 @@ class TestConfig:
         assert cfg.flask_debug is False
         assert cfg.default_servings == 4
         assert cfg.default_units == "imperial"
-        # Issue #60: order submission must be off by default (fail-safe gate).
-        assert cfg.safeway_order_submission_enabled is False
 
     def test_config_all_fields(self) -> None:
         """Test Config accepts all fields."""
@@ -41,7 +39,6 @@ class TestConfig:
             flask_debug=True,
             default_servings=2,
             default_units="metric",
-            safeway_order_submission_enabled=True,
         )
         assert cfg.anthropic_api_key == "sk-test"
         assert cfg.discord_bot_token == "tok-123"
@@ -50,7 +47,12 @@ class TestConfig:
         assert cfg.flask_debug is True
         assert cfg.default_servings == 2
         assert cfg.default_units == "metric"
-        assert cfg.safeway_order_submission_enabled is True
+
+    def test_config_has_no_retailer_fields(self) -> None:
+        """Config carries no retailer credentials or order flags (ADR 0001)."""
+        field_names = {f.name for f in dataclasses.fields(Config)}
+        assert not any("safeway" in name for name in field_names)
+        assert not any("order" in name for name in field_names)
 
     def test_config_is_frozen(self) -> None:
         """Test Config is immutable (frozen dataclass)."""
@@ -211,81 +213,18 @@ class TestLoadConfig:
 
     @patch.dict(
         os.environ,
-        {"ANTHROPIC_API_KEY": "sk-test"},
-        clear=True,
-    )
-    def test_load_config_safeway_order_submission_unset_defaults_false(self) -> None:
-        """Test Issue #60 gate defaults to False when the env var is unset."""
-        cfg = load_config()
-        assert cfg.safeway_order_submission_enabled is False
-
-    @pytest.mark.parametrize(
-        ("raw_value", "expected"),
-        [
-            ("true", True),
-            ("1", True),
-            ("yes", True),
-            ("TRUE", True),
-            ("Yes", True),
-            ("false", False),
-            ("0", False),
-            ("garbage", False),
-            ("", False),
-        ],
-    )
-    def test_load_config_safeway_order_submission_enabled_parsing(
-        self, raw_value: str, expected: bool
-    ) -> None:
-        """Test SAFEWAY_ORDER_SUBMISSION_ENABLED uses the flask_debug truthy parse."""
-        env = {
-            "ANTHROPIC_API_KEY": "sk-test",
-            "SAFEWAY_ORDER_SUBMISSION_ENABLED": raw_value,
-        }
-        with patch.dict(os.environ, env, clear=True):
-            cfg = load_config()
-        assert cfg.safeway_order_submission_enabled is expected
-
-
-class TestOrderValueCap:
-    """Tests for the Issue #73 order-value cap config field.
-
-    ``Config.safeway_order_value_cap`` does not exist yet, so reading it
-    below raises ``AttributeError`` — the acceptable RED for a
-    not-yet-existing config field.
-    """
-
-    def test_order_value_cap_defaults_to_300(self) -> None:
-        """Test Config.safeway_order_value_cap defaults to $300."""
-        cfg = Config(anthropic_api_key="sk-test")
-        assert cfg.safeway_order_value_cap == Decimal("300")
-
-    @patch.dict(
-        os.environ,
         {
             "ANTHROPIC_API_KEY": "sk-test",
-            "SAFEWAY_ORDER_VALUE_CAP_USD": "150.50",
+            "SAFEWAY_USERNAME": "leftover@example.com",
+            "SAFEWAY_PASSWORD": "leftover",
+            "SAFEWAY_STORE_ID": "1234",
+            "SAFEWAY_ORDER_SUBMISSION_ENABLED": "true",
+            "SAFEWAY_ORDER_VALUE_CAP_USD": "not-a-number",
         },
         clear=True,
     )
-    def test_order_value_cap_reads_env(self) -> None:
-        """Test load_config parses SAFEWAY_ORDER_VALUE_CAP_USD as a Decimal."""
+    def test_load_config_ignores_leftover_safeway_env(self) -> None:
+        """Stale SAFEWAY_* variables neither configure nor break anything."""
         cfg = load_config()
-        assert cfg.safeway_order_value_cap == Decimal("150.50")
-
-    @pytest.mark.parametrize("raw_value", ["abc", "-5"])
-    def test_order_value_cap_invalid_raises_config_error(self, raw_value: str) -> None:
-        """Test a non-numeric or negative cap value raises ConfigError.
-
-        Today load_config performs no validation at all on this env var
-        (it isn't even read), so this currently fails with "DID NOT
-        RAISE" rather than a real ConfigError.
-        """
-        env = {
-            "ANTHROPIC_API_KEY": "sk-test",
-            "SAFEWAY_ORDER_VALUE_CAP_USD": raw_value,
-        }
-        with (
-            patch.dict(os.environ, env, clear=True),
-            pytest.raises(ConfigError, match="SAFEWAY_ORDER_VALUE_CAP_USD"),
-        ):
-            load_config()
+        assert cfg.anthropic_api_key == "sk-test"
+        assert not any("safeway" in f.name for f in dataclasses.fields(cfg))

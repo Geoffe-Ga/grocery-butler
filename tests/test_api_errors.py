@@ -2,20 +2,15 @@
 
 Pins down that ``/api/v1`` never leaks an HTML error page or internal
 exception detail to a JSON client: unknown paths, wrong HTTP methods,
-and uncaught exceptions must all render terse JSON, and the
-sanitized-but-mapped error sites in ``grocery_butler.api`` (Safeway
-pipeline / order-value cap / order submission failures) must never
-echo the underlying exception text or config value into the response
-body. Every scenario here is RED against today's implementation and
-is expected to go GREEN once the error contract is fixed.
+and uncaught exceptions must all render terse JSON that never echoes
+the underlying exception text or config value into the response body.
 """
 
 from __future__ import annotations
 
-import json
 import os
-from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -30,18 +25,6 @@ if TYPE_CHECKING:
 
 from grocery_butler.app import create_app
 from grocery_butler.auth_middleware import SECRET_ENV_VAR
-from grocery_butler.config import ConfigError
-from grocery_butler.models import (
-    CartItem,
-    CartSummary,
-    FulfillmentType,
-    IngredientCategory,
-    SafewayProduct,
-    ShoppingListItem,
-    Unit,
-)
-from grocery_butler.order_service import OrderOutcome, OrderResult
-from grocery_butler.safeway_pipeline import SafewayPipelineError
 from tests.conftest import bearer_header
 
 TEST_SECRET = "test-shared-secret"
@@ -79,7 +62,7 @@ def auth_headers() -> AuthHeaderFactory:
     The request-bound token contract (issue #74) signs method, path, and
     body together, so a single static header cannot authorize every
     request in this module. Callers invoke the returned factory once per
-    request, typically via the ``_post`` helper below.
+    request.
 
     Returns:
         A callable ``(method, path, body=b"") -> {"Authorization": ...}``
@@ -92,95 +75,6 @@ def auth_headers() -> AuthHeaderFactory:
             return bearer_header("rubotpaul", method, path, body)
 
     return _make
-
-
-def _post(
-    client: FlaskClient,
-    auth_headers: AuthHeaderFactory,
-    path: str,
-    body: Any,
-) -> Any:
-    """POST a JSON-serializable body with a token bound to the exact bytes sent.
-
-    Serializes ``body`` exactly once so the identical bytes are both
-    sent as the request payload and hashed into the bearer token's
-    binding -- the two must match byte-for-byte for the server's HMAC
-    verification to succeed (issue #74).
-
-    Args:
-        client: Flask test client.
-        auth_headers: Factory fixture minting a bearer header for one
-            exact (method, path, body) triple.
-        path: Request path to POST to.
-        body: JSON-serializable request payload.
-
-    Returns:
-        The Flask test client's response.
-    """
-    serialized = json.dumps(body).encode()
-    headers = auth_headers("POST", path, serialized)
-    return client.post(
-        path, data=serialized, content_type="application/json", headers=headers
-    )
-
-
-def _make_shopping_item(ingredient: str = "pasta") -> ShoppingListItem:
-    """Return a ShoppingListItem for order preview/submit payloads."""
-    return ShoppingListItem(
-        ingredient=ingredient,
-        quantity=1.0,
-        unit=Unit.LB,
-        category=IngredientCategory.PANTRY_DRY,
-        search_term=ingredient,
-        from_meals=["test pasta"],
-    )
-
-
-def _make_cart_item(ingredient: str, cost: float) -> CartItem:
-    """Return a CartItem with the given estimated cost."""
-    return CartItem(
-        shopping_list_item=_make_shopping_item(ingredient),
-        safeway_product=SafewayProduct(
-            product_id=f"prod-{ingredient}",
-            name=f"Brand {ingredient}",
-            price=cost,
-            size="1 lb",
-        ),
-        quantity_to_order=1,
-        estimated_cost=cost,
-    )
-
-
-def _make_cart(costs: dict[str, float]) -> CartSummary:
-    """Return a CartSummary with one item per (ingredient, cost) pair."""
-    items = [_make_cart_item(name, cost) for name, cost in costs.items()]
-    return CartSummary(
-        items=items,
-        failed_items=[],
-        substituted_items=[],
-        restock_items=[],
-        subtotal=sum(costs.values()),
-        fulfillment_options=[],
-        recommended_fulfillment=FulfillmentType.PICKUP,
-        estimated_total=sum(costs.values()),
-    )
-
-
-def _order_body() -> dict[str, Any]:
-    """Return a valid /order/submit request body totalling $7.75."""
-    cart = _make_cart({"pasta": 3.50, "sauce": 4.25})
-    return {"cart": cart.model_dump(mode="json"), "total": "7.75"}
-
-
-def _stage_via_api(
-    client: FlaskClient, auth_headers: AuthHeaderFactory, body: dict[str, Any]
-) -> str:
-    """Stage an order through /order/submit and return its action_id."""
-    response = _post(client, auth_headers, "/api/v1/order/submit", body)
-    assert response.status_code == 200
-    action_id = response.get_json()["action_id"]
-    assert isinstance(action_id, str)
-    return action_id
 
 
 # ---------------------------------------------------------------------------
@@ -270,182 +164,6 @@ class TestInternalServerErrorContract:
         assert "sk-secret" not in body_text
         assert "ANTHROPIC_API_KEY" not in body_text
         assert "<!doctype html" not in body_text.lower()
-
-
-# ---------------------------------------------------------------------------
-# Leak-scrub: the sanitized 503/502/504 sites in grocery_butler/api.py must
-# use terse, stable messages and must never echo exception/config detail
-# ---------------------------------------------------------------------------
-
-
-@patch.dict(os.environ, SECRET_ENV)
-class TestLeakScrubbedErrorBodies:
-    """503/502/504 responses must be terse and free of internal detail."""
-
-    def test_order_preview_pipeline_configerror_is_scrubbed(
-        self, client: FlaskClient, auth_headers: AuthHeaderFactory
-    ) -> None:
-        """A ConfigError building the pipeline for /order/preview is scrubbed.
-
-        Today's handler interpolates the raw exception into the 503
-        body (``f"safeway pipeline unavailable: {exc}"``), so
-        ``ConfigError``'s message — which can name missing env var
-        details — reaches the client verbatim.
-        """
-        with patch(
-            "grocery_butler.api._safeway_pipeline",
-            side_effect=ConfigError("SECRET_MARKER_ENV_DETAIL"),
-        ):
-            response = _post(
-                client,
-                auth_headers,
-                "/api/v1/order/preview",
-                {"shopping_list": [_make_shopping_item().model_dump(mode="json")]},
-            )
-        assert response.status_code == 503
-        assert response.get_json()["error"] == "safeway pipeline unavailable"
-        assert "SECRET_MARKER_ENV_DETAIL" not in response.get_data(as_text=True)
-
-    def test_order_preview_cart_build_error_is_scrubbed(
-        self, client: FlaskClient, auth_headers: AuthHeaderFactory
-    ) -> None:
-        """A SafewayPipelineError building the cart for /order/preview is scrubbed.
-
-        Today's handler interpolates the raw exception into the 503
-        body (``f"cart build failed: {exc}"``).
-        """
-        pipeline = MagicMock()
-        pipeline.build_cart_only.side_effect = SafewayPipelineError(
-            "SECRET_MARKER_AUTH"
-        )
-        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = _post(
-                client,
-                auth_headers,
-                "/api/v1/order/preview",
-                {"shopping_list": [_make_shopping_item().model_dump(mode="json")]},
-            )
-        assert response.status_code == 503
-        assert response.get_json()["error"] == "cart build failed"
-        assert "SECRET_MARKER_AUTH" not in response.get_data(as_text=True)
-
-    def test_order_submit_invalid_cap_config_is_scrubbed(
-        self, client: FlaskClient, auth_headers: AuthHeaderFactory
-    ) -> None:
-        """An unparseable order-value cap env var yields a terse 503.
-
-        Today's handler interpolates the raw ``ConfigError`` into the
-        503 body (``f"order-value cap configuration invalid: {exc}"``),
-        which names the offending env var and its invalid raw value.
-        """
-        with patch.dict(os.environ, {"SAFEWAY_ORDER_VALUE_CAP_USD": "not-a-number"}):
-            response = _post(
-                client, auth_headers, "/api/v1/order/submit", _order_body()
-            )
-        assert response.status_code == 503
-        assert response.get_json()["error"] == "order configuration invalid"
-        text = response.get_data(as_text=True)
-        assert "SAFEWAY_ORDER_VALUE_CAP_USD" not in text
-        assert "not-a-number" not in text
-
-    def test_confirm_pipeline_configerror_is_scrubbed(
-        self, client: FlaskClient, auth_headers: AuthHeaderFactory
-    ) -> None:
-        """ConfigError building the pipeline at confirm time is scrubbed."""
-        action_id = _stage_via_api(client, auth_headers, _order_body())
-        with patch(
-            "grocery_butler.api._safeway_pipeline",
-            side_effect=ConfigError("SECRET_MARKER_CONF"),
-        ):
-            response = _post(
-                client,
-                auth_headers,
-                "/api/v1/actions/confirm",
-                {"action_id": action_id},
-            )
-        assert response.status_code == 503
-        assert response.get_json()["error"] == "safeway pipeline unavailable"
-        assert "SECRET_MARKER_CONF" not in response.get_data(as_text=True)
-
-    def test_confirm_submit_cart_raises_is_scrubbed(
-        self, client: FlaskClient, auth_headers: AuthHeaderFactory
-    ) -> None:
-        """A SafewayPipelineError raised by submit_cart is scrubbed.
-
-        Today's handler interpolates the raw exception into the 502
-        body (``f"order submission failed: {exc}"``).
-        """
-        action_id = _stage_via_api(client, auth_headers, _order_body())
-        pipeline = MagicMock()
-        pipeline.submit_cart.side_effect = SafewayPipelineError("SECRET_MARKER_SUBMIT")
-        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = _post(
-                client,
-                auth_headers,
-                "/api/v1/actions/confirm",
-                {"action_id": action_id},
-            )
-        assert response.status_code == 502
-        assert response.get_json()["error"] == "order submission failed"
-        assert "SECRET_MARKER_SUBMIT" not in response.get_data(as_text=True)
-
-    def test_confirm_unmapped_failure_result_is_scrubbed(
-        self, client: FlaskClient, auth_headers: AuthHeaderFactory
-    ) -> None:
-        """An unmapped-outcome OrderResult failure (no ``outcome``) is scrubbed.
-
-        ``_order_failure_response`` relays ``result.error_message``
-        verbatim into the 502 body for any outcome not in
-        ``_OUTCOME_RESPONSES`` — which can include raw text surfaced
-        from deep inside the Safeway client.
-        """
-        action_id = _stage_via_api(client, auth_headers, _order_body())
-        pipeline = MagicMock()
-        pipeline.submit_cart.return_value = OrderResult(
-            success=False, error_message="SECRET_MARKER_RAW_SAFEWAY"
-        )
-        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = _post(
-                client,
-                auth_headers,
-                "/api/v1/actions/confirm",
-                {"action_id": action_id},
-            )
-        assert response.status_code == 502
-        assert response.get_json()["error"] == "order submission failed"
-        assert "SECRET_MARKER_RAW_SAFEWAY" not in response.get_data(as_text=True)
-
-    def test_confirm_mapped_outcome_preserves_status_but_scrubs_text(
-        self, client: FlaskClient, auth_headers: AuthHeaderFactory
-    ) -> None:
-        """A mapped OrderOutcome keeps status/action_id but scrubs free text.
-
-        ``_order_failure_response`` maps ``OrderOutcome.UNKNOWN`` to a
-        504 with ``status="unknown"``, but today still relays
-        ``result.error_message`` verbatim as the ``error`` field. The
-        fixed contract must keep the mapped status code and the
-        ``status``/``action_id`` keys (RubotPaul needs those to route
-        the reply) while replacing the free text with something terse.
-        """
-        action_id = _stage_via_api(client, auth_headers, _order_body())
-        pipeline = MagicMock()
-        pipeline.submit_cart.return_value = OrderResult(
-            success=False,
-            outcome=OrderOutcome.UNKNOWN,
-            error_message="SECRET_MARKER_TIMEOUT_DETAIL",
-        )
-        with patch("grocery_butler.api._safeway_pipeline", return_value=pipeline):
-            response = _post(
-                client,
-                auth_headers,
-                "/api/v1/actions/confirm",
-                {"action_id": action_id},
-            )
-        assert response.status_code == 504
-        body = response.get_json()
-        assert body["status"] == "unknown"
-        assert body["action_id"] == action_id
-        assert "SECRET_MARKER_TIMEOUT_DETAIL" not in response.get_data(as_text=True)
 
 
 # ---------------------------------------------------------------------------

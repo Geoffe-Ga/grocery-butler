@@ -430,7 +430,7 @@ class TestInventoryUpdate:
     ) -> None:
         """Test updating to each valid status succeeds."""
         pantry_mgr.add_item(sample_item)
-        for status in ["on_hand", "low", "out"]:
+        for status in ("on_hand", "low", "out"):
             response = client.post(
                 "/inventory/update",
                 data=json.dumps({"ingredient": "milk", "status": status}),
@@ -1043,13 +1043,13 @@ class TestShoppingListPage:
         assert b"Generate" in response.data
         assert b"meals" in response.data
 
-    def test_shopping_list_has_disabled_order_button_when_items(
+    def test_shopping_list_has_no_retailer_order_button(
         self, client: FlaskClient, db_path: str
     ) -> None:
-        """Test shopping list shows disabled order button when items exist.
+        """Test the shopping list offers no retailer checkout (ADR 0001).
 
-        Issue #65: items are now persisted via ShoppingListStore instead of
-        the session cookie, so the page must render them from the DB.
+        Issue #65: items are persisted via ShoppingListStore, so the page
+        renders them from the DB; the retired Safeway order button is gone.
         """
         from grocery_butler.shopping_list_store import ShoppingListStore
 
@@ -1067,8 +1067,8 @@ class TestShoppingListPage:
         )
         response = client.get("/shopping-list")
         html = response.data.decode()
-        assert "Order from Safeway" in html
-        assert "Coming Soon" in html
+        assert "pasta" in html
+        assert "Safeway" not in html
 
     def test_shopping_list_shows_items_from_store(
         self, client: FlaskClient, db_path: str
@@ -1506,8 +1506,7 @@ class TestShoppingListCrossSession:
             follow_redirects=True,
         )
 
-        fresh_client = app.test_client()
-        response = fresh_client.get("/shopping-list")
+        response = app.test_client().get("/shopping-list")
 
         assert b"pasta" in response.data
 

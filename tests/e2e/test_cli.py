@@ -1,11 +1,4 @@
-"""E2E: CLI subcommands against a real SQLite database.
-
-The CLI's ``order`` subcommand builds its own ``SafewayPipeline``
-directly from ``Config`` with no transport-injection hook, so it is not
-exercised here -- the API/pipeline tests in ``test_ordering.py`` and
-``test_api_chain.py`` cover that pipeline through the injectable
-``safeway_mock`` seam instead.
-"""
+"""E2E: CLI subcommands against a real SQLite database."""
 
 from __future__ import annotations
 
@@ -74,8 +67,7 @@ def test_stock_lifecycle_and_restock_round_trip(
     clear_output = capsys.readouterr().out
     assert "Cleared 1 item" in clear_output
 
-    manager = PantryManager(db_path)
-    item = manager.get_item("cumin")
+    item = PantryManager(db_path).get_item("cumin")
     assert item is not None
     assert item.status.value == "on_hand"
 

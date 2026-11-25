@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING, Any
+from enum import Enum
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from flask import Flask, flash, g, jsonify, redirect, render_template, request, url_for
 
@@ -36,6 +37,55 @@ from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
 
 logger = logging.getLogger(__name__)
+
+_EnumT = TypeVar("_EnumT", bound=Enum)
+
+
+def _parse_enum(enum_cls: type[_EnumT], raw: str) -> _EnumT | None:
+    """Parse a form token into an enum member.
+
+    Args:
+        enum_cls: The enum class to parse into.
+        raw: The submitted token.
+
+    Returns:
+        The matching member, or ``None`` if ``raw`` is not a valid value.
+    """
+    try:
+        return enum_cls(raw)
+    except ValueError:
+        return None
+
+
+def _parse_int(raw: str) -> int | None:
+    """Parse a form field as an integer.
+
+    Args:
+        raw: The submitted text.
+
+    Returns:
+        The parsed integer, or ``None`` if ``raw`` does not parse.
+    """
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _parse_float(raw: str, default: float) -> float:
+    """Parse a form field as a float.
+
+    Args:
+        raw: The submitted text.
+        default: Value returned when ``raw`` does not parse.
+
+    Returns:
+        The parsed float, or ``default``.
+    """
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def _is_production() -> bool:
@@ -76,11 +126,12 @@ def _resolve_secret_key() -> str:
         return secret_key
 
     if _is_production():
-        raise RuntimeError(
+        msg = (
             "FLASK_SECRET_KEY is not set; refusing to start in production. "
             "A stable secret key is required so sessions survive restarts "
             "and are shared consistently across gunicorn worker processes."
         )
+        raise RuntimeError(msg)
 
     logger.warning(
         "FLASK_SECRET_KEY is not set; generating a random key for this "
@@ -334,11 +385,11 @@ def _register_error_handlers(app: Flask) -> None:
     """
 
     @app.errorhandler(400)
-    def bad_request(error: Exception) -> tuple[Response, int] | tuple[str, int]:
+    def bad_request(_error: Exception) -> tuple[Response, int] | tuple[str, int]:
         """Handle 400 Bad Request errors.
 
         Args:
-            error: The exception that triggered the error.
+            _error: The exception that triggered the error.
 
         Returns:
             Tuple of (response, status code): terse JSON for
@@ -347,11 +398,11 @@ def _register_error_handlers(app: Flask) -> None:
         return _api_or_html_error(400, "bad request", "Bad Request")
 
     @app.errorhandler(404)
-    def not_found(error: Exception) -> tuple[Response, int] | tuple[str, int]:
+    def not_found(_error: Exception) -> tuple[Response, int] | tuple[str, int]:
         """Handle 404 Not Found errors.
 
         Args:
-            error: The exception that triggered the error.
+            _error: The exception that triggered the error.
 
         Returns:
             Tuple of (response, status code): terse JSON for
@@ -360,11 +411,11 @@ def _register_error_handlers(app: Flask) -> None:
         return _api_or_html_error(404, "not found", "Page Not Found")
 
     @app.errorhandler(405)
-    def method_not_allowed(error: Exception) -> tuple[Response, int] | tuple[str, int]:
+    def method_not_allowed(_error: Exception) -> tuple[Response, int] | tuple[str, int]:
         """Handle 405 Method Not Allowed errors.
 
         Args:
-            error: The exception that triggered the error.
+            _error: The exception that triggered the error.
 
         Returns:
             Tuple of (response, status code): terse JSON for
@@ -373,11 +424,11 @@ def _register_error_handlers(app: Flask) -> None:
         return _api_or_html_error(405, "method not allowed", "Method Not Allowed")
 
     @app.errorhandler(500)
-    def server_error(error: Exception) -> tuple[Response, int] | tuple[str, int]:
+    def server_error(_error: Exception) -> tuple[Response, int] | tuple[str, int]:
         """Handle 500 Internal Server Error.
 
         Args:
-            error: The exception that triggered the error.
+            _error: The exception that triggered the error.
 
         Returns:
             Tuple of (response, status code): terse JSON for
@@ -454,13 +505,14 @@ def _register_health_routes(app: Flask) -> None:
         try:
             db = _get_db()
             db.execute("SELECT 1")
-            return jsonify({"status": "healthy", "database": "connected"}), 200
         except Exception:
             logger.exception("Health check failed")
             return (
                 jsonify({"status": "unhealthy", "database": "disconnected"}),
                 503,
             )
+        else:
+            return jsonify({"status": "healthy", "database": "connected"}), 200
 
     @app.route("/healthz")
     def healthz() -> tuple[Response, int]:
@@ -518,8 +570,7 @@ def _register_inventory_routes(app: Flask) -> None:
             Rendered inventory HTML.
         """
         db_path = app.config["DATABASE_PATH"]
-        pantry_mgr = PantryManager(db_path)
-        items = pantry_mgr.get_inventory()
+        items = PantryManager(db_path).get_inventory()
         categories = [cat.value for cat in IngredientCategory]
 
         return render_template(
@@ -597,15 +648,13 @@ def _register_inventory_routes(app: Flask) -> None:
 
         cat_value: IngredientCategory | None = None
         if category:
-            try:
-                cat_value = IngredientCategory(category)
-            except ValueError:
+            cat_value = _parse_enum(IngredientCategory, category)
+            if cat_value is None:
                 flash(f"Invalid category: {category}", "error")
                 return redirect(url_for("inventory"))
 
-        try:
-            status_enum = InventoryStatus(status)
-        except ValueError:
+        status_enum = _parse_enum(InventoryStatus, status)
+        if status_enum is None:
             flash(f"Invalid status: {status}", "error")
             return redirect(url_for("inventory"))
 
@@ -694,8 +743,7 @@ def _register_recipe_routes(app: Flask) -> None:
             Rendered recipe detail HTML or 404 error page.
         """
         db_path = app.config["DATABASE_PATH"]
-        recipe_store = RecipeStore(db_path)
-        meal = recipe_store.get_recipe_by_id(recipe_id)
+        meal = RecipeStore(db_path).get_recipe_by_id(recipe_id)
 
         if meal is None:
             return (
@@ -749,9 +797,8 @@ def _handle_recipe_add_post(app: Flask) -> Response:
         flash("Recipe name is required.", "error")
         return redirect(url_for("recipe_add"))
 
-    try:
-        servings = int(servings_raw)
-    except ValueError:
+    servings = _parse_int(servings_raw)
+    if servings is None:
         flash("Servings must be a number.", "error")
         return redirect(url_for("recipe_add"))
 
@@ -775,11 +822,11 @@ def _handle_recipe_add_post(app: Flask) -> Response:
 
     try:
         recipe_id = recipe_store.save_recipe(meal)
-        flash(f"Recipe '{name}' saved.", "success")
-        return redirect(url_for("recipe_detail", recipe_id=recipe_id))
     except IntegrityError:
         flash(f"A recipe named '{name}' already exists.", "error")
         return redirect(url_for("recipe_add"))
+    flash(f"Recipe '{name}' saved.", "success")
+    return redirect(url_for("recipe_detail", recipe_id=recipe_id))
 
 
 def _parse_ingredient_form_rows() -> list[Ingredient]:
@@ -803,20 +850,13 @@ def _parse_ingredient_form_rows() -> list[Ingredient]:
                 break
             continue
 
-        qty_raw = request.form.get(f"ing_qty_{idx}", "0").strip()
-        try:
-            qty = float(qty_raw)
-        except ValueError:
-            qty = 0.0
+        qty = _parse_float(request.form.get(f"ing_qty_{idx}", "0").strip(), 0.0)
 
         unit = request.form.get(f"ing_unit_{idx}", "").strip()
         cat_raw = request.form.get(f"ing_category_{idx}", "other").strip()
         is_pantry = request.form.get(f"ing_pantry_{idx}") == "on"
 
-        try:
-            category = IngredientCategory(cat_raw)
-        except ValueError:
-            category = IngredientCategory.OTHER
+        category = _parse_enum(IngredientCategory, cat_raw) or IngredientCategory.OTHER
 
         ingredients.append(
             Ingredient(
@@ -933,8 +973,7 @@ def _register_shopping_list_routes(app: Flask) -> None:
         """
         from grocery_butler.shopping_list_store import ShoppingListStore
 
-        store = ShoppingListStore(app.config["DATABASE_PATH"])
-        items = store.get_latest_list()
+        items = ShoppingListStore(app.config["DATABASE_PATH"]).get_latest_list()
 
         return render_template(
             "shopping_list.html",
@@ -985,8 +1024,7 @@ def _register_shopping_list_routes(app: Flask) -> None:
         from grocery_butler.shopping_list_store import ShoppingListStore
 
         client = _web_anthropic_client()
-        parser = MealParser(recipe_store, client)
-        parsed_meals = parser.parse_meals(meal_names)
+        parsed_meals = MealParser(recipe_store, client).parse_meals(meal_names)
 
         consolidator = Consolidator(anthropic_client=client)
         pantry_staples = recipe_store.get_pantry_staple_names()
@@ -1018,8 +1056,7 @@ def _register_pantry_routes(app: Flask) -> None:
             Rendered pantry HTML.
         """
         db_path = app.config["DATABASE_PATH"]
-        recipe_store = RecipeStore(db_path)
-        staples = recipe_store.get_pantry_staples()
+        staples = RecipeStore(db_path).get_pantry_staples()
         categories = [cat.value for cat in IngredientCategory]
 
         return render_template(
@@ -1089,8 +1126,7 @@ def _register_brand_routes(app: Flask) -> None:
             Rendered brands HTML.
         """
         db_path = app.config["DATABASE_PATH"]
-        recipe_store = RecipeStore(db_path)
-        prefs = recipe_store.get_brand_preferences()
+        prefs = RecipeStore(db_path).get_brand_preferences()
 
         # Group by preference type
         grouped: dict[str, list[BrandPreference]] = {
@@ -1128,15 +1164,13 @@ def _register_brand_routes(app: Flask) -> None:
             flash("Target and brand name are required.", "error")
             return redirect(url_for("brands"))
 
-        try:
-            mt = BrandMatchType(match_type)
-        except ValueError:
+        mt = _parse_enum(BrandMatchType, match_type)
+        if mt is None:
             flash(f"Invalid match type: {match_type}", "error")
             return redirect(url_for("brands"))
 
-        try:
-            pt = BrandPreferenceType(preference_type)
-        except ValueError:
+        pt = _parse_enum(BrandPreferenceType, preference_type)
+        if pt is None:
             flash(f"Invalid preference type: {preference_type}", "error")
             return redirect(url_for("brands"))
 
@@ -1193,8 +1227,7 @@ def _register_preferences_routes(app: Flask) -> None:
             Rendered preferences HTML.
         """
         db_path = app.config["DATABASE_PATH"]
-        recipe_store = RecipeStore(db_path)
-        all_prefs = recipe_store.get_all_preferences()
+        all_prefs = RecipeStore(db_path).get_all_preferences()
 
         return render_template(
             "preferences.html",
