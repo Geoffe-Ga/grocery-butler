@@ -26,15 +26,10 @@ if TYPE_CHECKING:
     from grocery_butler.config import Config
     from grocery_butler.models import (
         BrandPreference,
-        CartItem,
-        CartSummary,
         InventoryItem,
         ParsedMeal,
         ShoppingListItem,
-        SubstitutionResult,
     )
-    from grocery_butler.order_service import OrderResult
-    from grocery_butler.safeway_pipeline import SafewayPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -246,259 +241,8 @@ def _format_preferences(prefs: dict[str, str]) -> str:
     if not prefs:
         return "No preferences set."
 
-    lines: list[str] = []
-    for key, value in sorted(prefs.items()):
-        lines.append(f"- **{key}**: {value}")
+    lines = [f"- **{key}**: {value}" for key, value in sorted(prefs.items())]
     return _truncate("\n".join(lines))
-
-
-class _OrderConfirmView(discord.ui.View):
-    """Discord UI view with Confirm / Cancel buttons for order submission.
-
-    Stores a pre-built ``CartSummary`` so the confirmed order matches the
-    preview the user approved — no second build pass is needed.
-
-    Attributes:
-        pipeline: The SafewayPipeline instance to use for submission.
-        cart: Pre-built CartSummary to submit on confirm.
-    """
-
-    def __init__(
-        self,
-        pipeline: SafewayPipeline,
-        cart: CartSummary,
-    ) -> None:
-        """Initialize the confirmation view.
-
-        Args:
-            pipeline: SafewayPipeline instance.
-            cart: Pre-built CartSummary to submit on confirm.
-        """
-        super().__init__(timeout=120)
-        self._pipeline = pipeline
-        self._cart = cart
-
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.green)
-    async def confirm(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button[_OrderConfirmView],
-    ) -> None:
-        """Handle confirm button press.
-
-        Args:
-            interaction: Discord interaction context.
-            button: The button that was pressed.
-        """
-        from grocery_butler.safeway_pipeline import SafewayPipelineError
-
-        await interaction.response.defer()
-        try:
-            # The rendered preview (_format_cart_summary) already showed
-            # the user every flagged item and its reason code, so this
-            # button press IS the explicit human override of the review
-            # gate (chief-architect ruling, issue #59 round 3). The preview
-            # also already warned when fulfillment could not be confirmed
-            # with Safeway (via _format_fulfillment_warning), so this same
-            # confirm press is likewise the explicit human override of the
-            # fulfillment gate (issue #59 precedent, issue #72).
-            order_result = await asyncio.to_thread(
-                self._pipeline.submit_cart,
-                self._cart,
-                allow_review_items=True,
-                allow_unverified_fulfillment=True,
-            )
-            msg = _format_order_result(order_result)
-            await interaction.followup.send(msg)
-        except SafewayPipelineError as exc:
-            logger.exception("Order submission failed")
-            await interaction.followup.send(f"Order submission failed: {exc}")
-        except Exception:
-            logger.exception("Order submission failed")
-            await interaction.followup.send("Order submission failed.")
-        finally:
-            await asyncio.to_thread(self._pipeline.close)
-            self.stop()
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
-    async def cancel(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button[_OrderConfirmView],
-    ) -> None:
-        """Handle cancel button press.
-
-        Args:
-            interaction: Discord interaction context.
-            button: The button that was pressed.
-        """
-        await asyncio.to_thread(self._pipeline.close)
-        await interaction.response.send_message("Order cancelled.")
-        self.stop()
-
-    async def on_timeout(self) -> None:
-        """Clean up pipeline resources when the view times out."""
-        await asyncio.to_thread(self._pipeline.close)
-
-
-def _make_bot_anthropic_client(config: Config) -> object | None:
-    """Create an Anthropic client from bot config.
-
-    Delegates to :func:`claude_utils.make_anthropic_client`.
-
-    Args:
-        config: Application config with API key.
-
-    Returns:
-        Anthropic client or None if unavailable.
-    """
-    from grocery_butler.claude_utils import make_anthropic_client
-
-    return make_anthropic_client(config.anthropic_api_key)
-
-
-def _format_cart_item_line(ci: CartItem) -> str:
-    """Format a single cart item line for display.
-
-    Appends a ``" (review: <reason>)"`` marker when the item's quantity
-    calculation was flagged for human review (issue #59). The reason
-    code is included so the user has actually seen what needs checking
-    before confirming the order (chief-architect ruling, round 3): a
-    bare ``"(review)"`` marker would not satisfy that.
-
-    Args:
-        ci: The cart item to format.
-
-    Returns:
-        A single formatted display line for the item.
-    """
-    marker = f" (review: {ci.review_reason})" if ci.needs_review else ""
-    return (
-        f"  {ci.quantity_to_order}x {ci.safeway_product.name}"
-        f"  ${ci.estimated_cost:.2f}{marker}"
-    )
-
-
-def _format_substituted_section(
-    substituted_items: list[SubstitutionResult],
-) -> list[str]:
-    """Format the "Substituted" section lines of a cart summary.
-
-    Args:
-        substituted_items: Substitution results to format.
-
-    Returns:
-        Formatted lines for this section, or an empty list when there
-        are no substituted items.
-    """
-    if not substituted_items:
-        return []
-    lines = [f"\nSubstituted ({len(substituted_items)}):"]
-    for sub in substituted_items:
-        orig = sub.original_item.ingredient
-        alt = sub.selected.product.name if sub.selected else "?"
-        lines.append(f"  {orig} -> {alt}")
-    return lines
-
-
-def _format_failed_section(failed_items: list[ShoppingListItem]) -> list[str]:
-    """Format the "Failed" section lines of a cart summary.
-
-    Args:
-        failed_items: Shopping list items no product could be found for.
-
-    Returns:
-        Formatted lines for this section, or an empty list when there
-        are no failed items.
-    """
-    if not failed_items:
-        return []
-    lines = [f"\nFailed ({len(failed_items)}):"]
-    lines.extend(f"  - {item.ingredient}" for item in failed_items)
-    return lines
-
-
-def _format_fulfillment_warning(cart: CartSummary) -> list[str]:
-    """Format the unverified-fulfillment warning line, if applicable.
-
-    Regression guard for issue #72: when Safeway's fulfillment options
-    could not be confirmed while building the cart, the human must see
-    this warning before ever pressing Confirm.
-
-    Args:
-        cart: Cart summary to inspect.
-
-    Returns:
-        A single-element list with the warning line, or an empty list
-        when the cart's fulfillment was verified.
-    """
-    if not cart.fulfillment_unverified:
-        return []
-    return [
-        "\nWARNING: fulfillment options could not be confirmed with "
-        "Safeway (unverified) — pickup/delivery availability and fees "
-        "below are not final."
-    ]
-
-
-def _format_cart_summary(cart: CartSummary) -> str:
-    """Format a CartSummary for Discord display.
-
-    Args:
-        cart: Cart summary to format.
-
-    Returns:
-        Formatted cart summary string with code block.
-    """
-    lines: list[str] = []
-
-    if cart.items:
-        lines.append(f"Items ({len(cart.items)}):")
-        lines.extend(_format_cart_item_line(ci) for ci in cart.items)
-
-    if cart.restock_items:
-        lines.append(f"\nRestock ({len(cart.restock_items)}):")
-        lines.extend(_format_cart_item_line(ci) for ci in cart.restock_items)
-
-    lines.extend(_format_substituted_section(cart.substituted_items))
-    lines.extend(_format_failed_section(cart.failed_items))
-    lines.extend(_format_fulfillment_warning(cart))
-
-    lines.append(f"\nSubtotal: ${cart.subtotal:.2f}")
-    lines.append(f"Fulfillment: {cart.recommended_fulfillment.value}")
-    lines.append(f"Est. Total: ${cart.estimated_total:.2f}")
-
-    return _truncate("```\n" + "\n".join(lines) + "\n```")
-
-
-def _format_order_result(result: OrderResult) -> str:
-    """Format an OrderResult for Discord display.
-
-    Args:
-        result: Order result to format.
-
-    Returns:
-        Formatted order result string.
-    """
-    if not result.success:
-        return f"Order failed: {result.error_message}"
-
-    if result.confirmation is None:
-        return "Order submitted but no confirmation received."
-
-    conf = result.confirmation
-    lines = [
-        f"Order submitted! ID: **{conf.order_id}**",
-        f"Status: {conf.status}",
-        f"Items: {conf.item_count}",
-        f"Total: ${conf.total:.2f}",
-        f"Fulfillment: {conf.fulfillment_type.value}",
-        f"Est. Time: {conf.estimated_time}",
-    ]
-    if result.items_restocked:
-        lines.append(f"Restocked {result.items_restocked} inventory items.")
-
-    return "\n".join(lines)
 
 
 def create_bot(config: Config) -> discord.Client:
@@ -1144,103 +888,6 @@ def create_bot(config: Config) -> discord.Client:
     tree.add_command(prefs_group)
 
     # ------------------------------------------------------------------
-    # /order command group
-    # ------------------------------------------------------------------
-
-    order_group = app_commands.Group(
-        name="order",
-        description="Safeway grocery ordering",
-        guild_only=True,
-        default_permissions=discord.Permissions(manage_guild=True),
-    )
-
-    @order_group.command(name="review", description="Build cart and show summary")
-    @app_commands.describe(items="Comma-separated item names (e.g. milk, eggs)")
-    async def order_review(interaction: discord.Interaction, items: str) -> None:
-        """Build a Safeway cart and show summary without ordering.
-
-        Args:
-            interaction: Discord interaction context.
-            items: Comma-separated item names.
-        """
-        await interaction.response.defer()
-
-        try:
-            from grocery_butler.claude_utils import items_from_string
-            from grocery_butler.safeway_pipeline import (
-                SafewayPipeline,
-                SafewayPipelineError,
-            )
-
-            shopping_items = items_from_string(items)
-            if not shopping_items:
-                await interaction.followup.send("Please provide item names.")
-                return
-
-            anthropic_client = _make_bot_anthropic_client(config)
-            pipeline = SafewayPipeline(config, config.database_path, anthropic_client)
-            try:
-                cart = await asyncio.to_thread(pipeline.build_cart_only, shopping_items)
-                result = _format_cart_summary(cart)
-                await interaction.followup.send(f"Cart preview:\n{result}")
-            finally:
-                await asyncio.to_thread(pipeline.close)
-
-        except SafewayPipelineError as exc:
-            await interaction.followup.send(f"Pipeline error: {exc}")
-        except Exception:
-            logger.exception("Error in /order review")
-            await interaction.followup.send(
-                "Sorry, something went wrong building the cart."
-            )
-
-    @order_group.command(name="submit", description="Build and submit a Safeway order")
-    @app_commands.describe(items="Comma-separated item names (e.g. milk, eggs)")
-    async def order_submit(interaction: discord.Interaction, items: str) -> None:
-        """Build cart, show preview, and submit order after confirmation.
-
-        Args:
-            interaction: Discord interaction context.
-            items: Comma-separated item names.
-        """
-        await interaction.response.defer()
-
-        try:
-            from grocery_butler.claude_utils import items_from_string
-            from grocery_butler.safeway_pipeline import (
-                SafewayPipeline,
-                SafewayPipelineError,
-            )
-
-            shopping_items = items_from_string(items)
-            if not shopping_items:
-                await interaction.followup.send("Please provide item names.")
-                return
-
-            anthropic_client = _make_bot_anthropic_client(config)
-            pipeline = SafewayPipeline(config, config.database_path, anthropic_client)
-            try:
-                cart = await asyncio.to_thread(pipeline.build_cart_only, shopping_items)
-                preview = _format_cart_summary(cart)
-                view = _OrderConfirmView(pipeline, cart)
-                await interaction.followup.send(
-                    f"{preview}\n\nSubmit this order?", view=view
-                )
-            except Exception:
-                await asyncio.to_thread(pipeline.close)
-                raise
-
-        except SafewayPipelineError as exc:
-            await interaction.followup.send(f"Pipeline error: {exc}")
-        except Exception:
-            logger.exception("Error in /order submit")
-            await interaction.followup.send(
-                "Sorry, something went wrong submitting the order."
-            )
-
-    tree.add_command(order_group)
-
-    # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
 
@@ -1314,12 +961,11 @@ def create_bot(config: Config) -> discord.Client:
                 await message.reply("Updated inventory:\n" + "\n".join(lines))
 
             if low_conf:
-                lines = []
-                for update in low_conf:
-                    lines.append(
-                        f"- {update.ingredient} -> {update.new_status.value}"
-                        f" (confidence: {update.confidence:.0%})"
-                    )
+                lines = [
+                    f"- {update.ingredient} -> {update.new_status.value}"
+                    f" (confidence: {update.confidence:.0%})"
+                    for update in low_conf
+                ]
                 await message.reply(
                     "I'm not sure about these updates. "
                     "Could you clarify?\n" + "\n".join(lines)
@@ -1342,7 +988,8 @@ def run_bot(config: Config) -> None:
     from grocery_butler.config import ConfigError
 
     if not config.discord_bot_token:
-        raise ConfigError("DISCORD_BOT_TOKEN is required to run the bot.")
+        msg = "DISCORD_BOT_TOKEN is required to run the bot."
+        raise ConfigError(msg)
 
     client = create_bot(config)
     client.run(config.discord_bot_token, log_handler=None)

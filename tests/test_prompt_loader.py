@@ -55,47 +55,6 @@ class TestLoadPrompt:
         assert "milk" in result
         assert "eggs" in result
 
-    def test_load_product_selection(self) -> None:
-        """Test loading product_selection template with variables."""
-        result = load_prompt(
-            "product_selection",
-            ingredient="whole milk",
-            quantity="1.0",
-            unit="gal",
-            search_term="whole milk gallon",
-            category="dairy",
-            products_json="[]",
-            brand_preferences="No preferences",
-            price_sensitivity="moderate",
-        )
-        assert "whole milk" in result
-        assert "moderate" in result
-
-    def test_load_substitution_ranking(self) -> None:
-        """Test loading substitution_ranking template with variables."""
-        result = load_prompt(
-            "substitution_ranking",
-            ingredient="chicken thighs",
-            quantity="2",
-            unit="lb",
-            search_term="boneless chicken thighs",
-            alternatives_json="[]",
-            brand_preferences="None",
-        )
-        assert "chicken thighs" in result
-        assert "suitability" in result.lower()
-
-    def test_load_brand_selection(self) -> None:
-        """Test loading brand_selection template with variables."""
-        result = load_prompt(
-            "brand_selection",
-            products_json="[]",
-            avoided_brands="Great Value",
-            preferred_brands="Organic Valley",
-        )
-        assert "Great Value" in result
-        assert "Organic Valley" in result
-
     def test_missing_variable_raises_key_error(self) -> None:
         """Test that missing template variable raises KeyError."""
         with pytest.raises(KeyError):
@@ -118,9 +77,17 @@ class TestLoadPrompt:
             "ingredient_consolidation.txt",
             "recipe_matching.txt",
             "inventory_intent.txt",
-            "product_selection.txt",
-            "substitution_ranking.txt",
-            "brand_selection.txt",
         ]
         for filename in expected:
             assert (PROMPTS_DIR / filename).exists(), f"Missing: {filename}"
+
+    def test_retired_retailer_prompts_are_gone(self) -> None:
+        """The Safeway cart prompts were removed with the runtime (ADR 0001)."""
+        retired = [
+            "product_selection",
+            "substitution_ranking",
+            "brand_selection",
+        ]
+        for name in retired:
+            with pytest.raises(FileNotFoundError):
+                load_prompt(name)

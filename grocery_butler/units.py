@@ -1,10 +1,9 @@
 """Unit dimension classification, conversion, and product-size parsing.
 
-Introduced to fix issue #59: :func:`grocery_butler.cart_builder._calculate_quantity`
-used to divide a shopping-list quantity by the leading number of a product's
-size string with no regard for units, causing gross over-orders (500 g vs.
-"5 lb" ordering 100 units) and silent under-orders. This module provides the
-unit-aware primitives that make quantity calculations dimensionally sound:
+Introduced for issue #59, where quantity math ignored units and produced
+gross over-orders (500 g vs. "5 lb" ordering 100 units) and silent
+under-orders. This module provides the unit-aware primitives that make
+quantity calculations dimensionally sound:
 
 * :func:`dimension_of` classifies a :class:`~grocery_butler.models.Unit` into
   a physical :class:`Dimension` (mass, volume, or count), or ``None`` for
@@ -21,6 +20,7 @@ unit-aware primitives that make quantity calculations dimensionally sound:
 from __future__ import annotations
 
 import re
+from contextlib import suppress
 from enum import StrEnum
 
 from grocery_butler.models import _UNIT_ALIASES, Unit
@@ -170,10 +170,8 @@ def _resolve_unit_token(token: str) -> Unit | None:
     normalized = _normalize_unit_token(token)
     if not normalized:
         return None
-    try:
+    with suppress(ValueError):
         return Unit(normalized)
-    except ValueError:
-        pass
     alias = _UNIT_ALIASES.get(normalized)
     if alias is not None:
         return alias

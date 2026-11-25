@@ -121,7 +121,8 @@ class TestInitDb:
             "household_inventory",
             "pantry_staples",
             "preferences",
-            "product_mapping",
+            "archived_product_mapping",
+            "archived_order_submissions",
             "recipe_ingredients",
             "recipes",
             "shopping_list_items",
@@ -239,7 +240,8 @@ class TestInitDb:
             conn.close()
 
         assert "idx_household_inventory_status" in indexes
-        assert "idx_product_mapping_ingredient" in indexes
+        assert "idx_archived_product_mapping_ingredient" in indexes
+        assert "idx_product_mapping_ingredient" not in indexes
 
     def test_foreign_keys_enforced(self, tmp_path: Path) -> None:
         """Test that foreign key constraints are active after init_db."""

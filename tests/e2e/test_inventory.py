@@ -1,6 +1,6 @@
 """E2E: inventory and restock queue endpoints against a real SQLite DB.
 
-No Claude/Safeway seams needed here -- pure Flask + PantryManager + a
+No Claude seams needed here -- pure Flask + PantryManager + a
 real temporary SQLite database.
 """
 

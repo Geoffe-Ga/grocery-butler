@@ -1,17 +1,19 @@
 """Pydantic models and enums for MealBot.
 
-This is the shared type system. ALL data structures are defined here,
-including future Safeway models that aren't used yet.
+This is the shared type system. ALL data structures are defined here.
+Core models stay retailer-neutral (ADR 0001): no retailer-specific
+product, cart, or fulfillment type belongs in this module.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import logging
+from contextlib import suppress
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -168,10 +170,8 @@ def parse_unit(raw: str) -> Unit:
     if not raw or not raw.strip():
         return Unit.EACH
     cleaned = raw.strip().lower()
-    try:
+    with suppress(ValueError):
         return Unit(cleaned)
-    except ValueError:
-        pass
     result = _UNIT_ALIASES.get(cleaned)
     if result is not None:
         return result
@@ -263,22 +263,6 @@ class OrganicPreference(StrEnum):
     YES = "yes"
     NO = "no"
     WHEN_REASONABLE = "when_reasonable"
-
-
-class FulfillmentType(StrEnum):
-    """Safeway order fulfillment type."""
-
-    PICKUP = "pickup"
-    DELIVERY = "delivery"
-
-
-class SubstitutionSuitability(StrEnum):
-    """How suitable a substitution is for the original item."""
-
-    EXCELLENT = "excellent"
-    GOOD = "good"
-    ACCEPTABLE = "acceptable"
-    POOR = "poor"
 
 
 # ---------------------------------------------------------------------------
@@ -397,123 +381,6 @@ class BrandPreference(BaseModel):
     id: int | None = None
 
 
-# ---------------------------------------------------------------------------
-# Future Safeway models (define now, use in Phase 3)
-# ---------------------------------------------------------------------------
-
-
-class SafewayProduct(BaseModel):
-    """A product from Safeway's catalog."""
-
-    product_id: str
-    name: str
-    price: float
-    unit_price: float | None = None
-    size: str
-    in_stock: bool = True
-
-
-class SubstitutionOption(BaseModel):
-    """A potential substitution for an out-of-stock item."""
-
-    product: SafewayProduct
-    suitability: SubstitutionSuitability
-    form_warning: str | None = None
-    reasoning: str
-
-
-class SubstitutionResult(BaseModel):
-    """The outcome of a substitution flow for one item."""
-
-    status: str
-    original_item: ShoppingListItem
-    alternatives: list[SubstitutionOption] = []
-    selected: SubstitutionOption | None = None
-    message: str = ""
-
-
-class CartItem(BaseModel):
-    """A shopping list item mapped to a Safeway product.
-
-    Attributes:
-        shopping_list_item: The originating shopping list item.
-        safeway_product: The matched Safeway product.
-        quantity_to_order: Number of product units to order.
-        estimated_cost: Estimated cost for ``quantity_to_order`` units.
-            Must be finite — JSON's non-standard ``Infinity``/``NaN``
-            literals are rejected at validation (issue #73), keeping
-            non-finite values out of server-side total computation.
-        needs_review: Whether the item needs human review (e.g. an
-            unparseable product size, incomparable units, a quantity
-            capped by the per-item maximum, or an auto-selected
-            substitution).
-        review_reason: Machine-readable reason code for ``needs_review``
-            (``"unparseable_size"``, ``"incomparable_units"``,
-            ``"quantity_capped"``, or ``"substitution"``), or ``""``
-            when no review is needed.
-    """
-
-    shopping_list_item: ShoppingListItem
-    safeway_product: SafewayProduct
-    quantity_to_order: int
-    estimated_cost: float = Field(allow_inf_nan=False)
-    needs_review: bool = False
-    review_reason: str = ""
-
-
-class FulfillmentOption(BaseModel):
-    """A fulfillment option (pickup or delivery) with scheduling.
-
-    The ``fee`` must be finite — JSON's non-standard ``Infinity``/``NaN``
-    literals are rejected at validation (issue #73), keeping non-finite
-    values out of server-side total computation.
-    """
-
-    type: FulfillmentType
-    available: bool
-    fee: float = Field(allow_inf_nan=False)
-    windows: list[dict[str, Any]]
-    next_window: str | None = None
-
-
-class CartSummary(BaseModel):
-    """Complete cart ready for order submission.
-
-    Attributes:
-        items: Regular cart items.
-        failed_items: Shopping list items no product could be found for.
-        substituted_items: Out-of-stock items with substitution results.
-        skipped_items: Items explicitly skipped by the caller.
-        restock_items: Restock-queue cart items.
-        subtotal: Sum of all item costs before fulfillment fees. Must
-            be finite (issue #73).
-        fulfillment_options: Fulfillment options fetched from Safeway, or
-            an empty list when the fetch failed (see
-            ``fulfillment_unverified``).
-        recommended_fulfillment: The recommended fulfillment type.
-        estimated_total: Subtotal plus the recommended fulfillment fee.
-            Must be finite (issue #73).
-        fulfillment_unverified: True when Safeway's fulfillment options
-            could not be fetched, so ``fulfillment_options`` is empty and
-            ``estimated_total`` excludes any fulfillment fee (issue #72).
-            Callers must warn the human and require an explicit override
-            before submitting an order built from such a cart -- never
-            treat the absence of a fee as confirmation that fulfillment
-            is free. Defaults to False (verified).
-    """
-
-    items: list[CartItem]
-    failed_items: list[ShoppingListItem]
-    substituted_items: list[SubstitutionResult]
-    skipped_items: list[ShoppingListItem] = []
-    restock_items: list[CartItem]
-    subtotal: float = Field(allow_inf_nan=False)
-    fulfillment_options: list[FulfillmentOption]
-    recommended_fulfillment: FulfillmentType
-    estimated_total: float = Field(allow_inf_nan=False)
-    fulfillment_unverified: bool = False
-
-
 class PendingActionStatus(StrEnum):
     """Lifecycle status of a staged pending action."""
 
@@ -528,7 +395,7 @@ class PendingAction(BaseModel):
     """A destructive action staged for confirmation (audit-log row).
 
     Rows live in the ``pending_actions`` table and record every staged
-    Safeway submission or preference change, whether it was ultimately
+    brand rule or preference change, whether it was ultimately
     approved, denied, expired, or (after being claimed) failed.
 
     Attributes:

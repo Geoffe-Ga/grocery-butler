@@ -2,11 +2,10 @@
 
 Every fixture wires REAL application components together: the Flask app
 via ``create_app``, a real temporary SQLite database, and real
-stores/services/pipeline objects. Mocking is restricted to external
-network boundaries only:
-
-* the Anthropic SDK client object (``make_anthropic_client``), and
-* the httpx transport inside :class:`~grocery_butler.safeway_client.SafewayClient`.
+stores/services. Mocking is restricted to the one external network
+boundary: the Anthropic SDK client object (``make_anthropic_client``).
+The suite sets no retailer configuration at all, the same as production
+(ADR 0001).
 
 All state comes from ``monkeypatch``/``tmp_path`` -- nothing ambient.
 ``load_dotenv(override=False)`` (see ``grocery_butler.config.load_config``)
@@ -20,19 +19,15 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
-import httpx
 import pytest
 
 from grocery_butler.app import create_app
 from grocery_butler.auth_middleware import SECRET_ENV_VAR, RequestBinding, mint_token
 from grocery_butler.models import Ingredient, IngredientCategory, ParsedMeal
 from grocery_butler.recipe_store import RecipeStore
-from grocery_butler.safeway_client import OKTA_CLIENT_ID
-from grocery_butler.safeway_client import SafewayClient as _RealSafewayClient
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -85,16 +80,7 @@ def e2e_env(monkeypatch: pytest.MonkeyPatch, db_path: str) -> None:
     """
     monkeypatch.setenv(SECRET_ENV_VAR, E2E_SHARED_SECRET)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-e2e-not-real")
-    monkeypatch.setenv("SAFEWAY_USERNAME", "e2e-safeway-user")
-    monkeypatch.setenv("SAFEWAY_PASSWORD", "e2e-safeway-pass")
-    monkeypatch.setenv("SAFEWAY_STORE_ID", "e2e-store-1")
     monkeypatch.setenv("DATABASE_PATH", db_path)
-    # Issue #60: order submission is opted in for this suite's full-chain
-    # tests, which exercise real submission against the mocked transport.
-    # The production default (env var unset) is False -- see
-    # test_api_chain.py::test_disabled_submission_returns_501_default_off
-    # for coverage of the fail-safe default itself.
-    monkeypatch.setenv("SAFEWAY_ORDER_SUBMISSION_ENABLED", "true")
 
 
 @pytest.fixture()
@@ -357,210 +343,3 @@ def fake_claude(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
         lambda api_key: mock_client,
     )
     return _script
-
-
-# ---------------------------------------------------------------------------
-# Safeway mock transport
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class SafewayMockState:
-    """Mutable configuration and call recorder for the mocked Safeway API.
-
-    Attributes:
-        available_products: Steady-state search results keyed by search
-            term; each value is a list of raw Nimbus ``productsInfo``
-            entries (dicts with ``upc``/``name``/``price``/``size``/
-            ``inStock`` keys).
-        oos_once: Search terms whose FIRST search call returns a single
-            out-of-stock product (forcing the substitution flow);
-            subsequent calls for the same term fall back to
-            ``available_products``.
-        force_search_empty: If True, every product search returns no
-            results, exercising the ``failed_items`` path.
-        force_auth_fail: If True, the Okta authn step returns a 500,
-            exercising the pipeline's authentication-failure path.
-        order_response: The JSON body returned by the order-submit
-            endpoint.
-        requested_paths: Every request path seen by the mock transport,
-            in call order.
-    """
-
-    available_products: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    oos_once: set[str] = field(default_factory=set)
-    force_search_empty: bool = False
-    force_auth_fail: bool = False
-    order_response: dict[str, Any] = field(
-        default_factory=lambda: {
-            "orderId": "e2e-order-1",
-            "status": "confirmed",
-            "estimatedTime": "Tomorrow 9am-11am",
-            "total": "0",
-        }
-    )
-    requested_paths: list[str] = field(default_factory=list)
-    search_call_counts: dict[str, int] = field(default_factory=dict)
-
-
-def _default_product(
-    term: str,
-    *,
-    in_stock: bool = True,
-    price: float = 3.99,
-) -> dict[str, Any]:
-    """Build a generic Nimbus ``productsInfo`` entry for a search term.
-
-    Args:
-        term: The search term the product should match.
-        in_stock: Stock flag for the returned product.
-        price: Price for the returned product.
-
-    Returns:
-        A dict shaped like a Nimbus search result entry.
-    """
-    slug = term.strip().lower().replace(" ", "-") or "item"
-    return {
-        "upc": f"upc-{slug}",
-        "name": f"Generic {term.title()}",
-        "price": price,
-        "size": "1 lb",
-        "inStock": in_stock,
-    }
-
-
-def _handle_authn(state: SafewayMockState) -> httpx.Response:
-    """Return the Okta authn response: a session token, or a failure.
-
-    Args:
-        state: The mutable mock state for this test.
-
-    Returns:
-        A 200 response with a session token, or a 500 if
-        ``state.force_auth_fail`` is set.
-    """
-    if state.force_auth_fail:
-        return httpx.Response(500, json={"error": "internal error"})
-    return httpx.Response(
-        200,
-        json={"status": "SUCCESS", "sessionToken": "e2e-session-token"},
-    )
-
-
-def _handle_authorize() -> httpx.Response:
-    """Return the Okta authorize redirect with a bearer token fragment.
-
-    Returns:
-        A 302 response whose ``Location`` header fragment carries a
-        fake access token.
-    """
-    location = "https://www.safeway.com#access_token=e2e-access-token&expires_in=3600"
-    return httpx.Response(302, headers={"location": location})
-
-
-def _handle_search(request: httpx.Request, state: SafewayMockState) -> httpx.Response:
-    """Return search results for a query, honoring the state's knobs.
-
-    Args:
-        request: The incoming search request.
-        state: The mutable mock state for this test.
-
-    Returns:
-        A 200 response with a ``productsInfo`` list.
-    """
-    query = request.url.params.get("q", "")
-    if state.force_search_empty:
-        return httpx.Response(200, json={"productsInfo": []})
-
-    call_index = state.search_call_counts.get(query, 0)
-    state.search_call_counts[query] = call_index + 1
-
-    if query in state.oos_once and call_index == 0:
-        products = [_default_product(query, in_stock=False, price=1.99)]
-    else:
-        products = state.available_products.get(query, [_default_product(query)])
-    return httpx.Response(200, json={"productsInfo": products})
-
-
-def _handle_fulfillment() -> httpx.Response:
-    """Return a single available pickup fulfillment option.
-
-    Returns:
-        A 200 response with one available, fee-free pickup option.
-    """
-    return httpx.Response(
-        200,
-        json={
-            "fulfillmentOptions": [
-                {"type": "pickup", "available": True, "fee": 0.0, "windows": []},
-            ]
-        },
-    )
-
-
-def _build_safeway_handler(
-    state: SafewayMockState,
-) -> Callable[[httpx.Request], httpx.Response]:
-    """Build the routing handler for the mocked Safeway ``MockTransport``.
-
-    Routes on the request path to the Okta authn/authorize steps and
-    the Nimbus search/fulfillment/order endpoints that
-    ``grocery_butler.safeway_client`` and ``grocery_butler.cart_builder``
-    call.
-
-    Args:
-        state: The mutable state driving responses for this test.
-
-    Returns:
-        A handler suitable for ``httpx.MockTransport``.
-    """
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        """Dispatch a mocked Safeway/Okta request to the right response."""
-        path = request.url.path
-        state.requested_paths.append(path)
-
-        if path == "/api/v1/authn":
-            return _handle_authn(state)
-        if path == f"/oauth2/{OKTA_CLIENT_ID}/v1/authorize":
-            return _handle_authorize()
-        if path == "/api/v2/grocerystore/search":
-            return _handle_search(request, state)
-        if path.startswith("/abs/pub/web/stores/") and path.endswith("/fulfillment"):
-            return _handle_fulfillment()
-        if path == "/abs/pub/web/orders":
-            return httpx.Response(200, json=state.order_response)
-        return httpx.Response(404, json={"error": f"unhandled path {path}"})
-
-    return handler
-
-
-@pytest.fixture()
-def safeway_mock(monkeypatch: pytest.MonkeyPatch) -> SafewayMockState:
-    """Route ``SafewayPipeline``'s HTTP client through a ``MockTransport``.
-
-    Kills the real rate limiter (no ``time.sleep`` in tests) and wraps
-    the real :class:`SafewayClient` class so ``SafewayPipeline`` gets a
-    client whose ``http_client`` is backed by an in-process
-    ``httpx.MockTransport`` -- no real network traffic, and no
-    ``grocery_butler`` service classes are mocked.
-
-    Args:
-        monkeypatch: Pytest's monkeypatch fixture.
-
-    Returns:
-        The mutable :class:`SafewayMockState` scenarios drive and assert on.
-    """
-    state = SafewayMockState()
-    handler = _build_safeway_handler(state)
-    monkeypatch.setattr("grocery_butler.safeway_client._MIN_REQUEST_INTERVAL", 0.0)
-
-    def factory(**kwargs: Any) -> _RealSafewayClient:
-        """Build a real SafewayClient wired to the mock transport."""
-        return _RealSafewayClient(
-            **kwargs,
-            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-        )
-
-    monkeypatch.setattr("grocery_butler.safeway_pipeline.SafewayClient", factory)
-    return state

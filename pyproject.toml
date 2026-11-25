@@ -104,7 +104,6 @@ module = [
     "aiohttp.*",
     "pydantic.*",
     "dotenv.*",
-    "httpx.*",
     "anthropic.*",
     "flask.*",
     "werkzeug.*",

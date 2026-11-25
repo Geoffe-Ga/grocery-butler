@@ -23,7 +23,7 @@ def _in_five_minutes() -> dt.datetime:
 
 
 def _payload() -> dict[str, Any]:
-    return {"cart": [{"item": "milk", "qty": 2}], "total": "12.50"}
+    return {"match_target": "milk", "brand": "Clover", "preference_type": "preferred"}
 
 
 @pytest.fixture
@@ -89,13 +89,13 @@ class TestInsertPendingAction:
         expires = _in_five_minutes()
         action = store.insert_pending_action(
             action_id="a1",
-            kind="safeway_order_submit",
+            kind="brands_set",
             payload=_payload(),
             expires_at=expires,
         )
         assert isinstance(action, PendingAction)
         assert action.action_id == "a1"
-        assert action.kind == "safeway_order_submit"
+        assert action.kind == "brands_set"
         assert action.status is PendingActionStatus.PENDING
         assert action.resolved_at is None
 
@@ -139,7 +139,7 @@ class TestInsertPendingAction:
         payload = _payload()
         store.insert_pending_action(
             action_id="a5",
-            kind="safeway_order_submit",
+            kind="brands_set",
             payload=payload,
             expires_at=_in_five_minutes(),
         )
@@ -207,7 +207,7 @@ class TestStatusTransitions:
     def _staged(self, store: PendingActionsStore, action_id: str) -> PendingAction:
         return store.insert_pending_action(
             action_id=action_id,
-            kind="safeway_order_submit",
+            kind="brands_set",
             payload=_payload(),
             expires_at=_in_five_minutes(),
         )
@@ -432,7 +432,7 @@ class TestMarkPendingFailed:
         """Stage a fresh pending action for transition tests."""
         return store.insert_pending_action(
             action_id=action_id,
-            kind="safeway_order_submit",
+            kind="brands_set",
             payload=_payload(),
             expires_at=_in_five_minutes(),
         )
@@ -748,7 +748,7 @@ class TestPendingActionsPostgres:
         """Test insert, read, and transition round-trip on PostgreSQL."""
         action = pg_store.insert_pending_action(
             action_id="pg-1",
-            kind="safeway_order_submit",
+            kind="brands_set",
             payload=_payload(),
             expires_at=_in_five_minutes(),
             requester="pg-test",

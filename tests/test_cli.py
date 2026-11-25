@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch, sentinel
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from grocery_butler.cli import (
     _build_parser,
     _forget_recipe,
-    _format_cart_summary,
     _format_inventory,
     _format_items_by_category,
     _format_pantry_staples,
@@ -18,7 +17,6 @@ from grocery_butler.cli import (
     _format_recipes,
     _format_shopping_list,
     _handle_bot,
-    _handle_order,
     _remove_pantry_staple,
     main,
 )
@@ -27,11 +25,7 @@ from grocery_butler.models import (
     InventoryItem,
     InventoryStatus,
     ParsedMeal,
-    SafewayProduct,
     ShoppingListItem,
-    SubstitutionOption,
-    SubstitutionResult,
-    SubstitutionSuitability,
 )
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
@@ -372,10 +366,15 @@ class TestFormatPantryStaples:
 class TestBuildParser:
     """Tests for _build_parser."""
 
+    def test_order_command_removed(self):
+        """The retired Safeway ``order`` subcommand is rejected (ADR 0001)."""
+        parser = _build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["order", "--items", "milk"])
+
     def test_plan_command(self):
         """Test plan command parses correctly."""
-        parser = _build_parser()
-        args = parser.parse_args(["plan", "chicken tikka masala, salad"])
+        args = _build_parser().parse_args(["plan", "chicken tikka masala, salad"])
         assert args.command == "plan"
         assert args.meals == "chicken tikka masala, salad"
         assert args.servings is None
@@ -383,103 +382,88 @@ class TestBuildParser:
 
     def test_plan_with_servings(self):
         """Test plan with --servings flag."""
-        parser = _build_parser()
-        args = parser.parse_args(["plan", "pasta", "--servings", "6"])
+        args = _build_parser().parse_args(["plan", "pasta", "--servings", "6"])
         assert args.servings == 6
 
     def test_plan_with_save(self):
         """Test plan with --save flag."""
-        parser = _build_parser()
-        args = parser.parse_args(["plan", "pasta", "--save"])
+        args = _build_parser().parse_args(["plan", "pasta", "--save"])
         assert args.save is True
 
     def test_stock_list(self):
         """Test stock command without action lists inventory."""
-        parser = _build_parser()
-        args = parser.parse_args(["stock"])
+        args = _build_parser().parse_args(["stock"])
         assert args.command == "stock"
         assert args.action is None
 
     def test_stock_out(self):
         """Test stock out action."""
-        parser = _build_parser()
-        args = parser.parse_args(["stock", "out", "soy sauce"])
+        args = _build_parser().parse_args(["stock", "out", "soy sauce"])
         assert args.action == "out"
         assert args.item_name == "soy sauce"
 
     def test_stock_add(self):
         """Test stock add action."""
-        parser = _build_parser()
-        args = parser.parse_args(["stock", "add", "parmesan", "dairy"])
+        args = _build_parser().parse_args(["stock", "add", "parmesan", "dairy"])
         assert args.action == "add"
         assert args.item_name == "parmesan"
         assert args.category == "dairy"
 
     def test_restock_list(self):
         """Test restock without action shows queue."""
-        parser = _build_parser()
-        args = parser.parse_args(["restock"])
+        args = _build_parser().parse_args(["restock"])
         assert args.command == "restock"
         assert args.action is None
 
     def test_restock_clear(self):
         """Test restock clear action."""
-        parser = _build_parser()
-        args = parser.parse_args(["restock", "clear"])
+        args = _build_parser().parse_args(["restock", "clear"])
         assert args.action == "clear"
 
     def test_recipes_list(self):
         """Test recipes without action lists all."""
-        parser = _build_parser()
-        args = parser.parse_args(["recipes"])
+        args = _build_parser().parse_args(["recipes"])
         assert args.command == "recipes"
         assert args.action is None
 
     def test_recipes_show(self):
         """Test recipes show action."""
-        parser = _build_parser()
-        args = parser.parse_args(["recipes", "show", "tikka masala"])
+        args = _build_parser().parse_args(["recipes", "show", "tikka masala"])
         assert args.action == "show"
         assert args.recipe_name == "tikka masala"
 
     def test_recipes_forget(self):
         """Test recipes forget action."""
-        parser = _build_parser()
-        args = parser.parse_args(["recipes", "forget", "tikka masala"])
+        args = _build_parser().parse_args(["recipes", "forget", "tikka masala"])
         assert args.action == "forget"
 
     def test_pantry_list(self):
         """Test pantry without action lists staples."""
-        parser = _build_parser()
-        args = parser.parse_args(["pantry"])
+        args = _build_parser().parse_args(["pantry"])
         assert args.command == "pantry"
         assert args.action is None
 
     def test_pantry_add(self):
         """Test pantry add action."""
-        parser = _build_parser()
-        args = parser.parse_args(["pantry", "add", "cumin", "pantry_dry"])
+        args = _build_parser().parse_args(["pantry", "add", "cumin", "pantry_dry"])
         assert args.action == "add"
         assert args.ingredient_name == "cumin"
         assert args.category == "pantry_dry"
 
     def test_pantry_remove(self):
         """Test pantry remove action."""
-        parser = _build_parser()
-        args = parser.parse_args(["pantry", "remove", "cumin"])
+        args = _build_parser().parse_args(["pantry", "remove", "cumin"])
         assert args.action == "remove"
         assert args.ingredient_name == "cumin"
 
     def test_bot_command(self):
         """Test bot command parses correctly."""
-        parser = _build_parser()
-        args = parser.parse_args(["bot"])
+        args = _build_parser().parse_args(["bot"])
         assert args.command == "bot"
 
     def test_no_command_returns_none(self):
         """Test no command sets command to None."""
-        parser = _build_parser()
-        args = parser.parse_args([])
+        args = _build_parser().parse_args([])
         assert args.command is None
 
 
@@ -676,8 +660,7 @@ class TestHandleStock:
 
     def test_parser_accepts_quantity_flags(self):
         """Test parser accepts --quantity and --unit flags."""
-        parser = _build_parser()
-        args = parser.parse_args(
+        args = _build_parser().parse_args(
             ["stock", "good", "milk", "--quantity", "1.0", "--unit", "gal"]
         )
         assert args.quantity == 1.0
@@ -1393,594 +1376,3 @@ class TestMakeAnthropicClient:
             with caplog.at_level(logging.WARNING, logger="grocery_butler.cli"):
                 _make_anthropic_client("fake-key")
             assert "Anthropic client unavailable" in caplog.text
-
-
-# ---------------------------------------------------------------------------
-# Order subcommand handler tests
-# ---------------------------------------------------------------------------
-
-
-class TestHandleOrder:
-    """Tests for the order subcommand handler."""
-
-    def test_no_config_returns_1(self, capsys):
-        """Test order fails with no config."""
-        with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = None
-            parser = _build_parser()
-            args = parser.parse_args(["order", "--items", "milk"])
-            code = _handle_order(args)
-
-        assert code == 1
-        captured = capsys.readouterr()
-        assert "missing" in captured.err.lower()
-
-    def test_missing_safeway_config(self, capsys):
-        """Test order fails when Safeway creds are missing."""
-        cfg = MagicMock()
-        cfg.anthropic_api_key = "sk-test"
-        cfg.safeway_username = ""
-        cfg.safeway_password = ""
-        cfg.safeway_store_id = ""
-        cfg.database_path = ":memory:"
-
-        with (
-            patch("grocery_butler.cli._load_config_safe", return_value=cfg),
-            patch("grocery_butler.cli._make_anthropic_client", return_value=None),
-        ):
-            parser = _build_parser()
-            args = parser.parse_args(["order", "--items", "milk"])
-            code = _handle_order(args)
-
-        assert code == 1
-        captured = capsys.readouterr()
-        assert "error" in captured.err.lower()
-
-    def test_no_items_or_meals_returns_1(self, capsys):
-        """Test order fails without --items or --meals."""
-        cfg = MagicMock()
-        cfg.anthropic_api_key = "sk-test"
-        cfg.safeway_username = "user"
-        cfg.safeway_password = "pass"
-        cfg.safeway_store_id = "1234"
-        cfg.database_path = ":memory:"
-
-        with (
-            patch("grocery_butler.cli._load_config_safe", return_value=cfg),
-            patch("grocery_butler.cli._make_anthropic_client", return_value=None),
-            patch("grocery_butler.cli.SafewayPipeline"),
-        ):
-            parser = _build_parser()
-            args = parser.parse_args(["order"])
-            code = _handle_order(args)
-
-        assert code == 1
-        captured = capsys.readouterr()
-        assert "--items" in captured.err or "--meals" in captured.err
-
-    def test_dry_run_shows_summary(self, capsys):
-        """Test --dry-run builds cart and prints summary."""
-        from grocery_butler.models import (
-            CartItem,
-            CartSummary,
-            FulfillmentType,
-            SafewayProduct,
-        )
-
-        product = SafewayProduct(
-            product_id="P1", name="Milk 1 gal", price=4.99, size="1 gal"
-        )
-        cart_item = CartItem(
-            shopping_list_item=ShoppingListItem(
-                ingredient="milk",
-                quantity=1.0,
-                unit="gal",
-                category=IngredientCategory.DAIRY,
-                search_term="milk",
-                from_meals=["manual"],
-            ),
-            safeway_product=product,
-            quantity_to_order=1,
-            estimated_cost=4.99,
-        )
-        cart = CartSummary(
-            items=[cart_item],
-            failed_items=[],
-            substituted_items=[],
-            skipped_items=[],
-            restock_items=[],
-            subtotal=4.99,
-            fulfillment_options=[],
-            recommended_fulfillment=FulfillmentType.PICKUP,
-            estimated_total=4.99,
-        )
-
-        cfg = MagicMock()
-        cfg.anthropic_api_key = "sk-test"
-        cfg.safeway_username = "user"
-        cfg.safeway_password = "pass"
-        cfg.safeway_store_id = "1234"
-        cfg.database_path = ":memory:"
-
-        with (
-            patch("grocery_butler.cli._load_config_safe", return_value=cfg),
-            patch("grocery_butler.cli._make_anthropic_client", return_value=None),
-            patch("grocery_butler.cli.SafewayPipeline") as mock_pipeline_cls,
-        ):
-            mock_pipeline = MagicMock()
-            mock_pipeline.build_cart_only.return_value = cart
-            mock_pipeline_cls.return_value = mock_pipeline
-
-            parser = _build_parser()
-            args = parser.parse_args(["order", "--dry-run", "--items", "milk"])
-            code = _handle_order(args)
-
-        assert code == 0
-        captured = capsys.readouterr()
-        assert "Milk 1 gal" in captured.out
-        assert "$4.99" in captured.out
-
-    def test_submit_success(self, capsys):
-        """Test successful order submission."""
-        from grocery_butler.order_service import OrderConfirmation, OrderResult
-
-        result = OrderResult(
-            success=True,
-            confirmation=OrderConfirmation(
-                order_id="ORD-001",
-                status="confirmed",
-                estimated_time="2h",
-                total=9.98,
-                fulfillment_type=MagicMock(value="pickup"),
-                item_count=2,
-            ),
-            items_restocked=1,
-        )
-
-        cfg = MagicMock()
-        cfg.anthropic_api_key = "sk-test"
-        cfg.safeway_username = "user"
-        cfg.safeway_password = "pass"
-        cfg.safeway_store_id = "1234"
-        cfg.database_path = ":memory:"
-
-        with (
-            patch("grocery_butler.cli._load_config_safe", return_value=cfg),
-            patch("grocery_butler.cli._make_anthropic_client", return_value=None),
-            patch("grocery_butler.cli.SafewayPipeline") as mock_pipeline_cls,
-        ):
-            mock_pipeline = MagicMock()
-            mock_pipeline.run.return_value = result
-            mock_pipeline_cls.return_value = mock_pipeline
-
-            parser = _build_parser()
-            args = parser.parse_args(["order", "--items", "milk, eggs"])
-            code = _handle_order(args)
-
-        assert code == 0
-        captured = capsys.readouterr()
-        assert "ORD-001" in captured.out
-        assert "Restocked" in captured.out
-
-    def test_disabled_submission_reports_actionable_error(self, capsys):
-        """Issue #60: a disabled pipeline surfaces the actionable message.
-
-        ``OrderSubmissionDisabledError`` is a ``SafewayPipelineError``
-        subclass, so the existing ``except SafewayPipelineError`` handler
-        must already print it and exit 1 without any further changes.
-        """
-        from grocery_butler.safeway_pipeline import OrderSubmissionDisabledError
-
-        cfg = MagicMock()
-        cfg.anthropic_api_key = "sk-test"
-        cfg.safeway_username = "user"
-        cfg.safeway_password = "pass"
-        cfg.safeway_store_id = "1234"
-        cfg.database_path = ":memory:"
-
-        with (
-            patch("grocery_butler.cli._load_config_safe", return_value=cfg),
-            patch("grocery_butler.cli._make_anthropic_client", return_value=None),
-            patch("grocery_butler.cli.SafewayPipeline") as mock_pipeline_cls,
-        ):
-            mock_pipeline = MagicMock()
-            mock_pipeline.run.side_effect = OrderSubmissionDisabledError(
-                "Order submission is descoped for v1.0 (Issue #60): "
-                "unverified checkout surface."
-            )
-            mock_pipeline_cls.return_value = mock_pipeline
-
-            parser = _build_parser()
-            args = parser.parse_args(["order", "--items", "milk"])
-            code = _handle_order(args)
-
-        assert code == 1
-        captured = capsys.readouterr()
-        assert "Issue #60" in captured.err
-        mock_pipeline.close.assert_called_once()
-
-    def test_submit_failure(self, capsys):
-        """Test failed order submission."""
-        from grocery_butler.order_service import OrderResult
-
-        result = OrderResult(
-            success=False,
-            error_message="Payment declined",
-        )
-
-        cfg = MagicMock()
-        cfg.anthropic_api_key = "sk-test"
-        cfg.safeway_username = "user"
-        cfg.safeway_password = "pass"
-        cfg.safeway_store_id = "1234"
-        cfg.database_path = ":memory:"
-
-        with (
-            patch("grocery_butler.cli._load_config_safe", return_value=cfg),
-            patch("grocery_butler.cli._make_anthropic_client", return_value=None),
-            patch("grocery_butler.cli.SafewayPipeline") as mock_pipeline_cls,
-        ):
-            mock_pipeline = MagicMock()
-            mock_pipeline.run.return_value = result
-            mock_pipeline_cls.return_value = mock_pipeline
-
-            parser = _build_parser()
-            args = parser.parse_args(["order", "--items", "milk"])
-            code = _handle_order(args)
-
-        assert code == 1
-        captured = capsys.readouterr()
-        assert "Payment declined" in captured.err
-
-    def test_submit_blocked_by_flagged_cart_surfaces_reasons_and_exits_1(self, capsys):
-        """Test a non-dry-run order with a flagged cart stays blocked.
-
-        Per the chief-architect's ruling for issue #59 round 3: the CLI
-        gets NO change -- non-dry-run flagged carts still hit
-        ``pipeline.run`` on its safe default (``allow_review_items``
-        stays False), so ``OrderService.submit_order`` hard-blocks and
-        ``pipeline.run`` returns the failed OrderResult produced by
-        ``_format_review_block_message`` (naming the flagged ingredient
-        and its reason code). The CLI must surface that message on
-        stderr and exit nonzero -- exactly like any other order failure.
-        """
-        from grocery_butler.order_service import OrderResult
-
-        result = OrderResult(
-            success=False,
-            error_message=(
-                "Order blocked pending review: the following items need "
-                "manual review before ordering: spaghetti "
-                "(incomparable_units). Re-submit with "
-                "allow_review_items=True after confirming quantities."
-            ),
-        )
-
-        cfg = MagicMock()
-        cfg.anthropic_api_key = "sk-test"
-        cfg.safeway_username = "user"
-        cfg.safeway_password = "pass"
-        cfg.safeway_store_id = "1234"
-        cfg.database_path = ":memory:"
-
-        with (
-            patch("grocery_butler.cli._load_config_safe", return_value=cfg),
-            patch("grocery_butler.cli._make_anthropic_client", return_value=None),
-            patch("grocery_butler.cli.SafewayPipeline") as mock_pipeline_cls,
-        ):
-            mock_pipeline = MagicMock()
-            mock_pipeline.run.return_value = result
-            mock_pipeline_cls.return_value = mock_pipeline
-
-            parser = _build_parser()
-            args = parser.parse_args(["order", "--items", "spaghetti"])
-            code = _handle_order(args)
-
-        assert code == 1
-        captured = capsys.readouterr()
-        assert "spaghetti" in captured.err
-        assert "incomparable_units" in captured.err
-        mock_pipeline.run.assert_called_once()
-        # No override: the CLI never opts into allow_review_items — the
-        # block must be the default, safe outcome for a flagged cart.
-        _, kwargs = mock_pipeline.run.call_args
-        assert "allow_review_items" not in kwargs
-
-    def test_parser_accepts_order_flags(self):
-        """Test argparse wiring for order subcommand."""
-        parser = _build_parser()
-        args = parser.parse_args(["order", "--dry-run", "--items", "milk, eggs"])
-        assert args.dry_run is True
-        assert args.items == "milk, eggs"
-
-    def test_parser_accepts_meals_flag(self):
-        """Test argparse accepts --meals flag."""
-        parser = _build_parser()
-        args = parser.parse_args(["order", "--meals", "tacos, pasta"])
-        assert args.meals == "tacos, pasta"
-
-    def test_meals_parses_consolidates_and_restocks(self):
-        """Test --meals wires MealParser, PantryManager, and Consolidator.
-
-        Verifies the full ``_items_from_meals`` dependency chain: parsed
-        meal names reach ``MealParser.parse_meals``, the restock queue and
-        pantry staple names reach ``Consolidator.consolidate`` in the
-        correct argument order, and the exact consolidated result is what
-        gets passed to ``pipeline.build_cart_only``. Distinct sentinel
-        objects are used throughout so that any crossed wiring (e.g.
-        swapping the restock queue and staple names arguments) causes the
-        identity-based assertions to fail.
-        """
-        from grocery_butler.models import CartSummary, FulfillmentType
-
-        parsed_meals = sentinel.parsed_meals
-        restock_queue = sentinel.restock_queue
-        staple_names = sentinel.staple_names
-        consolidated_items = sentinel.consolidated_items
-
-        cart = CartSummary(
-            items=[],
-            failed_items=[],
-            substituted_items=[],
-            skipped_items=[],
-            restock_items=[],
-            subtotal=0.0,
-            fulfillment_options=[],
-            recommended_fulfillment=FulfillmentType.PICKUP,
-            estimated_total=0.0,
-        )
-
-        cfg = MagicMock()
-        cfg.anthropic_api_key = "sk-test"
-        cfg.safeway_username = "user"
-        cfg.safeway_password = "pass"
-        cfg.safeway_store_id = "1234"
-        cfg.database_path = ":memory:"
-
-        mock_store = MagicMock()
-        mock_store.get_pantry_staple_names.return_value = staple_names
-        mock_parser = MagicMock()
-        mock_parser.parse_meals.return_value = parsed_meals
-        mock_pantry = MagicMock()
-        mock_pantry.get_restock_queue.return_value = restock_queue
-        mock_consolidator = MagicMock()
-        mock_consolidator.consolidate.return_value = consolidated_items
-
-        with (
-            patch("grocery_butler.cli._load_config_safe", return_value=cfg),
-            patch("grocery_butler.cli._make_anthropic_client", return_value=None),
-            patch("grocery_butler.cli.RecipeStore", return_value=mock_store),
-            patch("grocery_butler.cli.MealParser", return_value=mock_parser),
-            patch("grocery_butler.cli.PantryManager", return_value=mock_pantry),
-            patch("grocery_butler.cli.Consolidator", return_value=mock_consolidator),
-            patch("grocery_butler.cli.SafewayPipeline") as mock_pipeline_cls,
-        ):
-            mock_pipeline = MagicMock()
-            mock_pipeline.build_cart_only.return_value = cart
-            mock_pipeline_cls.return_value = mock_pipeline
-
-            parser = _build_parser()
-            args = parser.parse_args(["order", "--dry-run", "--meals", "pasta, salad"])
-            code = _handle_order(args)
-
-        assert code == 0
-        mock_parser.parse_meals.assert_called_once_with(["pasta", "salad"])
-        mock_pantry.get_restock_queue.assert_called_once()
-        mock_consolidator.consolidate.assert_called_once_with(
-            parsed_meals, restock_queue, staple_names
-        )
-        mock_pipeline.build_cart_only.assert_called_once_with(consolidated_items)
-
-
-class TestFormatCartSummary:
-    """Tests for _format_cart_summary."""
-
-    def test_format_with_items(self):
-        """Test formatting a cart with items."""
-        from grocery_butler.models import (
-            CartItem,
-            CartSummary,
-            FulfillmentType,
-            SafewayProduct,
-        )
-
-        product = SafewayProduct(
-            product_id="P1", name="Eggs", price=3.49, size="1 dozen"
-        )
-        cart_item = CartItem(
-            shopping_list_item=ShoppingListItem(
-                ingredient="eggs",
-                quantity=1.0,
-                unit="dozen",
-                category=IngredientCategory.DAIRY,
-                search_term="eggs",
-                from_meals=["manual"],
-            ),
-            safeway_product=product,
-            quantity_to_order=1,
-            estimated_cost=3.49,
-        )
-        cart = CartSummary(
-            items=[cart_item],
-            failed_items=[],
-            substituted_items=[],
-            skipped_items=[],
-            restock_items=[],
-            subtotal=3.49,
-            fulfillment_options=[],
-            recommended_fulfillment=FulfillmentType.PICKUP,
-            estimated_total=3.49,
-        )
-
-        result = _format_cart_summary(cart)
-        assert "Eggs" in result
-        assert "$3.49" in result
-        assert "pickup" in result.lower()
-
-    def test_format_flagged_item_shows_review_marker(self) -> None:
-        """Test needs_review items get a '(review)' marker on their line.
-
-        Regression guard for issue #59: quantity decisions that require
-        human review (unparseable size, incomparable units, or a capped
-        quantity) must be visibly flagged in the CLI cart summary.
-        """
-        from grocery_butler.models import (
-            CartItem,
-            CartSummary,
-            FulfillmentType,
-            SafewayProduct,
-        )
-
-        flagged_product = SafewayProduct(
-            product_id="P1", name="Mystery Item", price=4.99, size=""
-        )
-        flagged_item = CartItem(
-            shopping_list_item=ShoppingListItem(
-                ingredient="mystery item",
-                quantity=1.0,
-                unit="each",
-                category=IngredientCategory.OTHER,
-                search_term="mystery item",
-                from_meals=["manual"],
-            ),
-            safeway_product=flagged_product,
-            quantity_to_order=1,
-            estimated_cost=4.99,
-            needs_review=True,
-            review_reason="unparseable_size",
-        )
-        unflagged_product = SafewayProduct(
-            product_id="P2", name="Milk", price=3.99, size="1 gal"
-        )
-        unflagged_item = CartItem(
-            shopping_list_item=ShoppingListItem(
-                ingredient="milk",
-                quantity=1.0,
-                unit="gal",
-                category=IngredientCategory.DAIRY,
-                search_term="milk",
-                from_meals=["manual"],
-            ),
-            safeway_product=unflagged_product,
-            quantity_to_order=1,
-            estimated_cost=3.99,
-        )
-        cart = CartSummary(
-            items=[flagged_item, unflagged_item],
-            failed_items=[],
-            substituted_items=[],
-            skipped_items=[],
-            restock_items=[],
-            subtotal=8.98,
-            fulfillment_options=[],
-            recommended_fulfillment=FulfillmentType.PICKUP,
-            estimated_total=8.98,
-        )
-
-        result = _format_cart_summary(cart)
-        lines = result.splitlines()
-        mystery_line = next(line for line in lines if "Mystery Item" in line)
-        milk_line = next(line for line in lines if "Milk" in line)
-        assert "(review)" in mystery_line
-        assert "(review)" not in milk_line
-
-    def test_format_with_substitution_shows_name(self) -> None:
-        """Test substituted items show the selected product name."""
-        from grocery_butler.models import CartSummary, FulfillmentType
-
-        alt_product = SafewayProduct(
-            product_id="ALT1",
-            name="Organic Chicken Thighs",
-            price=10.99,
-            size="2 lb",
-        )
-        sub = SubstitutionResult(
-            status="alternatives_found",
-            original_item=ShoppingListItem(
-                ingredient="chicken thighs",
-                quantity=2.0,
-                unit="lb",
-                category=IngredientCategory.MEAT,
-                search_term="chicken thighs",
-                from_meals=["manual"],
-            ),
-            alternatives=[
-                SubstitutionOption(
-                    product=alt_product,
-                    suitability=SubstitutionSuitability.GOOD,
-                    reasoning="Similar cut",
-                ),
-            ],
-            selected=SubstitutionOption(
-                product=alt_product,
-                suitability=SubstitutionSuitability.GOOD,
-                reasoning="Similar cut",
-            ),
-            message="Found 1 alternative(s)",
-        )
-        cart = CartSummary(
-            items=[],
-            failed_items=[],
-            substituted_items=[sub],
-            restock_items=[],
-            subtotal=0.0,
-            fulfillment_options=[],
-            recommended_fulfillment=FulfillmentType.PICKUP,
-            estimated_total=0.0,
-        )
-
-        result = _format_cart_summary(cart)
-        assert "Substituted" in result
-        assert "Organic Chicken Thighs" in result
-
-    def test_format_unverified_fulfillment_shows_warning(self) -> None:
-        """Test an unverified-fulfillment cart preview shows a warning.
-
-        Regression guard for issue #72: when Safeway's fulfillment fetch
-        failed, the cart previously presented fabricated pickup/delivery
-        options as if they were real, with no indication anything was
-        wrong. The CLI preview must now warn the human that fulfillment
-        could not be confirmed before they submit the order.
-        """
-        from grocery_butler.models import CartSummary, FulfillmentType
-
-        cart = CartSummary(
-            items=[],
-            failed_items=[],
-            substituted_items=[],
-            skipped_items=[],
-            restock_items=[],
-            subtotal=0.0,
-            fulfillment_options=[],
-            recommended_fulfillment=FulfillmentType.PICKUP,
-            estimated_total=0.0,
-            fulfillment_unverified=True,
-        )
-
-        result = _format_cart_summary(cart)
-
-        lowered = result.lower()
-        assert "fulfillment" in lowered
-        assert "unverified" in lowered or "unconfirmed" in lowered
-
-    def test_format_verified_fulfillment_shows_no_warning(self) -> None:
-        """Test a normal (verified) cart preview shows no unverified warning."""
-        from grocery_butler.models import CartSummary, FulfillmentType
-
-        cart = CartSummary(
-            items=[],
-            failed_items=[],
-            substituted_items=[],
-            skipped_items=[],
-            restock_items=[],
-            subtotal=0.0,
-            fulfillment_options=[],
-            recommended_fulfillment=FulfillmentType.PICKUP,
-            estimated_total=0.0,
-        )
-
-        result = _format_cart_summary(cart)
-
-        lowered = result.lower()
-        assert "unverified" not in lowered
-        assert "unconfirmed" not in lowered
