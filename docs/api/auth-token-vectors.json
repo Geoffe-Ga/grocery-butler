@@ -1,0 +1,55 @@
+{
+  "about": "Fixed cases for the bearer token grocery-butler accepts. A caller's own implementation must produce exactly these tokens from these inputs.",
+  "warning": "The value in hmac_key_utf8 is test data. It authenticates nothing and must never be configured on a deployment.",
+  "format": "<caller_id>.<timestamp>.<hex of HMAC-SHA256(key, signed_bytes)>",
+  "signed_bytes": "UTF-8 of these five fields joined by a single NUL byte: caller_id, the timestamp as decimal digits, the method in upper case, the path without its query string, and the lower-case hex SHA-256 of the exact body bytes sent (of zero bytes when there is no body).",
+  "accepted_window_seconds": {
+    "older_than_now": 300,
+    "newer_than_now": 30
+  },
+  "hmac_key_utf8": "test-vector-value-never-deploy-this",
+  "caller_id": "rubotpaul",
+  "timestamp": 1790000000,
+  "cases": [
+    {
+      "name": "get-no-body",
+      "method": "GET",
+      "path": "/api/v2/items",
+      "query": "",
+      "body_utf8": "",
+      "token": "rubotpaul.1790000000.0640d3e03d5df67af2fe0032ca3e696e5ff19a8d057a70be109168d5cc19f005"
+    },
+    {
+      "name": "get-with-query",
+      "method": "GET",
+      "path": "/api/v2/needs",
+      "query": "status=open",
+      "body_utf8": "",
+      "token": "rubotpaul.1790000000.24cc2df188832bc74d84efba27c082272474e61ae78a90e0a24af10a1cff1533"
+    },
+    {
+      "name": "post-json",
+      "method": "POST",
+      "path": "/api/v1/stock/add",
+      "query": "",
+      "body_utf8": "{\"item\": \"oat milk\", \"category\": \"dairy\"}",
+      "token": "rubotpaul.1790000000.7f62f5d2cf86bb2ed06f66788a28cdc7138d427c2afe0a00c4c39276e00ae53b"
+    },
+    {
+      "name": "post-non-ascii",
+      "method": "POST",
+      "path": "/api/v2/items",
+      "query": "",
+      "body_utf8": "{\"name\": \"jalapeño\"}",
+      "token": "rubotpaul.1790000000.25f1cbc2b7454986ab7fbad9577a3c622e8f77194e6b321552363ab1191efd6e"
+    },
+    {
+      "name": "lowercase-method",
+      "method": "post",
+      "path": "/api/v2/plans",
+      "query": "",
+      "body_utf8": "{}",
+      "token": "rubotpaul.1790000000.b649a6fdcd404e896d28c32f9b0f54f9d15436217295d2f954f3bc2cfbf0db82"
+    }
+  ]
+}
