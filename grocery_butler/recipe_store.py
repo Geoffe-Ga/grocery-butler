@@ -11,6 +11,7 @@ import re
 from typing import TYPE_CHECKING
 
 from grocery_butler.db import get_connection
+from grocery_butler.household_items import SYSTEM_ACTOR, HouseholdItemStore
 from grocery_butler.models import (
     BrandMatchType,
     BrandPreference,
@@ -18,6 +19,7 @@ from grocery_butler.models import (
     Ingredient,
     IngredientCategory,
     ParsedMeal,
+    coerce_category_optional,
 )
 
 if TYPE_CHECKING:
@@ -121,6 +123,7 @@ class RecipeStore:
             The new recipe's database ID.
         """
         normalized = normalize_recipe_name(meal.name)
+        item_ids = self._item_ids_for(meal)
         conn = self._connect()
         try:
             cursor = conn.execute(
@@ -132,17 +135,38 @@ class RecipeStore:
             if recipe_id is None:  # pragma: no cover
                 msg = "INSERT did not return a row ID"
                 raise RuntimeError(msg)
-            self._insert_ingredients(conn, recipe_id, meal)
+            self._insert_ingredients(conn, recipe_id, meal, item_ids)
             conn.commit()
             return recipe_id
         finally:
             conn.close()
+
+    def _item_ids_for(self, meal: ParsedMeal) -> dict[str, int]:
+        """Find or create the household item each ingredient refers to.
+
+        Runs before the recipe's own transaction opens: the item store
+        writes on its own connection, and SQLite allows one writer at a time.
+
+        Args:
+            meal: Meal whose ingredients need item ids.
+
+        Returns:
+            Map of each ingredient's text to its canonical item id.
+        """
+        items = HouseholdItemStore(self._db_path)
+        return {
+            ing.ingredient: items.resolve_or_create(
+                ing.ingredient, actor=SYSTEM_ACTOR, category=ing.category
+            ).id
+            for ing in [*meal.purchase_items, *meal.pantry_items]
+        }
 
     def _insert_ingredients(
         self,
         conn: DatabaseConnection,
         recipe_id: int,
         meal: ParsedMeal,
+        item_ids: dict[str, int],
     ) -> None:
         """Insert all ingredients for a recipe.
 
@@ -150,6 +174,7 @@ class RecipeStore:
             conn: Active database connection.
             recipe_id: ID of the parent recipe.
             meal: Meal containing ingredient lists.
+            item_ids: Canonical item id for each ingredient's text.
         """
         all_items = [
             *[(ing, False) for ing in meal.purchase_items],
@@ -160,8 +185,8 @@ class RecipeStore:
             conn.execute(
                 "INSERT INTO recipe_ingredients"
                 " (recipe_id, ingredient, quantity, unit, category,"
-                "  is_pantry_item, notes, quantity_per_serving)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "  is_pantry_item, notes, quantity_per_serving, item_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     recipe_id,
                     ing.ingredient,
@@ -171,6 +196,7 @@ class RecipeStore:
                     is_pantry,
                     ing.notes or None,
                     ing.quantity / servings,
+                    item_ids[ing.ingredient],
                 ),
             )
 
@@ -233,6 +259,7 @@ class RecipeStore:
             meal: New meal data.
         """
         normalized = normalize_recipe_name(meal.name)
+        item_ids = self._item_ids_for(meal)
         conn = self._connect()
         try:
             conn.execute(
@@ -245,7 +272,7 @@ class RecipeStore:
                 "DELETE FROM recipe_ingredients WHERE recipe_id = ?",
                 (recipe_id,),
             )
-            self._insert_ingredients(conn, recipe_id, meal)
+            self._insert_ingredients(conn, recipe_id, meal, item_ids)
             conn.commit()
         finally:
             conn.close()
@@ -355,12 +382,12 @@ class RecipeStore:
         """Return all pantry staples with full details.
 
         Returns:
-            List of dicts with id, ingredient, display_name, category.
+            List of dicts with id, ingredient, display_name, category, item_id.
         """
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT id, ingredient, display_name, category"
+                "SELECT id, ingredient, display_name, category, item_id"
                 " FROM pantry_staples ORDER BY ingredient",
             ).fetchall()
             return [dict(row) for row in rows]
@@ -394,12 +421,19 @@ class RecipeStore:
         """
         display_name = ingredient.strip().title()
         ingredient_lower = ingredient.strip().lower()
+        item = HouseholdItemStore(self._db_path).resolve_or_create(
+            ingredient,
+            actor=SYSTEM_ACTOR,
+            display_name=display_name,
+            category=coerce_category_optional(category),
+        )
         conn = self._connect()
         try:
             cursor = conn.execute(
                 "INSERT INTO pantry_staples"
-                " (ingredient, display_name, category) VALUES (?, ?, ?)",
-                (ingredient_lower, display_name, category),
+                " (ingredient, display_name, category, item_id)"
+                " VALUES (?, ?, ?, ?)",
+                (ingredient_lower, display_name, category, item.id),
             )
             conn.commit()
             row_id = cursor.lastrowid

@@ -58,6 +58,26 @@ class BrandMatchType(StrEnum):
     INGREDIENT = "ingredient"
 
 
+class StaplePolicy(StrEnum):
+    """How the household wants an item replenished (backlog P1.7)."""
+
+    ALWAYS_KEEP = "always_keep"
+    REPLENISH_WHEN_LOW = "replenish_when_low"
+    MEALS_ONLY = "meals_only"
+    NEVER_SUGGEST = "never_suggest"
+
+
+class ItemEventType(StrEnum):
+    """A kind of change in a household item's audit trail (ADR 0006)."""
+
+    CREATED = "created"
+    UPDATED = "updated"
+    ALIAS_ADDED = "alias_added"
+    ALIAS_REMOVED = "alias_removed"
+    MERGED = "merged"
+    UNMERGED = "unmerged"
+
+
 class Unit(StrEnum):
     """Standardized grocery measurement units."""
 
@@ -343,6 +363,7 @@ class InventoryItem(BaseModel):
     default_unit: Unit | None = None
     default_search_term: str | None = None
     notes: str = ""
+    item_id: int | None = None
 
     @field_validator("default_unit", mode="before")
     @classmethod
@@ -433,3 +454,53 @@ class PendingAction(BaseModel):
         if reference.tzinfo is None:
             reference = reference.replace(tzinfo=dt.UTC)
         return reference > expires
+
+
+# ---------------------------------------------------------------------------
+# Canonical household items (ADR 0006)
+# ---------------------------------------------------------------------------
+
+
+class HouseholdItem(BaseModel):
+    """One thing the household keeps, with a stable identity.
+
+    ``name`` is the normalized, unique key. ``merged_into_id`` is set when
+    this item was merged into another; readers then use that item instead.
+    """
+
+    id: int
+    name: str
+    display_name: str
+    category: IngredientCategory | None = None
+    preferred_unit: str | None = None
+    staple_policy: StaplePolicy | None = None
+    preferred_brand: str | None = None
+    preferred_size: str | None = None
+    active: bool = True
+    merged_into_id: int | None = None
+
+
+class HouseholdItemUpdate(BaseModel):
+    """Fields of a household item a caller may change.
+
+    Only fields that were explicitly set are applied, so ``None`` clears a
+    field and an omitted field is left alone.
+    """
+
+    display_name: str | None = None
+    category: IngredientCategory | None = None
+    preferred_unit: str | None = None
+    staple_policy: StaplePolicy | None = None
+    preferred_brand: str | None = None
+    preferred_size: str | None = None
+
+
+class ItemEvent(BaseModel):
+    """One entry in a household item's append-only audit trail."""
+
+    id: int
+    item_id: int
+    event_type: ItemEventType
+    detail: dict[str, Any]
+    actor: str
+    created_at: str

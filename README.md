@@ -667,11 +667,23 @@ public ones:
 | `InventoryItem` | A tracked household item with `status` (`on_hand`/`low`/`out`). |
 | `InventoryUpdate` | NL-parsed status change with confidence. |
 | `BrandPreference` | A `preferred`/`avoid` rule scoped to category or ingredient. |
+| `HouseholdItem` | One thing the household keeps, with a stable id, a staple policy and a preferred brand and size. |
+| `ItemEvent` | One entry in a household item's append-only audit trail. |
 
 Vocabulary enums (`StrEnum`): `IngredientCategory`, `InventoryStatus`, `Unit`,
-`BrandPreferenceType`, `BrandMatchType`, `PendingActionStatus`.
+`BrandPreferenceType`, `BrandMatchType`, `PendingActionStatus`,
+`StaplePolicy`, `ItemEventType`.
 
-The backlog's next domain concepts (`HouseholdItem`, `InventoryObservation`,
+**Canonical items ([ADR 0006](docs/adr/0006-canonical-household-item-identity.md)).**
+`grocery_butler/household_items.py` owns item identity. Every name an item
+answers to is an alias, and text resolves to at most one item. Matching only
+ignores case and spacing: "tomato" and "tomatoes" stay separate until a
+person adds an alias or merges them. A merge sets a pointer and rewrites
+nothing, so an unmerge restores the earlier state exactly, and every
+identity change is recorded with its actor. Recipe ingredients, pantry
+staples and inventory rows each carry an `item_id`.
+
+The backlog's next domain concepts (`InventoryObservation`,
 `ReplenishmentNeed`, `ShoppingPlan`, `FulfillmentDraft`, and others) are
 described in
 [Domain model changes](docs/OPENCLAW_ERP_BACKLOG.md#domain-model-changes).
