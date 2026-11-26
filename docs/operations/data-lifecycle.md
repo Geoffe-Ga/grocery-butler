@@ -6,8 +6,8 @@ up and bring it back. The design is
 
 ## What is stored, and for how long
 
-Everything lives in one database: SQLite in development, Railway Postgres in
-production. Nothing is deleted on a timer today. This table says what each
+Everything lives in one database: SQLite in development, Postgres on the
+household's server in production. Nothing is deleted on a timer today. This table says what each
 kind of record is and when it stops mattering.
 
 | Data | Kept | Notes |
@@ -33,7 +33,7 @@ export.
 
 | Service | What it sees | Why |
 |---------|--------------|-----|
-| Railway | The whole database, encrypted in transit | Hosts the app and Postgres. |
+| The server's hosting provider | The server's disk, which holds the whole database | Hosts the machine the app and Postgres run on ([ADR 0021](../adr/0021-self-host-the-dogfood-on-the-openclaw-server.md)). |
 | Anthropic API | The text of a recipe, or of an inventory update, being parsed | Claude turns free text into structured rows. It holds no state for us. |
 | Tailscale | Network metadata only; traffic is end to end encrypted | The dashboard and API are reachable only on the tailnet. |
 | OpenClaw (RubotPaul) | Whatever it reads and writes through `/api/v1` and `/api/v2` | The household's own assistant. |
@@ -82,13 +82,12 @@ DATABASE_URL="<production url>" ./scripts/backup.sh "backups/$(date -u +%Y-%m-%d
 ```
 
 The script exports, encrypts with AES-256, and writes the file only if both
-steps worked. Nothing unencrypted is left behind. On Railway, run it from
-your own machine with `railway run ./scripts/backup.sh <file>`, which
-supplies `DATABASE_URL`.
+steps worked. Nothing unencrypted is left behind. On the household's server, the exact
+commands are in the [deployment runbook](vps-deployment.md#backups).
 
 **How often.** Weekly during the dogfood, and always before a deploy that
 includes a migration. Keep at least the last four. Store them somewhere
-other than Railway.
+other than the server.
 
 ## Restore
 
@@ -97,8 +96,8 @@ schema the backup was taken at, loads the rows, then applies the migrations
 written since. It is several steps, not one transaction, so follow the order
 below.
 
-1. **Stop the app** so nothing writes during the restore. On Railway, scale
-   the service to zero or remove the deployment.
+1. **Stop the app** so nothing writes during the restore. On the household's
+   server: `docker compose stop app` in `deploy/vps`.
 2. **Prefer a fresh database.** Create a new, empty Postgres database and
    point `DATABASE_URL` at it. If the restore fails, the old database is
    untouched.

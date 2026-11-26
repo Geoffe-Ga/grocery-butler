@@ -40,7 +40,7 @@ Unit tests isolate their variable: one behavior per test, with time, randomness,
 
 ## 5. Secrets Never Live in Files
 
-Never put a literal API key or token in any file: code, tests, docs, fixtures, prompts or commit messages. Secrets reach the code only through environment variables, read by `grocery_butler/config.py`: a gitignored `.env` locally (start from `.env.example`, which holds placeholders only) and Railway variables in production. Tests set obviously fake values with `monkeypatch.setenv`. The `detect-secrets` hook guards the rest.
+Never put a literal API key or token in any file: code, tests, docs, fixtures, prompts or commit messages. Secrets reach the code only through environment variables, read by `grocery_butler/config.py`: a gitignored `.env` locally (start from `.env.example`, which holds placeholders only) and `deploy/vps/.env` on the server in production. Tests set obviously fake values with `monkeypatch.setenv`. The `detect-secrets` hook guards the rest.
 
 ## 6. Stay Green
 

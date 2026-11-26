@@ -1,0 +1,82 @@
+# Grocery Butler on the household's own server (ADR 0021).
+#
+# Two containers: the app, built from this checkout's Dockerfile, and its
+# Postgres database. Runbook: docs/operations/vps-deployment.md.
+#
+#   cd deploy/vps
+#   docker compose up --detach --build
+#
+# Secrets are read from deploy/vps/.env on the server (start from
+# env.example). That file is ignored by git and never enters the image.
+#
+# Nothing here listens on a public address. Both published ports are bound
+# to 127.0.0.1, so only programs on the server itself can reach them:
+# OpenClaw calls the app directly, and `tailscale serve` puts the dashboard
+# on the tailnet over HTTPS.
+
+name: grocery-butler
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DATABASE_URL: postgresql://butler:${POSTGRES_PASSWORD}@db:5432/grocery_butler
+      RUBOTPAUL_SHARED_SECRET: ${RUBOTPAUL_SHARED_SECRET:?Set RUBOTPAUL_SHARED_SECRET in deploy/vps/.env}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?Set FLASK_SECRET_KEY in deploy/vps/.env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      INSTACART_ENABLED: ${INSTACART_ENABLED:-}
+      INSTACART_ENV: ${INSTACART_ENV:-}
+      INSTACART_API_KEY: ${INSTACART_API_KEY:-}
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+      # The network boundary guard admits a request by the address it comes
+      # from. A request to the published port above reaches the app from
+      # this network's gateway (pinned below), so the list is loopback plus
+      # that one address. Setting the variable replaces the default list.
+      TAILNET_GUARD_ALLOWED_CIDRS: 127.0.0.0/8,::1/128,172.30.198.1/32
+    networks:
+      - internal
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "10"
+
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: butler
+      POSTGRES_DB: grocery_butler
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/vps/.env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    # Loopback only, for ./scripts/backup.sh and ./scripts/restore.sh run on
+    # the server. Change the left-hand port if 5432 is already taken there.
+    ports:
+      - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username butler --dbname grocery_butler"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks:
+      - internal
+    logging: *logging
+
+networks:
+  internal:
+    ipam:
+      config:
+        - subnet: 172.30.198.0/24
+          gateway: 172.30.198.1
+
+volumes:
+  db-data:

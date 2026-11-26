@@ -3,7 +3,7 @@
 Separate Flask blueprint from the user-facing HTML app: same database and
 stores, but bearer-token auth (vendored HMAC middleware), JSON responses,
 and no HTML. Registered on the existing web app by ``create_app`` so it
-ships in the same Railway web process.
+ships in the same web process.
 """
 
 from __future__ import annotations

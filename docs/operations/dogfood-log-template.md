@@ -14,7 +14,7 @@ means and which pilot gate it feeds is in
 - [ ] Deployed, tailnet boundary confirmed (#110)
 - [ ] Household members added
 - [ ] Hard constraints entered and checked
-- [ ] `backup_taken`: first backup stored off Railway
+- [ ] `backup_taken`: first backup stored off the server
 - [ ] `restore_drill_done`: restored into a scratch database and inspected
 - [ ] `deletion_test_done`: scratch database deleted and confirmed empty
 

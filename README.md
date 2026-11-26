@@ -61,7 +61,7 @@ it runs and what it records are in
   - [Python Module API](#python-module-api)
 - [Data Model](#data-model)
 - [Development](#development)
-- [Deploying to Railway](#deploying-to-railway)
+- [Deploying](#deploying)
 - [License](#license)
 
 ## What It Does
@@ -159,14 +159,16 @@ store. Core logic never imports a retailer-specific model.
 
 **Persistence.** `db/adapter.py` provides a thin abstraction over `sqlite3`
 and `psycopg2` so the same code runs locally on SQLite (with WAL mode for
-concurrent readers and writers) and in production on Railway Postgres. Schema
+concurrent readers and writers) and in production on Postgres. Schema
 changes are numbered SQL migrations in `db/migrations/`, applied by
 `db/migrate.py`.
 
 ### Process Topology
 
-In production (Railway), the system builds and runs from the `Dockerfile`;
-there's no separate build or release configuration to keep in sync. The image
+In production the system builds and runs from the `Dockerfile`, on the
+household's own server beside Postgres
+([ADR 0021](docs/adr/0021-self-host-the-dogfood-on-the-openclaw-server.md)).
+The image
 boots into `docker-entrypoint.sh`, which applies any pending schema
 migrations (`python -m grocery_butler.db.migrate`, reading `DATABASE_URL`)
 before anything else starts. If a migration fails, `set -eu` aborts the boot
@@ -201,8 +203,8 @@ locally (see [Discord bot (local only)](#discord-bot-local-only--retired-from-pr
 The CLI is invoked ad-hoc as a single-shot process (no daemon).
 
 Production needs **no retailer configuration**. See
-[Deploying to Railway](#deploying-to-railway) for the environment variables
-and setup steps that go with this topology.
+[Deploying](#deploying) for the environment variables and setup steps that
+go with this topology.
 
 ### Key Design Rules
 
@@ -368,7 +370,7 @@ and easy to operate alone.**
 
 ### Web
 
-- **Flask 3** — small, explicit, and fits in a single Railway container
+- **Flask 3** — small, explicit, and fits in a single container
   without ceremony. The app is constructed by a `create_app(db_path=None)`
   factory so tests can spin up isolated instances against a tmpfile
   database.
@@ -457,7 +459,7 @@ $EDITOR .env
 | `DISCORD_BOT_TOKEN` | Local bot runs only | Authenticates the (retired-from-production) Discord bot. |
 | `FLASK_SECRET_KEY` | Web (production) | Stable session signing key. Required at boot when `APP_ENV=production`; in dev, an unset key falls back to a random per-process key (see [Fail-fast startup checks](#fail-fast-startup-checks)). |
 | `DATABASE_PATH` | SQLite (dev) | Path to the local SQLite file. Defaults to `mealbot.db`. |
-| `DATABASE_URL` | Postgres (prod) | Connection URL injected by Railway Postgres. |
+| `DATABASE_URL` | Postgres (prod) | Connection URL. The compose file sets it in production. |
 | `DEFAULT_SERVINGS` | Optional | Default recipe scaling target (default `4`). |
 | `DEFAULT_UNITS` | Optional | `imperial` or `metric` (default `imperial`). |
 
@@ -577,9 +579,10 @@ JSON API served by the same web process as the HTML UI — the web UI is
 unchanged. The blueprint lives in `grocery_butler/api.py` and is registered by
 `create_app()`.
 
-- **Base URL:** `https://grocery-butler.tailnet.ts.net/api/v1` — reached over
-  the Tailscale tailnet. The tailnet-only boundary is enforced in code, not
-  just by network configuration: see
+- **Base URL:** `http://127.0.0.1:8000/api/v1` — OpenClaw runs on the same
+  server and calls the loopback port
+  ([ADR 0021](docs/adr/0021-self-host-the-dogfood-on-the-openclaw-server.md)).
+  The boundary is enforced in code, not just by network configuration: see
   [Network boundary guard](#network-boundary-guard-tailnet-only) for how
   requests from outside the allow-list are rejected.
 - **Auth:** every `/api/v1` route requires a bearer token in the
@@ -1028,7 +1031,8 @@ grocery-butler/
 │   └── adr/                    # Architecture decision records
 ├── plans/                      # Historical build plans (superseded)
 ├── pyproject.toml              # Tool configuration
-├── Dockerfile                  # Railway build + runtime image
+├── deploy/vps/                 # compose.yaml and env.example for the server
+├── Dockerfile                  # Production build + runtime image
 ├── docker-entrypoint.sh        # Runs migrations, then execs gunicorn
 ├── requirements.txt            # Runtime dependencies
 └── requirements-dev.txt        # Development dependencies
@@ -1047,34 +1051,43 @@ grocery-butler/
 
 See `CLAUDE.md` for the full engineering culture document.
 
-## Deploying to Railway
+## Deploying
 
-Railway builds and runs the project's `Dockerfile` directly. See
-[Process Topology](#process-topology) for how the container boots — in
-short, `docker-entrypoint.sh` migrates the database before gunicorn ever
-starts, and a migration failure aborts the deploy rather than serving
-requests against a stale schema.
+Grocery Butler runs on the household's own server, the one OpenClaw already
+runs on ([ADR 0021](docs/adr/0021-self-host-the-dogfood-on-the-openclaw-server.md)).
+`deploy/vps/compose.yaml` starts two containers: the app, built from this
+repository's `Dockerfile`, and Postgres. The step-by-step runbook is
+[`docs/operations/vps-deployment.md`](docs/operations/vps-deployment.md).
 
-RubotPaul reaches the `/api/v1` blueprint over Tailscale at
-`https://grocery-butler.tailnet.ts.net/api/v1`; there's no standalone worker
-process to deploy alongside the web service.
+- **Nothing listens on a public address.** Both containers publish only on
+  the server's loopback address.
+- **OpenClaw calls `http://127.0.0.1:8000/api/v1`** on the same server.
+- **People open the dashboard over the tailnet**, at the HTTPS address
+  `tailscale serve` gives it.
+- **A deploy is manual:** `git pull`, then
+  `docker compose up --detach --build`. See
+  [Process Topology](#process-topology) for how the container boots: it
+  migrates the database before gunicorn starts, and a failed migration
+  stops the boot.
 
 ### Required environment variables
 
-No household retailer login is needed, or supported. Set these in your
-Railway project settings. `APP_ENV=production` is baked
-into the `Dockerfile` and doesn't need to be set separately — it's what
-arms the fail-fast checks below.
+No household retailer login is needed, or supported. Set the secrets in
+`deploy/vps/.env` on the server (start from `deploy/vps/env.example`); the
+compose file sets the rest. `APP_ENV=production` is baked into the
+`Dockerfile` and doesn't need to be set separately — it's what arms the
+fail-fast checks below.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `DATABASE_URL` | Yes | PostgreSQL connection URL (auto-injected by Railway Postgres plugin). |
+| `POSTGRES_PASSWORD` | Yes | Password for the bundled Postgres. The compose file builds `DATABASE_URL` from it. |
+| `DATABASE_URL` | Set by compose | PostgreSQL connection URL. |
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude-powered features. |
 | `RUBOTPAUL_SHARED_SECRET` | Yes (OpenClaw API) | HMAC secret for `/api/v1` bearer tokens; must match RubotPaul's copy. |
 | `FLASK_SECRET_KEY` | Yes (web) | Stable secret key for Flask sessions (generate once, reuse). |
-| `PORT` | Auto | Injected by Railway for the web process. |
+| `PORT` | No | Port gunicorn binds inside the container (default 8000). |
 | `TAILNET_GUARD_ENABLED` | No (defaults secure) | Kill switch for the network boundary guard (below); the guard is active unless explicitly set to `false`/`0`/`no` (case-insensitive). |
-| `TAILNET_GUARD_ALLOWED_CIDRS` | No (defaults secure) | Comma-separated CIDR allow-list for the network boundary guard (below); replaces (does not extend) the default `127.0.0.0/8,::1/128,100.64.0.0/10`. An explicitly-empty value trusts nothing (full lockout, logged at startup) — delete the variable to restore defaults. |
+| `TAILNET_GUARD_ALLOWED_CIDRS` | No (defaults secure) | Comma-separated CIDR allow-list for the network boundary guard (below); replaces (does not extend) the default `127.0.0.0/8,::1/128,100.64.0.0/10`. The compose file sets it to loopback plus its own network's gateway. An explicitly-empty value trusts nothing (full lockout, logged at startup) — delete the variable to restore defaults. |
 
 ### Network boundary guard (tailnet-only)
 
@@ -1087,10 +1100,9 @@ allow-list of CIDR ranges.
 - **No forwarded-header trust.** Admission is keyed only on
   `request.remote_addr`; the guard never trusts `X-Forwarded-For` (or any
   other client-supplied header), and Werkzeug's `ProxyFix` must never be
-  added. Railway's edge is a shared, multi-tenant proxy, so any header it
-  forwards from the original client is attacker-controlled input — trusting
-  it would let a public request simply set `X-Forwarded-For: 127.0.0.1` and
-  walk back through the hole this guard exists to close.
+  added. A forwarded header is whatever the client chose to send —
+  trusting it would let a request simply set `X-Forwarded-For: 127.0.0.1`
+  and walk back through the hole this guard exists to close.
 - **`TAILNET_GUARD_ENABLED`** — kill switch, read once at app-creation time.
   The guard is active unless explicitly set to `false`/`0`/`no`
   (case-insensitive); unset means enabled (fail-closed by default).
@@ -1102,8 +1114,7 @@ allow-list of CIDR ranges.
   excluded from the default so a misconfigured office/home LAN is never
   accidentally trusted.
   - **Blank is not unset.** Setting the variable to an *empty string*
-    (e.g. clearing the value in the Railway UI instead of deleting the
-    variable) is a legitimate "trust nothing" configuration: every
+    (e.g. `TAILNET_GUARD_ALLOWED_CIDRS=` with nothing after it) is a legitimate "trust nothing" configuration: every
     non-health request is rejected, including loopback and the tailnet.
     This fails closed, and the app logs a startup warning
     (`network_guard_empty_allowlist`) so the lockout is loud rather than
@@ -1120,9 +1131,8 @@ allow-list of CIDR ranges.
     such peers get IPv4 CIDR semantics (this widens availability only —
     a mapped public address is still rejected).
 - **Health check exemption.** `/health` and `/healthz` are always exempt
-  (matched by Flask endpoint name, not path) so Railway's own health
-  checks — which arrive from Railway's infrastructure, not the tailnet —
-  keep working. This is intentional: both endpoints expose only
+  (matched by Flask endpoint name, not path) so a platform's or Docker's
+  health check keeps working wherever it comes from. This is intentional: both endpoints expose only
   status/DB-connectivity information.
 - **Rejection behavior.** Requests from outside the allow-list receive a
   `403`: a JSON `{"error": "forbidden"}` body for `/api/*` paths, an HTML
@@ -1138,28 +1148,12 @@ allow-list of CIDR ranges.
 #### Verifying the boundary on the live deployment
 
 The guard's correctness rests on one assumption unit tests cannot prove:
-that `request.remote_addr`, as seen by gunicorn on Railway's specific
-proxy/sidecar topology, actually distinguishes tailnet peers from
-public-edge traffic. **Verify this once against the real deployment
-before relying on the guard:**
-
-1. Deploy and check the deploy logs for the startup line
-   `network_guard_enabled allowed_cidrs=127.0.0.0/8,::1/128,100.64.0.0/10`
-   (confirms which allow-list the running process resolved).
-2. From a device on the tailnet, load the dashboard and hit
-   `/api/v1/inventory` with a valid bearer token — both must succeed. If
-   they 403 instead, check the logs for `network_guard_rejected` lines:
-   the logged `remote_addr` tells you what address the Tailscale
-   sidecar/tailnet hop actually presents (e.g. loopback if the sidecar
-   proxies via localhost, or a `100.64.0.0/10` address) so you can
-   confirm or correct the allow-list.
-3. While the Railway public domain is still attached, request the
-   dashboard from a non-tailnet network — it must return 403, and the
-   logs must show `network_guard_rejected` with the public-edge
-   `remote_addr`. If public traffic is *not* rejected, the logged
-   address reveals which allowed range it incidentally lands in.
-4. Then remove the public domain (Quick start step 6 below) so the
-   guard is defense-in-depth rather than the only line.
+that `request.remote_addr`, as gunicorn sees it on the real server, is the
+address the allow-list names. On the self-hosted deployment a request to
+the loopback-published port arrives from the compose network's gateway.
+**Verify this once on first deploy;** the runbook's
+[step 5](docs/operations/vps-deployment.md#first-deploy) is that check, and
+step 7 confirms nothing answers on the server's public address.
 
 **Rate limiting:** flask-limiter is deliberately deferred. With the
 fail-closed tailnet boundary above, public HMAC brute-forcing of `/api/v1`
@@ -1283,18 +1277,10 @@ See `.env.example` for the full variable list and comments.
 
 ### Quick start
 
-1. Connect your Railway project to this GitHub repo (Railway detects and
-   builds the `Dockerfile` automatically).
-2. Add a PostgreSQL plugin (provides `DATABASE_URL` automatically).
-3. Set the required environment variables above.
-4. Railway auto-deploys on push to `main`; each deploy migrates the
-   schema before serving traffic (see above).
-5. Attach the Railway service to your Tailscale tailnet so RubotPaul can reach
-   `/api/v1` privately.
-6. In the Railway service's Settings -> Networking, remove the default
-   public domain so the app is reachable only through the Tailscale
-   sidecar/tailnet. The in-code network boundary guard above is
-   defense-in-depth, not a substitute for removing the public domain.
+Follow [`docs/operations/vps-deployment.md`](docs/operations/vps-deployment.md).
+In short: write `deploy/vps/.env`, run `docker compose up --detach --build`
+in `deploy/vps`, confirm the guard's allow-list from the logs, then
+`sudo tailscale serve --bg 8000`.
 
 ## License
 
