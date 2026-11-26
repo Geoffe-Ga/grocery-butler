@@ -52,6 +52,7 @@ from grocery_butler.household_items import (
     HouseholdItemStore,
     ItemNotFoundError,
     MergeError,
+    TargetIncompleteError,
 )
 from grocery_butler.idempotency import (
     ClaimOutcome,
@@ -138,6 +139,7 @@ _DOMAIN_ERRORS: dict[type[Exception], tuple[int, str]] = {
     ItemNotFoundError: (404, "item_not_found"),
     AliasConflictError: (409, "alias_conflict"),
     MergeError: (409, "merge_not_allowed"),
+    TargetIncompleteError: (400, "target_incomplete"),
     MemberExistsError: (409, "member_exists"),
     MemberNotFoundError: (404, "member_not_found"),
     InvalidMemberKeyError: (400, "invalid_member_key"),
@@ -729,6 +731,8 @@ def update_item(item_id: int) -> JsonResult:
     """
     changes = _ItemChanges.model_validate(_body())
     item = HouseholdItemStore(_db_path()).update(item_id, changes, actor=g.actor)
+    # A new policy can raise, approve or withdraw the item's need (ADR 0017).
+    ReplenishmentNeeds(_db_path()).sync_item(item.id)
     return _item_payload(item, detailed=True), 200
 
 

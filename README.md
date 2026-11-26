@@ -873,6 +873,23 @@ since. Delete removes every row and needs a typed phrase. The runbook, what
 is retained and who else handles the data are in
 [`docs/operations/data-lifecycle.md`](docs/operations/data-lifecycle.md).
 
+**Staples and policies ([ADR 0017](docs/adr/0017-staple-policies-decide-what-may-put-an-item-on-a-plan.md)).**
+Each household item can carry one policy, in plain words:
+
+| Policy | Meaning |
+|--------|---------|
+| `always_keep` | When it runs low it goes straight onto the next plan. Nobody is asked. |
+| `replenish_when_low` | When it runs low it is suggested, and a member approves. Every pantry staple starts here. |
+| `meals_only` | Bought only when a planned meal needs it. Running out is not a reason to buy it. |
+| `never_suggest` | Nothing automatic proposes it. A recipe that uses it says so on the plan instead of adding it. |
+
+No quantity is needed for any of them. An item may also have a target
+amount (say, 2 bags), which becomes the amount on the plan when nothing else
+states one, and a cadence hint. A member can always ask for an item by name,
+whatever its policy. Set a policy with `PATCH /api/v2/items/{id}`; the
+dashboard's pantry page still adds and removes staples, which sets and
+clears `replenish_when_low`.
+
 **Shopping plans ([ADR 0011](docs/adr/0011-versioned-deterministic-shopping-plans.md)).**
 `grocery_butler/shopping_plans.py` builds the plan: one line per household
 item, with every reason it is there. It is built by plain code from the needs

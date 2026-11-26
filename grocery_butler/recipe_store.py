@@ -16,9 +16,11 @@ from grocery_butler.models import (
     BrandMatchType,
     BrandPreference,
     BrandPreferenceType,
+    HouseholdItemUpdate,
     Ingredient,
     IngredientCategory,
     ParsedMeal,
+    StaplePolicy,
     coerce_category_optional,
 )
 
@@ -421,12 +423,21 @@ class RecipeStore:
         """
         display_name = ingredient.strip().title()
         ingredient_lower = ingredient.strip().lower()
-        item = HouseholdItemStore(self._db_path).resolve_or_create(
+        items = HouseholdItemStore(self._db_path)
+        item = items.resolve_or_create(
             ingredient,
             actor=SYSTEM_ACTOR,
             display_name=display_name,
             category=coerce_category_optional(category),
         )
+        if item.staple_policy is None:
+            # A staple is "replenish when low" unless the household chose a
+            # more specific policy for the item (ADR 0017).
+            items.update(
+                item.id,
+                HouseholdItemUpdate(staple_policy=StaplePolicy.REPLENISH_WHEN_LOW),
+                actor=SYSTEM_ACTOR,
+            )
         conn = self._connect()
         try:
             cursor = conn.execute(
@@ -445,17 +456,39 @@ class RecipeStore:
             conn.close()
 
     def remove_pantry_staple(self, staple_id: int) -> None:
-        """Remove a pantry staple by ID.
+        """Remove a pantry staple.
+
+        The item stops being "replenish when low" once no staple row names
+        it. A policy the household set on the item itself (always keep,
+        meals only, never suggest) is left alone.
 
         Args:
             staple_id: Database ID of staple to remove.
         """
         conn = self._connect()
         try:
+            row = conn.execute(
+                "SELECT item_id FROM pantry_staples WHERE id = ?", (staple_id,)
+            ).fetchone()
             conn.execute("DELETE FROM pantry_staples WHERE id = ?", (staple_id,))
             conn.commit()
+            item_id = row["item_id"] if row is not None else None
+            still_listed = (
+                item_id is not None
+                and conn.execute(
+                    "SELECT 1 FROM pantry_staples WHERE item_id = ?", (item_id,)
+                ).fetchone()
+            )
         finally:
             conn.close()
+        if item_id is None or still_listed:
+            return
+        items = HouseholdItemStore(self._db_path)
+        item = items.canonical(item_id)
+        if item.staple_policy is StaplePolicy.REPLENISH_WHEN_LOW:
+            items.update(
+                item.id, HouseholdItemUpdate(staple_policy=None), actor=SYSTEM_ACTOR
+            )
 
     def is_pantry_staple(self, ingredient: str) -> bool:
         """Check if an ingredient is a pantry staple.
