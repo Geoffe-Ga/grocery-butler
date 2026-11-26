@@ -221,7 +221,8 @@ def _absorb_line(target: ShoppingListItem, extra: ShoppingListItem) -> ShoppingL
     Returns:
         A new line with the summed quantity and both lines' reasons. A
         search term someone chose (one that differs from the bare
-        ingredient name) is kept in preference to a default one.
+        ingredient name) is kept in preference to a default one, and a
+        price estimate on either line is kept.
     """
     chosen = target.search_term.lower() != target.ingredient.lower()
     return target.model_copy(
@@ -230,6 +231,11 @@ def _absorb_line(target: ShoppingListItem, extra: ShoppingListItem) -> ShoppingL
             + _quantity_in(extra.quantity, extra.unit, target.unit),
             "from_meals": _union(target.from_meals, extra.from_meals),
             "search_term": target.search_term if chosen else extra.search_term,
+            "estimated_price": (
+                extra.estimated_price
+                if target.estimated_price is None
+                else target.estimated_price
+            ),
         }
     )
 

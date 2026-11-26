@@ -1703,6 +1703,34 @@ class TestMergeDuplicateLines:
         assert merged[0].search_term == "oat milk barista"
         assert merged[0].quantity == 2.0
 
+    @pytest.mark.parametrize(
+        ("first_price", "second_price", "expected"),
+        [(None, 4.5, 4.5), (3.0, 4.5, 3.0), (3.0, None, 3.0), (None, None, None)],
+    )
+    def test_a_price_on_either_line_survives_the_merge(
+        self,
+        first_price: float | None,
+        second_price: float | None,
+        expected: float | None,
+    ) -> None:
+        """The surviving line keeps its own price, or takes the other's."""
+        first = ShoppingListItem(
+            ingredient="milk",
+            quantity=1.0,
+            unit=Unit.GAL,
+            category=IngredientCategory.DAIRY,
+            search_term="milk",
+            from_meals=["latte"],
+            estimated_price=first_price,
+        )
+        second = first.model_copy(
+            update={"from_meals": ["restock"], "estimated_price": second_price}
+        )
+
+        merged = merge_duplicate_lines([first, second])
+
+        assert merged[0].estimated_price == expected
+
     def test_input_lines_are_not_mutated(self) -> None:
         """Merging returns new lines."""
         first = ShoppingListItem(
