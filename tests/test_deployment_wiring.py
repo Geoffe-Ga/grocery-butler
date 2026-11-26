@@ -105,7 +105,7 @@ class TestSingleCanonicalDeployPath:
     """The Dockerfile is the only deploy path; the Heroku Procfile is gone."""
 
     def test_procfile_absent(self) -> None:
-        """Procfile is deleted; Railway never reads it, so it must not exist."""
+        """Procfile is deleted; nothing reads it, so it must not exist."""
         assert not PROCFILE.exists()
 
 
@@ -351,7 +351,7 @@ class TestAppFactoryDatabaseWiring:
 
     The production gunicorn invocation (``gunicorn
     'grocery_butler.app:create_app()'``) calls ``create_app()`` with no
-    arguments, so the factory itself must read the Railway-provided
+    arguments, so the factory itself must read the deployment-provided
     ``DATABASE_URL`` (or ``DATABASE_PATH``) environment variable. Without
     this, every deploy silently falls back to the ``"mealbot.db"`` default,
     writing to ephemeral SQLite instead of the persistent Postgres database
