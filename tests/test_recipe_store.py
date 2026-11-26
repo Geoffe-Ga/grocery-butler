@@ -778,3 +778,36 @@ class TestConstructorDoesNotMigrate:
         RecipeStore(str(fresh))
 
         assert not fresh.exists()
+
+
+class TestLegacyBlankIngredientRows:
+    """A nameless row from an old database does not hide the recipe (#198)."""
+
+    def test_a_blank_ingredient_row_is_left_out_of_the_recipe(
+        self,
+        store: RecipeStore,
+        sample_meal: ParsedMeal,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The recipe still loads, with every ingredient that has a name."""
+        recipe_id = store.save_recipe(sample_meal)
+        conn = get_connection(store._db_path)
+        try:
+            conn.execute(
+                "INSERT INTO recipe_ingredients (recipe_id, ingredient, quantity,"
+                " unit, category, quantity_per_serving)"
+                " VALUES (?, '  ', 1, 'each', 'other', 1)",
+                (recipe_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with caplog.at_level("WARNING"):
+            loaded = store.find_recipe(sample_meal.name)
+
+        assert loaded is not None
+        names = [i.ingredient for i in loaded.purchase_items + loaded.pantry_items]
+        expected = sample_meal.purchase_items + sample_meal.pantry_items
+        assert sorted(names) == sorted(i.ingredient for i in expected)
+        assert "Skipped an ingredient row with no name" in caplog.text

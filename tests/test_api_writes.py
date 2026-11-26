@@ -538,6 +538,62 @@ def test_recipes_save_rejects_invalid_ingredients(
     assert response.status_code == 400
 
 
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_recipes_save_names_the_blank_ingredient(
+    client: FlaskClient,
+    auth_headers: AuthHeaderFactory,
+    recipe_store: RecipeStore,
+    blank: str,
+) -> None:
+    """A blank name is a 400 that says which ingredient, and saves nothing."""
+    ingredients = [
+        {"ingredient": "penne", "quantity": 1, "unit": "lb", "category": "pantry_dry"},
+        {"ingredient": blank, "quantity": 1, "unit": "lb", "category": "other"},
+    ]
+    before = recipe_store.list_recipes()
+
+    with patch.dict(os.environ, SECRET_ENV):
+        response = _post(
+            client,
+            "/api/v1/recipes/save",
+            auth_headers,
+            _recipe_body(ingredients=ingredients),
+        )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": "invalid ingredient 2: An ingredient needs a name."
+    }
+    assert recipe_store.list_recipes() == before
+
+
+def test_recipes_save_error_does_not_echo_the_payload(
+    client: FlaskClient, auth_headers: AuthHeaderFactory
+) -> None:
+    """The reason is the validator's own words, never the caller's input."""
+    ingredients = [
+        {
+            "ingredient": "penne",
+            "quantity": "two-and-a-bit",
+            "unit": "lb",
+            "category": "other",
+        }
+    ]
+
+    with patch.dict(os.environ, SECRET_ENV):
+        response = _post(
+            client,
+            "/api/v1/recipes/save",
+            auth_headers,
+            _recipe_body(ingredients=ingredients),
+        )
+
+    assert response.status_code == 400
+    error = response.get_json()["error"]
+    assert error.startswith("invalid ingredient 1: ")
+    assert "two-and-a-bit" not in error
+
+
 @pytest.mark.parametrize("servings", ["four", 0, -2, True])
 def test_recipes_save_rejects_bad_servings(
     client: FlaskClient, auth_headers: AuthHeaderFactory, servings: Any

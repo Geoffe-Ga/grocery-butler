@@ -7,6 +7,7 @@ with connection-per-operation pattern and WAL mode for concurrency.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,8 @@ from grocery_butler.models import (
 if TYPE_CHECKING:
     from grocery_butler.db.adapter import DatabaseConnection, DictRow
 
+
+logger = logging.getLogger(__name__)
 
 _ARTICLE_RE = re.compile(r"^(a|an|the)\s+", re.IGNORECASE)
 _POSSESSIVE_RE = re.compile(r"'s\b")
@@ -70,6 +73,14 @@ def _row_to_parsed_meal(
     purchase = []
     pantry = []
     for row in ingredient_rows:
+        if not str(row["ingredient"]).strip():
+            # Only a database older than the model's own check can hold
+            # one (issue #198). The rest of the recipe is still good.
+            logger.warning(
+                "Skipped an ingredient row with no name in recipe %r",
+                recipe_row["display_name"],
+            )
+            continue
         ing = Ingredient(
             ingredient=row["ingredient"],
             quantity=row["quantity"],

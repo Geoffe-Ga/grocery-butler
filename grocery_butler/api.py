@@ -301,10 +301,23 @@ def _parse_ingredient_payloads(raw_ingredients: Any) -> list[Ingredient]:
     """Validate raw ingredient payloads into Ingredient models, or abort 400."""
     if not isinstance(raw_ingredients, list) or not raw_ingredients:
         abort(400, description="name and ingredients required")
+    return [
+        _parse_ingredient_payload(position, item)
+        for position, item in enumerate(raw_ingredients, start=1)
+    ]
+
+
+def _parse_ingredient_payload(position: int, item: Any) -> Ingredient:
+    """Validate one ingredient payload, or abort 400 saying which and why.
+
+    The reason is pydantic's message, which describes the rule that failed
+    and never repeats the value that failed it.
+    """
     try:
-        return [Ingredient.model_validate(item) for item in raw_ingredients]
+        return Ingredient.model_validate(item)
     except ValidationError as exc:
-        abort(400, description=f"invalid ingredient: {exc.error_count()} error(s)")
+        reason = str(exc.errors()[0]["msg"]).removeprefix("Value error, ")
+        abort(400, description=f"invalid ingredient {position}: {reason}")
 
 
 def _parse_servings(body: dict[str, Any]) -> int:

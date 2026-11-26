@@ -37,6 +37,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Printed when a name argument is blank. The models refuse a blank name too
+# (issue #198); this turns that refusal into one line instead of a traceback.
+_BLANK_NAME_ERROR = "Error: An item needs a name. Give one, for example: milk"
+
 
 # ------------------------------------------------------------------
 # Config + dependency bootstrap
@@ -374,6 +378,9 @@ def _handle_stock(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        if not item_name.strip():
+            print(_BLANK_NAME_ERROR, file=sys.stderr)
+            return 1
         item = InventoryItem(
             ingredient=item_name.lower(),
             display_name=item_name.strip().title(),
@@ -550,6 +557,9 @@ def _handle_pantry(args: argparse.Namespace) -> int:
                 f"Error: Invalid category '{category_str}'. Valid: {valid}",
                 file=sys.stderr,
             )
+            return 1
+        if not ingredient_name.strip():
+            print(_BLANK_NAME_ERROR, file=sys.stderr)
             return 1
         store.add_pantry_staple(ingredient_name, category_str)
         print(f"Added '{ingredient_name}' as a pantry staple.")

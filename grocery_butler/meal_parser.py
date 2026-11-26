@@ -56,25 +56,48 @@ def _build_stub_meal(name: str, servings: int) -> ParsedMeal:
     )
 
 
-def _parse_ingredient(data: dict[str, object]) -> Ingredient:
-    """Parse a single ingredient dict into an Ingredient model.
+def _parse_ingredient(data: object) -> Ingredient | None:
+    """Parse a single ingredient entry into an Ingredient model.
 
     Args:
-        data: Dictionary with ingredient fields.
+        data: One entry of an ingredient list from Claude's JSON.
 
     Returns:
-        Validated Ingredient instance.
+        The ingredient, or ``None`` if the entry is not an object or has
+        no name. A nameless ingredient can't be bought or stocked, so it
+        is dropped here and the meal is flagged for a person to check.
     """
+    if not isinstance(data, dict):
+        return None
+    raw_name = data.get("ingredient")
+    name = raw_name if isinstance(raw_name, str) else ""
+    if not name.strip():
+        return None
     raw_quantity = data.get("quantity", 0)
     quantity = float(raw_quantity) if isinstance(raw_quantity, (int, float)) else 0.0
     return Ingredient(
-        ingredient=str(data.get("ingredient", "")),
+        ingredient=name,
         quantity=quantity,
         unit=parse_unit(str(data.get("unit", ""))),
         category=coerce_category(data.get("category", "other")),
         notes=str(data.get("notes", "")),
         is_pantry_item=bool(data.get("is_pantry_item", False)),
     )
+
+
+def _parse_ingredients(raw: object) -> tuple[list[Ingredient], int]:
+    """Parse an ingredient list, counting the entries that had to go.
+
+    Args:
+        raw: The ``purchase_items`` or ``pantry_items`` value.
+
+    Returns:
+        The usable ingredients, and how many entries were dropped.
+    """
+    entries = raw if isinstance(raw, list) else []
+    parsed = [_parse_ingredient(entry) for entry in entries]
+    kept = [ingredient for ingredient in parsed if ingredient is not None]
+    return kept, len(parsed) - len(kept)
 
 
 def _parse_meal_from_dict(data: dict[str, object]) -> ParsedMeal:
@@ -84,25 +107,24 @@ def _parse_meal_from_dict(data: dict[str, object]) -> ParsedMeal:
         data: Dictionary with meal fields from Claude's JSON response.
 
     Returns:
-        Validated ParsedMeal instance.
+        Validated ParsedMeal instance. If any ingredient had no name it
+        is left out and the meal needs confirmation.
     """
-    purchase_raw = data.get("purchase_items", [])
-    pantry_raw = data.get("pantry_items", [])
-    purchase_list: list[dict[str, object]] = (
-        purchase_raw if isinstance(purchase_raw, list) else []
-    )
-    pantry_list: list[dict[str, object]] = (
-        pantry_raw if isinstance(pantry_raw, list) else []
-    )
+    name = str(data.get("name", ""))
+    purchase_items, purchase_dropped = _parse_ingredients(data.get("purchase_items"))
+    pantry_items, pantry_dropped = _parse_ingredients(data.get("pantry_items"))
+    dropped = purchase_dropped + pantry_dropped
+    if dropped:
+        logger.warning("Dropped %d ingredients with no name from %r", dropped, name)
     raw_servings = data.get("servings", 4)
     servings = int(raw_servings) if isinstance(raw_servings, (int, float)) else 4
     return ParsedMeal(
-        name=str(data.get("name", "")),
+        name=name,
         servings=servings,
         known_recipe=bool(data.get("known_recipe", False)),
-        needs_confirmation=bool(data.get("needs_confirmation", True)),
-        purchase_items=[_parse_ingredient(i) for i in purchase_list],
-        pantry_items=[_parse_ingredient(i) for i in pantry_list],
+        needs_confirmation=bool(data.get("needs_confirmation", True)) or dropped > 0,
+        purchase_items=purchase_items,
+        pantry_items=pantry_items,
     )
 
 

@@ -11,7 +11,7 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
-from grocery_butler.db import init_db
+from grocery_butler.db import get_connection, init_db
 from grocery_butler.models import (
     IngredientCategory,
     InventoryItem,
@@ -999,3 +999,37 @@ class TestConstructorDoesNotMigrate:
         PantryManager(str(fresh))
 
         assert not fresh.exists()
+
+
+class TestLegacyBlankInventoryRows:
+    """A nameless row from an old database does not break the inventory (#198)."""
+
+    @pytest.fixture()
+    def blank_row(self, db_path: str, manager: PantryManager) -> None:
+        """Track milk, then plant a low row with a blank name beside it."""
+        manager.add_item(InventoryItem(ingredient="milk", display_name="Milk"))
+        manager.update_status("milk", InventoryStatus.LOW)
+        conn = get_connection(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO household_inventory (ingredient, display_name, status)"
+                " VALUES (' ', 'Unnamed', 'low')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    @pytest.mark.usefixtures("blank_row")
+    def test_inventory_lists_the_named_items(self, manager: PantryManager) -> None:
+        """The list holds milk and leaves the nameless row out."""
+        assert [item.ingredient for item in manager.get_inventory()] == ["milk"]
+
+    @pytest.mark.usefixtures("blank_row")
+    def test_restock_queue_lists_the_named_items(self, manager: PantryManager) -> None:
+        """The restock queue does the same."""
+        assert [item.ingredient for item in manager.get_restock_queue()] == ["milk"]
+
+    @pytest.mark.usefixtures("blank_row")
+    def test_a_blank_name_looks_up_nothing(self, manager: PantryManager) -> None:
+        """Asking for the nameless row finds no item rather than failing."""
+        assert manager.get_item(" ") is None
