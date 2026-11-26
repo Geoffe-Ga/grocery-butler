@@ -441,6 +441,9 @@ cd grocery-butler
 # Install dependencies (runtime + dev)
 pip install -r requirements-dev.txt
 
+# Install the Chromium the browser tests drive (tests/browser, ADR 0022)
+./scripts/install-browser.sh
+
 # Install pre-commit hooks
 pre-commit install
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/test.sh - Run tests with Pytest
-# Usage: ./scripts/test.sh [--unit|--integration|--e2e|--all] [--coverage]
+# Usage: ./scripts/test.sh [--unit|--integration|--e2e|--browser|--all] [--coverage]
 #                          [--mutation] [--verbose] [--help]
 
 set -euo pipefail
@@ -30,6 +30,10 @@ while [[ $# -gt 0 ]]; do
             TEST_TYPE="e2e"
             shift
             ;;
+        --browser)
+            TEST_TYPE="browser"
+            shift
+            ;;
         --all)
             TEST_TYPE="all"
             shift
@@ -56,6 +60,7 @@ OPTIONS:
     --unit          Run unit tests only (default)
     --integration   Run integration tests only
     --e2e           Run end-to-end tests only
+    --browser       Run the browser tests only (needs ./scripts/install-browser.sh)
     --all           Run all test types
     --coverage      Generate coverage report
     --mutation      Run mutation tests
@@ -95,7 +100,7 @@ PYTEST_ARGS=(-v)
 case "$TEST_TYPE" in
     unit)
         echo "=== Running Unit Tests ==="
-        PYTEST_ARGS+=(-m "not integration and not e2e")
+        PYTEST_ARGS+=(-m "not integration and not e2e and not browser")
         ;;
     integration)
         echo "=== Running Integration Tests ==="
@@ -104,6 +109,10 @@ case "$TEST_TYPE" in
     e2e)
         echo "=== Running End-to-End Tests ==="
         PYTEST_ARGS+=(-m "e2e")
+        ;;
+    browser)
+        echo "=== Running Browser Tests ==="
+        PYTEST_ARGS+=(-m "browser")
         ;;
     all)
         echo "=== Running All Tests ==="
