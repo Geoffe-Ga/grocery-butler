@@ -53,6 +53,14 @@ def _row_to_pending_action(row: DictRow) -> PendingAction:
     )
 
 
+class VanishedActionError(RuntimeError):
+    """Raised when a pending action can't be read back right after its insert."""
+
+    def __init__(self, action_id: str) -> None:
+        """Name the action that vanished."""
+        super().__init__(f"pending action {action_id} vanished after insert")
+
+
 class PendingActionsStore:
     """CRUD operations for the pending_actions staging table."""
 
@@ -95,7 +103,8 @@ class PendingActionsStore:
 
         Raises:
             IntegrityError: If ``action_id`` already exists.
-            RuntimeError: If the inserted row cannot be read back.
+            VanishedActionError: If the inserted row cannot be read back
+                (a RuntimeError).
         """
         conn = self._connect()
         try:
@@ -118,7 +127,7 @@ class PendingActionsStore:
             conn.close()
         inserted = self.get_pending_action(action_id)
         if inserted is None:
-            raise RuntimeError(f"pending action {action_id} vanished after insert")
+            raise VanishedActionError(action_id)
         return inserted
 
     def get_pending_action(self, action_id: str) -> PendingAction | None:

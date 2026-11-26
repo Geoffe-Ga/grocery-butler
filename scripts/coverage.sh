@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=scripts/activate-venv.sh
 source "$SCRIPT_DIR/activate-venv.sh"
 
 HTML_REPORT=false
@@ -35,7 +36,7 @@ Run tests with coverage report.
 
 OPTIONS:
     --html      Generate HTML coverage report
-    --xml       Generate XML coverage report (for CI)
+    --xml       Also write coverage.xml
     --verbose   Show detailed output
     --help      Display this help message
 
@@ -74,6 +75,7 @@ PYTEST_ARGS=(
     --cov-branch
     --cov-report=term-missing
     --cov-fail-under=90
+    --cov-report=json
 )
 
 # Add HTML report if requested
@@ -85,14 +87,21 @@ fi
 # Add XML report if requested
 if $XML_REPORT; then
     PYTEST_ARGS+=(--cov-report=xml)
-    echo "XML report will be generated as coverage.xml"
 fi
+
+# coverage.json is always written: the branch-coverage check below reads it.
 
 # Run tests with coverage
 pytest "${PYTEST_ARGS[@]}" tests/ || {
     echo "✗ Coverage below threshold" >&2
     exit 1
 }
+
+# Branch coverage has its own floor, checked on its own: --cov-fail-under above
+# checks the combined number. The checker uses only the standard library, so
+# any python3 works; activate-venv.sh puts the venv's bin first on PATH, and CI
+# runs it under setup-python's interpreter, the one pytest ran under.
+python3 "$SCRIPT_DIR/check_branch_coverage.py" coverage.json || exit 1
 
 echo "✓ Coverage threshold met"
 

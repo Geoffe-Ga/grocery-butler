@@ -7,6 +7,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=scripts/activate-venv.sh
 source "$SCRIPT_DIR/activate-venv.sh"
 
 TEST_TYPE="unit"
@@ -134,12 +135,9 @@ echo "✓ Tests passed"
 # Run mutation tests if requested
 if $MUTATION; then
     echo "=== Running Mutation Tests ==="
-    if command -v mutmut &> /dev/null; then
-        mutmut run || { echo "✗ Mutation tests failed" >&2; exit 1; }
-        echo "✓ Mutation tests passed"
-    else
-        echo "Warning: mutmut not installed, skipping mutation tests" >&2
-    fi
+    command -v mutmut >/dev/null || { echo "✗ mutmut not installed: pip install -r requirements-dev.txt" >&2; exit 1; }
+    mutmut run || { echo "✗ Mutation tests failed" >&2; exit 1; }
+    echo "✓ Mutation tests passed"
 fi
 
 exit 0

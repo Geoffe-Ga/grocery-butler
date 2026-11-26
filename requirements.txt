@@ -1,10 +1,14 @@
-# Runtime dependencies
-discord.py>=2.3.0
-anthropic>=0.40.0
-flask>=3.1.3
-werkzeug>=3.1.6
-aiosqlite>=0.19.0
-pydantic>=2.5.0
-gunicorn>=22.0.0
-psycopg2-binary>=2.9.0
-python-dotenv>=1.0.0
+# Runtime dependencies, pinned exactly.
+#
+# The Dockerfile, CI and every laptop install these same versions, so a deploy
+# runs exactly what was tested. Upgrade deliberately: bump the pin here, run
+# ./scripts/check-all.sh, and commit the result.
+discord.py==2.7.1
+anthropic==2.14.0
+flask==3.1.3
+werkzeug==3.1.9
+aiosqlite==0.22.1
+pydantic==2.14.4
+gunicorn==27.0.1
+psycopg2-binary==2.9.13
+python-dotenv==1.2.4

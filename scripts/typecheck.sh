@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=scripts/activate-venv.sh
 source "$SCRIPT_DIR/activate-venv.sh"
 
 VERBOSE=false
@@ -54,16 +55,11 @@ fi
 
 echo "=== Type Checking (MyPy) ==="
 
-if command -v mypy &> /dev/null; then
-    mypy grocery_butler/ || {
-        echo "✗ Type checking failed" >&2
-        exit 1
-    }
-    echo "✓ Type checking passed"
-else
-    echo "Warning: mypy not installed, skipping type checking" >&2
-    echo "Install with: pip install mypy" >&2
-    exit 0
-fi
+command -v mypy >/dev/null || { echo "✗ mypy not installed: pip install -r requirements-dev.txt" >&2; exit 1; }
 
+mypy grocery_butler/ || {
+    echo "✗ Type checking failed" >&2
+    exit 1
+}
+echo "✓ Type checking passed"
 exit 0

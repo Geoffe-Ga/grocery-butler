@@ -1,0 +1,12 @@
+# Paths graphify never reads when it builds the code graph
+# (scripts/graph/build.sh). graphify also honors .gitignore.
+.git/
+.venv/
+venv/
+.claude/
+graphify-out/
+mutants/
+htmlcov/
+build/
+dist/
+**/.env*
