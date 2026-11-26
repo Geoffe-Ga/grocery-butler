@@ -615,9 +615,10 @@ The contract is [`docs/api/v2.md`](docs/api/v2.md); the reasons are in
   until a member confirms, corrects or rejects each proposal, and a review is
   applied all at once or not at all.
 - **Live today:** household members; household items with their aliases,
-  merges, current state and history; observations a member states directly;
-  observation batches; replenishment needs; shopping plans; and the full
-  household export. Handoffs and receipts arrive with their own work.
+  merges, policies, current state and history; observations a member states
+  directly; observation batches; replenishment needs; shopping plans; handoffs
+  to an outside service behind an approval; receipts; operational metrics;
+  and the full household export.
 
 ### Discord Bot Commands
 
@@ -872,6 +873,19 @@ schema the backup was taken at, loads it, and applies the migrations written
 since. Delete removes every row and needs a typed phrase. The runbook, what
 is retained and who else handles the data are in
 [`docs/operations/data-lifecycle.md`](docs/operations/data-lifecycle.md).
+
+**Receipts and reconciliation ([ADR 0018](docs/adr/0018-receipts-are-reviewed-evidence.md)).**
+`grocery_butler/reconciliation.py` records what actually came home. A
+handoff is only a link, and nothing comes back from the retailer, so the
+household says what happened: a receipt whose lines are each `ordered`,
+`received`, `substituted` or `refunded`. A receipt is a proposal. Nothing
+changes until a member reviews it, confirming or skipping every line, and
+the review applies whole or not at all. A received item becomes `on_hand`
+with source `receipt` and its need is marked received. A refund puts the
+item back on the next plan. For a substitution the member says whether it
+will do. A line naming an item we don't know waits in review and never
+creates one. To reconcile by hand, tell OpenClaw what arrived, or
+`POST /api/v2/receipts` and then `POST /api/v2/receipts/{id}/resolve`.
 
 **Staples and policies ([ADR 0017](docs/adr/0017-staple-policies-decide-what-may-put-an-item-on-a-plan.md)).**
 Each household item can carry one policy, in plain words:
@@ -1155,6 +1169,9 @@ written: such fields are replaced with `[redacted]`.
 | `handoff.drafted` | A handoff was drafted for approval | `envelope_id`, `adapter`, `plan_version`, `actor` |
 | `handoff.approved`, `handoff.rejected` | A member approved or turned down a handoff | `envelope_id`, `actor` |
 | `handoff.attempt` | An approved handoff was carried out | `attempt_id`, `envelope_id`, `adapter`, `plan_version`, `status`, `error`, `retryable` |
+| `receipt.submitted` | A receipt was stored for review | `receipt_id`, `attempt_id`, `lines`, `needs_review`, `actor` |
+| `receipt.resolved` | A member reviewed a receipt | `receipt_id`, `attempt_id`, `confirmed`, `skipped`, `actor` |
+| `receipt.rejected` | A receipt was thrown away | `receipt_id`, `actor` |
 | `audit.count_failed` | A counter could not be advanced | `counted`, `error` |
 
 `capture_session` (`batch-<id>`) is the same on every event about one
@@ -1168,7 +1185,7 @@ batch, across the requests that submit and review it.
 | `adapter_failures` | Fulfillment handoffs that failed. |
 | `correction_rate` | How often a member had to correct a proposal. Rising means proposals are getting worse. |
 | `stale_inventory` | Items nobody has checked within their freshness window. |
-| `reconciliation_gaps` | Needs marked ordered over 3 days ago and never confirmed received. |
+| `reconciliation_gaps` | Needs marked ordered over 3 days ago and never confirmed received, plus handoffs that old with no confirmed receipt. |
 
 **Retries.** A model or adapter call that times out, loses its connection,
 or gets a 408, 429 or 5xx is tried up to three times, with pauses of 0.5 s

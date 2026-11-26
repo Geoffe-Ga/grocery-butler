@@ -386,6 +386,8 @@ Score reach, approval likelihood, economics, data rights, checkout support, main
 
 ### P2.3 Receipt and fulfillment reconciliation — L
 
+**Status (2026-11-26):** in progress. Manual, provider-neutral reconciliation is built ([ADR 0018](adr/0018-receipts-are-reviewed-evidence.md), #150): a receipt's lines are reviewed by a member before anything changes. Still to come: reading receipts from a photo or a forwarded email, and any authorized provider import.
+
 - Import receipt/order evidence from an authorized source or user upload.
 - Match fulfilled and substituted items to HouseholdItems.
 - Present ambiguities for review.

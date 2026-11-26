@@ -600,6 +600,74 @@ class TestReconciliationGaps:
         assert metrics.reconciliation_gaps() == 1
 
 
+class TestHandoffGaps:
+    """A handoff nobody reconciled is a gap too."""
+
+    def _handoff(self, db_path: str, clock: FakeClock) -> int:
+        """Create a handoff attempt for a one-item plan; return its id."""
+        from grocery_butler.fulfillment.handoffs import Handoffs
+        from grocery_butler.fulfillment.instacart.adapter import InstacartAdapter
+        from grocery_butler.fulfillment.instacart.transport import FakeTransport
+
+        item = HouseholdItemStore(db_path).resolve_or_create("oat milk", actor=ACTOR)
+        ReplenishmentNeeds(db_path, clock=clock).add_reason(
+            item.id, NeedReasonKind.MANUAL_REQUEST, source_key="test", actor=ACTOR
+        )
+        plan = ShoppingPlans(db_path, clock=clock).build([], actor=ACTOR)
+        adapters: dict[str, FulfillmentAdapter] = {
+            "instacart": InstacartAdapter(
+                FakeTransport.ok("https://example.invalid/l/gap"), clock=clock
+            )
+        }
+        handoffs = Handoffs(db_path, adapters.__getitem__, clock=clock)
+        draft = handoffs.draft(plan.version, "instacart", actor=ACTOR)
+        handoffs.approve(draft.id, draft.payload_hash, actor=ACTOR)
+        return handoffs.execute(draft.id, actor=ACTOR, idempotency_key="gap-0001").id
+
+    def test_an_unreconciled_handoff_becomes_a_gap_after_the_grace_period(
+        self, db_path: str, metrics: Metrics, clock: FakeClock
+    ) -> None:
+        """Fresh, it is waiting; past the grace period, it is a gap."""
+        self._handoff(db_path, clock)
+        fresh = metrics.reconciliation_gaps()
+
+        clock.now = NOW + RECONCILIATION_GRACE + dt.timedelta(minutes=1)
+
+        assert fresh == 0
+        assert metrics.reconciliation_gaps() == 1
+
+    def test_a_confirmed_receipt_closes_the_gap(
+        self, db_path: str, metrics: Metrics, clock: FakeClock
+    ) -> None:
+        """An open receipt doesn't close it; a confirmed one does."""
+        from grocery_butler.reconciliation import (
+            LineAction,
+            LineOutcome,
+            LineReview,
+            NewReceiptLine,
+            Reconciliations,
+        )
+
+        attempt_id = self._handoff(db_path, clock)
+        clock.now = NOW + RECONCILIATION_GRACE + dt.timedelta(minutes=1)
+        receipts = Reconciliations(db_path, clock=clock)
+        receipt = receipts.submit(
+            [NewReceiptLine(name="oat milk", outcome=LineOutcome.RECEIVED)],
+            submitted_by=ACTOR,
+            attempt_id=attempt_id,
+        )
+        while_open = metrics.reconciliation_gaps()
+
+        receipts.resolve(
+            receipt.id,
+            [LineReview(line_id=receipt.lines[0].id, action=LineAction.CONFIRM)],
+            actor=ACTOR,
+        )
+
+        assert while_open == 1
+        assert metrics.reconciliation_gaps() == 0
+
+
 class TestSnapshot:
     """All five metrics in one read."""
 

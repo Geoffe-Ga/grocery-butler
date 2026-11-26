@@ -1656,6 +1656,181 @@ class TestHandoffs:
         assert client.get("/api/v2/handoffs/attempts/1").status_code == 401
 
 
+class TestReceipts:
+    """What actually arrived, recorded on a member's confirmation (ADR 0018)."""
+
+    def _planned(self, api: Api, name: str) -> int:
+        """Request an item, build the plan and return the item id."""
+        item_id = _item(api, name)
+        api.call("POST", "/needs", {"item_id": item_id})
+        api.call("POST", "/plans", {})
+        return item_id
+
+    def _state(self, api: Api, item_id: int) -> str:
+        """Return what we believe about an item's stock."""
+        state: str = api.call("GET", f"/items/{item_id}").get_json()["state"]["state"]
+        return state
+
+    def test_submit_stores_a_receipt_and_changes_nothing(self, api: Api) -> None:
+        """A receipt is a proposal until a member confirms it."""
+        item_id = self._planned(api, "carrots")
+
+        response = api.call(
+            "POST",
+            "/receipts",
+            {
+                "lines": [
+                    {
+                        "name": "Carrots",
+                        "outcome": "received",
+                        "quantity": 2,
+                        "unit": "lb",
+                    },
+                    {"name": "Dragonfruit", "outcome": "received"},
+                ],
+                "evidence_ref": "photo-77",
+            },
+        )
+        receipt = response.get_json()
+
+        assert response.status_code == 201
+        assert receipt["status"] == "open"
+        assert receipt["submitted_by"].startswith("geoff@")
+        assert [line["item_id"] for line in receipt["lines"]] == [item_id, None]
+        assert [line["needs_review"] for line in receipt["lines"]] == [False, True]
+        assert self._state(api, item_id) == "unknown"
+        assert api.call("GET", f"/receipts/{receipt['id']}").get_json() == receipt
+        listed = api.call("GET", "/receipts", query="status=open").get_json()
+        assert [r["id"] for r in listed["receipts"]] == [receipt["id"]]
+
+    def test_resolve_puts_a_received_item_on_hand(self, api: Api) -> None:
+        """Confirming a received line is what changes the inventory and the need."""
+        item_id = self._planned(api, "carrots")
+        receipt = api.call(
+            "POST",
+            "/receipts",
+            {
+                "lines": [
+                    {"name": "carrots", "outcome": "received"},
+                    {"name": "Dragonfruit", "outcome": "received"},
+                ]
+            },
+        ).get_json()
+
+        response = api.call(
+            "POST",
+            f"/receipts/{receipt['id']}/resolve",
+            {
+                "reviews": [
+                    {"line_id": receipt["lines"][0]["id"], "action": "confirm"},
+                    {"line_id": receipt["lines"][1]["id"], "action": "skip"},
+                ]
+            },
+        )
+        resolved = response.get_json()
+        item = api.call("GET", f"/items/{item_id}").get_json()
+
+        assert response.status_code == 200
+        assert resolved["status"] == "confirmed"
+        assert [line["decision"] for line in resolved["lines"]] == [
+            "confirmed",
+            "skipped",
+        ]
+        assert item["state"]["state"] == "on_hand"
+        assert item["state"]["observation"]["source"] == "receipt"
+        assert item["open_need"] is None
+
+    def test_an_unknown_item_blocks_the_whole_review(self, api: Api) -> None:
+        """Nothing is written when a line can't be applied."""
+        item_id = self._planned(api, "carrots")
+        receipt = api.call(
+            "POST",
+            "/receipts",
+            {
+                "lines": [
+                    {"name": "carrots", "outcome": "received"},
+                    {"name": "Dragonfruit", "outcome": "received"},
+                ]
+            },
+        ).get_json()
+
+        response = api.call(
+            "POST",
+            f"/receipts/{receipt['id']}/resolve",
+            {
+                "reviews": [
+                    {"line_id": line["id"], "action": "confirm"}
+                    for line in receipt["lines"]
+                ]
+            },
+        )
+
+        assert (response.status_code, _error(response)["code"]) == (
+            409,
+            "receipt_review_invalid",
+        )
+        assert self._state(api, item_id) == "unknown"
+        assert api.call("GET", f"/receipts/{receipt['id']}").get_json()["status"] == (
+            "open"
+        )
+
+    def test_reject_and_then_resolve(self, api: Api) -> None:
+        """A rejected receipt is closed."""
+        receipt = api.call(
+            "POST", "/receipts", {"lines": [{"name": "carrots", "outcome": "ordered"}]}
+        ).get_json()
+
+        rejected = api.call("POST", f"/receipts/{receipt['id']}/reject")
+        again = api.call("POST", f"/receipts/{receipt['id']}/resolve", {"reviews": []})
+
+        assert rejected.get_json()["status"] == "rejected"
+        assert (again.status_code, _error(again)["code"]) == (409, "receipt_not_open")
+
+    @pytest.mark.parametrize(
+        ("body", "code"),
+        [
+            ({"lines": []}, "receipt_invalid"),
+            (
+                {"lines": [{"name": "x", "outcome": "received"}], "attempt_id": 999},
+                "receipt_invalid",
+            ),
+            ({"lines": [{"name": "x", "outcome": "delivered"}]}, "validation_failed"),
+            ({"lines": [{"name": "x", "outcome": "substituted"}]}, "validation_failed"),
+            ({}, "validation_failed"),
+        ],
+    )
+    def test_bad_receipts_are_refused(
+        self, api: Api, body: dict[str, Any], code: str
+    ) -> None:
+        """A receipt needs lines, real outcomes and a handoff that exists."""
+        response = api.call("POST", "/receipts", body)
+
+        assert (response.status_code, _error(response)["code"]) == (400, code)
+
+    def test_unknown_receipts_and_statuses(self, api: Api) -> None:
+        """Missing ids are 404s; an unknown filter is a 400."""
+        missing = api.call("GET", "/receipts/999")
+        resolve = api.call("POST", "/receipts/999/resolve", {"reviews": []})
+        bad_filter = api.call("GET", "/receipts", query="status=lost")
+
+        assert (missing.status_code, _error(missing)["code"]) == (
+            404,
+            "receipt_not_found",
+        )
+        assert _error(resolve)["code"] == "receipt_not_found"
+        assert (bad_filter.status_code, _error(bad_filter)["code"]) == (
+            400,
+            "validation_failed",
+        )
+
+    def test_receipts_need_the_bearer(self, app: Flask) -> None:
+        """Nothing here is reachable without the token."""
+        client = app.test_client()
+
+        assert client.post("/api/v2/receipts").status_code == 401
+        assert client.get("/api/v2/receipts").status_code == 401
+
+
 class TestOperationsMetrics:
     """OpenClaw can read how well the system is doing."""
 
