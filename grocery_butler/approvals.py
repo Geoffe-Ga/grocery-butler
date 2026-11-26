@@ -379,7 +379,7 @@ class ApprovalEnvelopes:
         self,
         envelope_id: int,
         *,
-        payload_hash: str,
+        shown_hash: str,
         actor: str,
         current_fingerprint: str,
     ) -> ApprovalEnvelope:
@@ -387,7 +387,7 @@ class ApprovalEnvelopes:
 
         Args:
             envelope_id: The draft to approve.
-            payload_hash: The hash of the content the member was shown.
+            shown_hash: The hash of the content the member was shown.
             actor: The approving member.
             current_fingerprint: The subject's fingerprint now.
 
@@ -401,7 +401,7 @@ class ApprovalEnvelopes:
             StaleEnvelopeError: If the subject's state has changed.
         """
         envelope = self._require_status(envelope_id, EnvelopeStatus.DRAFT, "approved")
-        if payload_hash != envelope.payload_hash:
+        if shown_hash != envelope.payload_hash:
             raise PayloadMismatchError(envelope_id)
         self._refuse_if_stale(envelope, current_fingerprint, actor)
         approved_at = self._clock().isoformat()

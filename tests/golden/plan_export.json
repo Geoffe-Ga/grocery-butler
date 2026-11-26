@@ -1,0 +1,87 @@
+{
+  "categories": [
+    {
+      "category": "Dairy",
+      "lines": [
+        {
+          "amounts": [
+            {
+              "quantity": 4.0,
+              "unit": "cup"
+            }
+          ],
+          "item": "Buttermilk",
+          "preferred_brand": "Clover",
+          "preferred_size": "1 qt",
+          "reasons": [
+            "running low",
+            "for Biscuits, Pancakes"
+          ]
+        },
+        {
+          "amounts": [],
+          "item": "Oat Milk",
+          "preferred_brand": null,
+          "preferred_size": null,
+          "reasons": [
+            "out"
+          ]
+        },
+        {
+          "amounts": [
+            {
+              "quantity": 1.0,
+              "unit": "cup"
+            },
+            {
+              "quantity": 2.0,
+              "unit": "jar"
+            }
+          ],
+          "item": "Yogurt",
+          "preferred_brand": null,
+          "preferred_size": null,
+          "reasons": [
+            "for Curry, Parfait"
+          ]
+        }
+      ]
+    },
+    {
+      "category": "Pantry Dry",
+      "lines": [
+        {
+          "amounts": [
+            {
+              "quantity": 1.5,
+              "unit": "lb"
+            }
+          ],
+          "item": "Rice",
+          "preferred_brand": null,
+          "preferred_size": null,
+          "reasons": [
+            "requested",
+            "for Curry"
+          ]
+        }
+      ]
+    },
+    {
+      "category": "Other",
+      "lines": [
+        {
+          "amounts": [],
+          "item": "Birthday Candles",
+          "preferred_brand": null,
+          "preferred_size": null,
+          "reasons": [
+            "requested"
+          ]
+        }
+      ]
+    }
+  ],
+  "content_hash": "golden-hash",
+  "plan_version": 3
+}

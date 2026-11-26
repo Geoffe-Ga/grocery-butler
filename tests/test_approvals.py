@@ -101,7 +101,7 @@ def _approved(envelopes: ApprovalEnvelopes) -> ApprovalEnvelope:
     draft = _draft(envelopes)
     return envelopes.approve(
         draft.id,
-        payload_hash=draft.payload_hash,
+        shown_hash=draft.payload_hash,
         actor=MEMBER,
         current_fingerprint=FINGERPRINT,
     )
@@ -210,7 +210,7 @@ class TestApprove:
 
         approved = envelopes.approve(
             draft.id,
-            payload_hash=draft.payload_hash,
+            shown_hash=draft.payload_hash,
             actor=MEMBER,
             current_fingerprint=FINGERPRINT,
         )
@@ -231,7 +231,7 @@ class TestApprove:
         with pytest.raises(PayloadMismatchError, match="does not match"):
             envelopes.approve(
                 draft.id,
-                payload_hash=payload_hash({**PAYLOAD, "version": 4}),
+                shown_hash=payload_hash({**PAYLOAD, "version": 4}),
                 actor=MEMBER,
                 current_fingerprint=FINGERPRINT,
             )
@@ -249,7 +249,7 @@ class TestApprove:
         with pytest.raises(StaleEnvelopeError, match="changed"):
             envelopes.approve(
                 draft.id,
-                payload_hash=draft.payload_hash,
+                shown_hash=draft.payload_hash,
                 actor=MEMBER,
                 current_fingerprint="needs-v2",
             )
@@ -268,7 +268,7 @@ class TestApprove:
         with pytest.raises(EnvelopeNotActionableError, match="expired"):
             envelopes.approve(
                 draft.id,
-                payload_hash=draft.payload_hash,
+                shown_hash=draft.payload_hash,
                 actor=MEMBER,
                 current_fingerprint=FINGERPRINT,
             )
@@ -286,7 +286,7 @@ class TestApprove:
 
         approved = envelopes.approve(
             draft.id,
-            payload_hash=draft.payload_hash,
+            shown_hash=draft.payload_hash,
             actor=MEMBER,
             current_fingerprint=FINGERPRINT,
         )
@@ -300,7 +300,7 @@ class TestApprove:
         with pytest.raises(EnvelopeNotActionableError, match="approved"):
             envelopes.approve(
                 approved.id,
-                payload_hash=approved.payload_hash,
+                shown_hash=approved.payload_hash,
                 actor="jess@rubotpaul",
                 current_fingerprint=FINGERPRINT,
             )
@@ -313,7 +313,7 @@ class TestApprove:
         """You can only approve what exists."""
         with pytest.raises(EnvelopeNotFoundError, match="99999"):
             envelopes.approve(
-                99999, payload_hash="x", actor=MEMBER, current_fingerprint=FINGERPRINT
+                99999, shown_hash="x", actor=MEMBER, current_fingerprint=FINGERPRINT
             )
 
 
@@ -472,7 +472,7 @@ class TestConcurrentCallers:
         draft = _draft(envelopes)
         _ = envelopes.approve(
             draft.id,
-            payload_hash=draft.payload_hash,
+            shown_hash=draft.payload_hash,
             actor=MEMBER,
             current_fingerprint=FINGERPRINT,
         )
@@ -483,7 +483,7 @@ class TestConcurrentCallers:
         ):
             envelopes.approve(
                 draft.id,
-                payload_hash=draft.payload_hash,
+                shown_hash=draft.payload_hash,
                 actor="jess@rubotpaul",
                 current_fingerprint=FINGERPRINT,
             )
@@ -586,7 +586,7 @@ class TestPostgres:
         draft = _draft(pg_envelopes, kind="pg_plan_handoff")
         approved = pg_envelopes.approve(
             draft.id,
-            payload_hash=draft.payload_hash,
+            shown_hash=draft.payload_hash,
             actor=MEMBER,
             current_fingerprint=FINGERPRINT,
         )
