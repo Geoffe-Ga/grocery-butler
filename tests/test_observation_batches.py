@@ -10,6 +10,7 @@ import datetime as dt
 import os
 from contextlib import closing
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -619,6 +620,114 @@ class TestLifecycle:
 
         assert len(ledger.history(eggs.id)) == 1
 
+    def test_a_second_review_racing_the_first_writes_nothing(
+        self,
+        batches: ObservationBatches,
+        ledger: InventoryLedger,
+        eggs: HouseholdItem,
+    ) -> None:
+        """Two reviews that both saw the batch open: only one is applied."""
+        batch = batches.submit(
+            ObservationSource.PHOTO,
+            [_proposal("eggs", StockState.OUT)],
+            submitted_by=SUBMITTER,
+        )
+        reviews = [_review(batch.proposals[0].id, DecisionAction.CONFIRM)]
+        batches.resolve(batch.id, reviews, actor=REVIEWER)
+
+        # The loser read the batch while it was still open.
+        with (
+            patch.object(ObservationBatches, "_require_open", return_value=batch),
+            pytest.raises(BatchNotOpenError, match="confirmed"),
+        ):
+            batches.resolve(batch.id, reviews, actor="sam@rubotpaul")
+
+        after = batches.get(batch.id)
+        assert after is not None
+        assert after.resolved_by == REVIEWER
+        assert len(ledger.history(eggs.id)) == 1
+
+    def test_a_reject_racing_a_review_changes_nothing(
+        self,
+        batches: ObservationBatches,
+        ledger: InventoryLedger,
+        eggs: HouseholdItem,
+    ) -> None:
+        """A late reject can't overwrite a review that already applied."""
+        batch = batches.submit(
+            ObservationSource.PHOTO,
+            [_proposal("eggs", StockState.OUT)],
+            submitted_by=SUBMITTER,
+        )
+        batches.resolve(
+            batch.id,
+            [_review(batch.proposals[0].id, DecisionAction.CONFIRM)],
+            actor=REVIEWER,
+        )
+
+        with (
+            patch.object(ObservationBatches, "_require_open", return_value=batch),
+            pytest.raises(BatchNotOpenError, match="confirmed"),
+        ):
+            batches.reject(batch.id, actor="sam@rubotpaul")
+
+        after = batches.get(batch.id)
+        assert after is not None
+        assert after.status is BatchStatus.CONFIRMED
+        assert [p.decision for p in after.proposals] == [ProposalDecision.CONFIRMED]
+        assert len(ledger.history(eggs.id)) == 1
+
+    def test_a_review_racing_a_reject_writes_nothing(
+        self,
+        batches: ObservationBatches,
+        ledger: InventoryLedger,
+        eggs: HouseholdItem,
+    ) -> None:
+        """A late review can't revive a batch that was thrown away."""
+        batch = batches.submit(
+            ObservationSource.PHOTO,
+            [_proposal("eggs", StockState.OUT)],
+            submitted_by=SUBMITTER,
+        )
+        batches.reject(batch.id, actor=REVIEWER)
+
+        with (
+            patch.object(ObservationBatches, "_require_open", return_value=batch),
+            pytest.raises(BatchNotOpenError, match="rejected"),
+        ):
+            batches.resolve(
+                batch.id,
+                [_review(batch.proposals[0].id, DecisionAction.CONFIRM)],
+                actor="sam@rubotpaul",
+            )
+
+        assert ledger.history(eggs.id) == []
+
+    def test_confirming_a_proposal_whose_item_was_merged_away_counts_for_the_survivor(
+        self,
+        batches: ObservationBatches,
+        ledger: InventoryLedger,
+        eggs: HouseholdItem,
+        db_path: str,
+    ) -> None:
+        """A match made before a merge still lands on the surviving item."""
+        items = HouseholdItemStore(db_path)
+        dozen = items.resolve_or_create("dozen eggs", actor="t")
+        batch = batches.submit(
+            ObservationSource.PHOTO,
+            [_proposal("dozen eggs", StockState.OUT)],
+            submitted_by=SUBMITTER,
+        )
+        items.merge(dozen.id, eggs.id, actor="t")
+
+        batches.resolve(
+            batch.id,
+            [_review(batch.proposals[0].id, DecisionAction.CONFIRM)],
+            actor=REVIEWER,
+        )
+
+        assert ledger.snapshot(eggs.id).state is StockState.OUT
+
     def test_reject_closes_the_batch_and_writes_nothing(
         self,
         batches: ObservationBatches,
@@ -777,3 +886,25 @@ class TestPostgres:
 
         assert resolved.status is BatchStatus.CONFIRMED
         assert InventoryLedger(_PG_URL).snapshot(pg_item.id).state is StockState.OUT
+
+    def test_a_second_review_racing_the_first_writes_nothing(
+        self, pg_item: HouseholdItem
+    ) -> None:
+        """The atomic claim holds on Postgres too."""
+        batches = ObservationBatches(_PG_URL)
+        batch = batches.submit(
+            ObservationSource.PHOTO,
+            [NewProposal(name="pgb eggs", state=StockState.OUT, confidence=0.9)],
+            submitted_by=SUBMITTER,
+            notes="pgb",
+        )
+        reviews = [_review(batch.proposals[0].id, DecisionAction.CONFIRM)]
+        batches.resolve(batch.id, reviews, actor=REVIEWER)
+
+        with (
+            patch.object(ObservationBatches, "_require_open", return_value=batch),
+            pytest.raises(BatchNotOpenError),
+        ):
+            batches.resolve(batch.id, reviews, actor="sam@rubotpaul")
+
+        assert len(InventoryLedger(_PG_URL).history(pg_item.id)) == 1

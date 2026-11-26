@@ -884,8 +884,10 @@ class ObservationProposal(BaseModel):
     """One proposed observation and what was decided about it.
 
     ``item_id`` is the household item the name matched, or None when it
-    matched nothing. ``observation_id`` is the ledger row written when the
-    proposal was confirmed or corrected.
+    matched nothing. ``decided_item_id`` and ``decided_state`` are set only
+    by a correction; a plain confirmation leaves them None, because it
+    records the proposal as it stood. ``observation_id`` is the ledger row
+    written when the proposal was confirmed or corrected.
     """
 
     id: int

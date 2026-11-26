@@ -321,6 +321,8 @@ class ObservationBatches:
         proposal's confidence. A corrected proposal becomes the member's
         own statement. A rejected proposal writes nothing. If anything in
         the review is wrong, nothing is written and the batch stays open.
+        The batch is closed in the same transaction that writes the
+        observations, so of two reviews sent at once only one applies.
 
         Args:
             batch_id: The batch to review.
@@ -350,13 +352,9 @@ class ObservationBatches:
         accepted = [new for _, _, new in writes if new is not None]
         status = BatchStatus.CONFIRMED if accepted else BatchStatus.REJECTED
         with closing(get_connection(self._db_path)) as conn:
+            self._claim(conn, batch_id, status, actor, now)
             for proposal, review, new in writes:
                 self._apply(conn, proposal, review, new)
-            conn.execute(
-                "UPDATE observation_batches"
-                " SET status = ?, resolved_at = ?, resolved_by = ? WHERE id = ?",
-                (status.value, now, actor, batch_id),
-            )
             conn.commit()
             resolved = self._require(conn, batch_id)
         for item_id in sorted({new.item_id for new in accepted}):
@@ -379,24 +377,53 @@ class ObservationBatches:
         """
         self._require_open(batch_id)
         with closing(get_connection(self._db_path)) as conn:
+            self._claim(
+                conn, batch_id, BatchStatus.REJECTED, actor, self._clock().isoformat()
+            )
             conn.execute(
                 "UPDATE observation_proposals SET decision = ? WHERE batch_id = ?",
                 (ProposalDecision.REJECTED.value, batch_id),
-            )
-            conn.execute(
-                "UPDATE observation_batches"
-                " SET status = ?, resolved_at = ?, resolved_by = ? WHERE id = ?",
-                (
-                    BatchStatus.REJECTED.value,
-                    self._clock().isoformat(),
-                    actor,
-                    batch_id,
-                ),
             )
             conn.commit()
             return self._require(conn, batch_id)
 
     # -- internals -----------------------------------------------------
+
+    def _claim(
+        self,
+        conn: DatabaseConnection,
+        batch_id: int,
+        status: BatchStatus,
+        actor: str,
+        now: str,
+    ) -> None:
+        """Close an open batch as the first step of the write transaction.
+
+        The update only matches a batch that is still open, and takes the
+        row's write lock. Two reviews that both read the batch as open
+        therefore can't both apply: the second finds no open row, and its
+        transaction ends without writing anything.
+
+        Args:
+            conn: The write transaction's connection; the caller commits.
+            batch_id: The batch being closed.
+            status: The status it is closed with.
+            actor: Who is closing it.
+            now: The current time, ISO 8601.
+
+        Raises:
+            BatchNotOpenError: If another review or a reject got there first.
+        """
+        claimed = conn.execute(
+            "UPDATE observation_batches"
+            " SET status = ?, resolved_at = ?, resolved_by = ?"
+            " WHERE id = ? AND status = ?",
+            (status.value, now, actor, batch_id, BatchStatus.OPEN.value),
+        )
+        if claimed.rowcount:
+            return
+        current = self._require(conn, batch_id)
+        raise BatchNotOpenError(batch_id, current.status)
 
     def _complete_reviews(
         self,
