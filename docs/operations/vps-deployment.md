@@ -167,4 +167,5 @@ requires. Then shut the old deployment down.
 | The app container keeps restarting | `docker compose logs app`. A missing secret or a failed migration is named on the last lines. |
 | `403` from `127.0.0.1:8000` | Step 5 above. |
 | The tailnet address doesn't load | `tailscale serve status`, and check HTTPS certificates are on for the tailnet. |
+| `docker compose up` says a pool or subnet overlaps | Another Docker network on the server already uses `172.30.198.0/24`. Report it rather than editing one side: the subnet, its gateway and the guard's allow-list in `compose.yaml` must change together, and a test holds them to each other. |
 | Port 5432 is already in use | Set `DB_HOST_PORT` in `.env` to a free port and use it in `DATABASE_URL` for backups. |
