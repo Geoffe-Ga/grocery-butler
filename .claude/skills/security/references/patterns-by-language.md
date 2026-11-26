@@ -55,17 +55,20 @@ cursor.execute(query, (email,))
 
 ### API Key Management
 ```python
-import keyring
+import os
 
-def get_api_key(key_name: str) -> str:
-    api_key = keyring.get_password("my_app", key_name)
-    if not api_key:
-        raise ValueError(f"API key '{key_name}' not found in OS keyring.")
-    return api_key
+# Secrets come from the runtime environment (in grocery-butler: a gitignored
+# .env locally, Railway variables in production), read in one place
+# (grocery_butler/config.py), and fail fast where they're required.
+def get_required_secret(name: str) -> str:
+    value = os.environ.get(name, "")
+    if not value:
+        raise RuntimeError(f"Required secret {name} is not set")
+    return value
 
 # WRONG: API_KEY = "sk-ant-1234567890"  # pragma: allowlist secret
-# WRONG: api_key = os.environ.get("API_KEY")
-# CORRECT: api_key = get_api_key("claude_api_key")
+# WRONG: logger.info("Using key %s", api_key)
+# CORRECT: api_key = get_required_secret("ANTHROPIC_API_KEY")
 ```
 
 ## TypeScript

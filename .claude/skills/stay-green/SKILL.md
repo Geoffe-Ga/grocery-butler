@@ -2,7 +2,7 @@
 name: stay-green
 description: >-
   2-gate TDD development workflow: Gate 1 is Red-Green-Refactor testing,
-  Gate 2 is pre-commit quality checks. Use when implementing features,
+  Gate 2 is the local quality checks (check-all and pre-commit). Use when implementing features,
   fixing bugs, or doing any development work. Ensures code is never
   committed without passing tests and quality checks.
   Do NOT use for bug-specific debugging (use bug-squashing-methodology).
@@ -36,21 +36,26 @@ Write tests first, then code. Never declare work finished until all checks pass.
 
 Repeat for each small piece of functionality. Write tests incrementally, not all at once.
 
-### Gate 2: Pre-Commit Quality Checks
+### Gate 2: Local Quality Checks
 
 ```bash
-pre-commit run --all-files
+./scripts/check-all.sh          # lint, docstrings, format, types, security, complexity, tests, coverage, build
+./scripts/precommit-changed.sh  # file hygiene, secrets, shellcheck, dead code, on the changed files
 ```
 
-When checks fail: read errors, fix issues, run again. Repeat until all green.
+When checks fail: read errors, fix issues, run again. Repeat until all green. `./scripts/fix-all.sh` applies Ruff's automatic fixes.
 
-Quality checks include: formatting (Black + isort), linting (Ruff), type checking (MyPy), complexity (<=10 per function), security (Bandit), tests with coverage (>=90%), file hygiene.
+The thresholds are in `CLAUDE.md` (Quality Standards): line and branch coverage >=90%, docstring coverage >=95%, complexity <=10 per function.
 
 ### Work is DONE when:
 1. All tests pass (Gate 1 complete)
-2. All pre-commit checks pass (Gate 2 complete)
+2. `./scripts/check-all.sh` exits 0 and pre-commit is clean (Gate 2 complete)
 
 No exceptions.
+
+### After Push: Await the Reviewer
+
+This repo runs the Claude reviewer (`.github/workflows/code-review.yml`), so "done" extends past local gates: the latest verdict for HEAD must allow a merge, as `CLAUDE.md` (Review Verdicts) defines. Don't poll, don't `sleep`, and don't wait on "CI green" as a proxy: the PR webhook does **not** deliver CI passes, only comments and CI failures. Use `await-claude-review` to subscribe and end the turn; the bot's verdict comment wakes the session via `<github-webhook-activity>`. From there, `address-feedback` handles the merge gate or the fix loop, including calling `mcp__github__unsubscribe_pr_activity` once the PR merges or closes.
 
 ## Examples
 
@@ -58,49 +63,49 @@ No exceptions.
 
 ```python
 # Gate 1 - Red: Write failing test
-def test_calculate_cost_from_impressions():
-    result = calculate_cost(impressions=1000, cpm=5.0)
-    assert result == 5.0
+def test_scale_quantity_doubles_for_twice_the_servings():
+    result = scale_quantity(quantity=2.0, servings=8, base_servings=4)
+    assert result == 4.0
 
 # Gate 1 - Green: Make it pass
-def calculate_cost(impressions: int, cpm: float) -> float:
-    return impressions * (cpm / 1000)
+def scale_quantity(quantity: float, servings: int, base_servings: int) -> float:
+    return quantity * servings / base_servings
 
 # Gate 1 - Refactor: (already clean, move on)
-# Gate 2: pre-commit run --all-files -> All passed!
+# Gate 2: ./scripts/check-all.sh and ./scripts/precommit-changed.sh -> All passed!
 ```
 
 ### Example 2: Fixing a Formatting Failure
 
 ```bash
 # Gate 2 fails on formatting
-$ pre-commit run --all-files
-black....Failed
+$ ./scripts/precommit-changed.sh
+ruff (format, pinned)....Failed
 
 # Auto-fix and re-run
-$ ./scripts/format.sh --fix
-$ pre-commit run --all-files
+$ ./scripts/format.sh
+$ ./scripts/precommit-changed.sh
 # All passed!
 ```
 
 ## Troubleshooting
 
-### Error: Coverage below 90%
+### Error: Coverage below 90% (line or branch)
 ```bash
-./scripts/test.sh --all --coverage  # See what's not covered
-# Add tests for uncovered lines, then re-run pre-commit
+./scripts/coverage.sh --html  # See what's not covered (htmlcov/index.html)
+# Add tests for uncovered lines and branches, then re-run ./scripts/check-all.sh
 ```
 
 ### Error: Complexity above 10
 ```bash
 ./scripts/complexity.sh  # Find complex functions
 # Extract helper functions, simplify branching
-# Then verify: ./scripts/complexity.sh && pre-commit run --all-files
+# Then verify: ./scripts/complexity.sh && ./scripts/precommit-changed.sh
 ```
 
 ### Error: Type errors from MyPy
 ```bash
 ./scripts/typecheck.sh  # See specific errors
 # Add/fix type annotations
-# Then verify: ./scripts/typecheck.sh && pre-commit run --all-files
+# Then verify: ./scripts/typecheck.sh && ./scripts/precommit-changed.sh
 ```

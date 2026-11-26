@@ -5,8 +5,9 @@ description: >-
   Use when handling user input, file paths, subprocess calls, SQL queries,
   API keys, or building web endpoints. Covers input validation, injection
   prevention, secret management, and XSS/CSRF protection across Python,
-  TypeScript, Go, and Rust. Do NOT use for general error handling
-  (use error-handling skill).
+  TypeScript, Go, and Rust. Do NOT use for general error handling (use
+  error-handling skill) or for remediating dependency vulnerability
+  scanner failures and CVE / GHSA advisories (use cve-remediation skill).
 metadata:
   author: Geoff
   version: 1.0.0
@@ -37,8 +38,17 @@ Key areas:
 - **Command injection prevention**: Never use `shell=True`, validate arguments
 - **SQL injection prevention**: Always use parameterized queries
 - **XSS prevention**: Escape HTML output, use framework defaults
-- **Secret management**: Use OS keyring, never hardcode secrets
+- **Secret management**: read secrets from the environment at runtime, in
+  one place (`grocery_butler/config.py` here), and fail fast where they're
+  required; never put a literal key or token in any file
 - **CSRF protection**: Use tokens with constant-time comparison
+- **User-supplied API keys/credentials**: never store them server-side in
+  plaintext (client-side secure storage or an encrypted-at-rest store); pass
+  via a request header, never a URL or body; never log the value; clear from
+  memory after use
+- **Error responses**: never surface an internal exception's message or
+  traceback to the caller; log the detail server-side, return a generic
+  message (see Example 3)
 
 ### Step 3: Run the Security Checklist
 
@@ -48,7 +58,7 @@ Before deploying:
 - [ ] No command injection (no `shell=True`)
 - [ ] No path traversal (validated file paths)
 - [ ] No XSS (escaped HTML)
-- [ ] API keys in OS keyring, not code
+- [ ] Secrets read from the environment, never written in code, tests or docs
 - [ ] Secrets not committed to git
 - [ ] HTTPS for all external requests
 - [ ] SSL certificates validated
@@ -82,12 +92,23 @@ subprocess.run(f"git clone {user_repo}", shell=True)
 subprocess.run(["git", "clone", user_repo], check=True)
 ```
 
+### Example 3: Safe Error Response (Flask)
+
+```python
+# WRONG - leaks internal details (stack trace, query, file paths) to the caller
+return jsonify(error=str(exc)), 500
+
+# CORRECT - log the detail server-side, return a generic message
+logger.exception("Unhandled error in %s", request.path)
+return jsonify(error="internal_error"), 500
+```
+
 ## Troubleshooting
 
-### Error: Keyring not available in CI/headless environment
-- Use environment variables as fallback for CI only
-- Document the fallback in CI configuration
-- Never use environment variables for production secret storage
+### Error: A test needs a secret
+- Set an obviously fake value with `monkeypatch.setenv`, never a real key
+- Mark a fake value that trips detect-secrets with `# pragma: allowlist secret`
+- Never read a developer's `.env` in a test; set what the test needs
 
 ### Error: Path validation too restrictive
 - Check if you're resolving symlinks unnecessarily
