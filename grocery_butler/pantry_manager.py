@@ -18,10 +18,14 @@ from typing import Any, Protocol
 from grocery_butler.claude_utils import extract_json_text
 from grocery_butler.db import get_connection
 from grocery_butler.household_items import SYSTEM_ACTOR, HouseholdItemStore
+from grocery_butler.inventory_ledger import InventoryLedger
 from grocery_butler.models import (
     InventoryItem,
     InventoryStatus,
     InventoryUpdate,
+    NewObservation,
+    ObservationSource,
+    StockState,
     coerce_category_optional,
 )
 from grocery_butler.prompt_loader import load_prompt
@@ -178,9 +182,10 @@ class PantryManager:
             row_id = cursor.lastrowid
             if row_id is None:  # pragma: no cover
                 raise MissingRowIdError
-            return row_id
         finally:
             conn.close()
+        self._observe(household_item.id, item.status)
+        return row_id
 
     def remove_item(self, ingredient: str) -> None:
         """Remove a tracked inventory item.
@@ -205,6 +210,7 @@ class PantryManager:
             ingredient: Ingredient name (case-insensitive).
             new_status: The new InventoryStatus value.
         """
+        tracked = self.get_item(ingredient)
         now = datetime.now(tz=UTC).isoformat()
         conn = get_connection(self._db_path)
         try:
@@ -217,6 +223,8 @@ class PantryManager:
             conn.commit()
         finally:
             conn.close()
+        if tracked is not None:
+            self._observe(tracked.item_id, new_status)
 
     def update_quantity(self, ingredient: str, quantity: float, unit: str) -> None:
         """Update an item's current quantity and unit.
@@ -226,6 +234,7 @@ class PantryManager:
             quantity: The new quantity value.
             unit: The unit for the quantity (e.g. 'gal', 'lb').
         """
+        tracked = self.get_item(ingredient)
         conn = get_connection(self._db_path)
         try:
             conn.execute(
@@ -237,6 +246,8 @@ class PantryManager:
             conn.commit()
         finally:
             conn.close()
+        if tracked is not None:
+            self._observe(tracked.item_id, tracked.status, quantity, unit)
 
     def mark_restocked(self, ingredients: list[str]) -> int:
         """Move matching items back to on_hand and set last_restocked.
@@ -254,6 +265,7 @@ class PantryManager:
 
         now = datetime.now(tz=UTC).isoformat()
         lowered = [ing.lower() for ing in ingredients]
+        tracked = [item for name in lowered if (item := self.get_item(name))]
         conn = get_connection(self._db_path)
         try:
             total_updated = 0
@@ -268,9 +280,11 @@ class PantryManager:
                 )
                 total_updated += cursor.rowcount
             conn.commit()
-            return total_updated
         finally:
             conn.close()
+        for item in tracked:
+            self._observe(item.item_id, InventoryStatus.ON_HAND)
+        return total_updated
 
     def get_restock_queue(self) -> list[InventoryItem]:
         """Return all items with status 'low' or 'out'.
@@ -298,6 +312,7 @@ class PantryManager:
         Returns:
             Number of items updated.
         """
+        queued = self.get_restock_queue()
         now = datetime.now(tz=UTC).isoformat()
         conn = get_connection(self._db_path)
         try:
@@ -313,9 +328,45 @@ class PantryManager:
                 ),
             )
             conn.commit()
-            return cursor.rowcount
+            cleared = cursor.rowcount
         finally:
             conn.close()
+        for item in queued:
+            self._observe(item.item_id, InventoryStatus.ON_HAND)
+        return cleared
+
+    def _observe(
+        self,
+        item_id: int | None,
+        status: InventoryStatus,
+        quantity: float | None = None,
+        unit: str | None = None,
+    ) -> None:
+        """Append a status change to the observation ledger (ADR 0007).
+
+        The inventory table is still what older readers use; the ledger is
+        the complete record. Runs after the inventory write has committed,
+        because the ledger writes on its own connection.
+
+        Args:
+            item_id: The row's household item, or None for a row that was
+                never linked (nothing is recorded then).
+            status: The state being stated.
+            quantity: A stated count, if one came with the change.
+            unit: The count's unit.
+        """
+        if item_id is None:
+            return
+        InventoryLedger(self._db_path).record(
+            NewObservation(
+                item_id=item_id,
+                state=StockState(status.value),
+                source=ObservationSource.HUMAN,
+                actor=SYSTEM_ACTOR,
+                quantity=quantity,
+                unit=unit,
+            )
+        )
 
     def should_include_in_order(
         self,
