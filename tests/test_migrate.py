@@ -599,7 +599,8 @@ class TestMigration009ArchiveRetailerTables:
             )
             conn.commit()
 
-        assert migrate(db_path) == 1
+        from_009 = [m for m in _discover_migrations(is_pg=False) if m[0] >= 9]
+        assert migrate(db_path) == len(from_009)
 
         with closing(get_connection(db_path)) as conn:
             mapping = conn.execute(

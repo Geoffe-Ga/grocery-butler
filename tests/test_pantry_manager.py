@@ -855,6 +855,7 @@ class TestRowToItem:
             "default_unit": None,
             "default_search_term": None,
             "notes": None,
+            "item_id": None,
         }
 
         item = _row_to_item(row)
@@ -874,6 +875,7 @@ class TestRowToItem:
             "default_unit": None,
             "default_search_term": None,
             "notes": None,
+            "item_id": None,
         }
 
         item = _row_to_item(row)
