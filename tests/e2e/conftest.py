@@ -364,15 +364,27 @@ class V2:
         """GET a path under ``/api/v2`` and return the response."""
         return self._send("GET", f"/api/v2{path}")
 
-    def post(self, path: str, body: dict[str, Any] | None = None) -> Any:
-        """POST to a path under ``/api/v2`` and return the response."""
+    def post(
+        self, path: str, body: dict[str, Any] | None = None, *, key: str | None = None
+    ) -> Any:
+        """POST to a path under ``/api/v2`` and return the response.
+
+        Args:
+            path: Path under ``/api/v2``.
+            body: JSON body, if any.
+            key: An idempotency key to reuse, for a deliberate repeat.
+                A fresh one is made when this is left out.
+
+        Returns:
+            The response.
+        """
         return self._send(
             "POST",
             f"/api/v2{path}",
             body,
             extra_headers={
                 MEMBER_HEADER: self._member,
-                IDEMPOTENCY_HEADER: f"journey-{next(self._keys):06d}",
+                IDEMPOTENCY_HEADER: key or f"journey-{next(self._keys):06d}",
             },
         )
 
