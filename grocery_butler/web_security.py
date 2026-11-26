@@ -139,7 +139,7 @@ def _add_security_headers(response: Response) -> Response:
     return response
 
 
-def register_web_security(app: Flask) -> None:
+def register_web_security(app: Flask, *, production: bool = False) -> None:
     """Install CSRF protection, security headers and the request size limit.
 
     Call after the network guard is registered, so a request from outside
@@ -147,11 +147,18 @@ def register_web_security(app: Flask) -> None:
 
     Args:
         app: Flask application instance to protect.
+        production: Whether this is the production deployment. There,
+            people reach the dashboard only over HTTPS (ADR 0021), so the
+            session cookie is marked ``Secure`` and a browser never sends
+            it over plain HTTP. In development it is left off, because a
+            browser drops a ``Secure`` cookie on plain HTTP and every form
+            would then fail its CSRF check.
     """
     if app.config.get("MAX_CONTENT_LENGTH") is None:
         app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SECURE"] = production
     app.jinja_env.globals[CSRF_FIELD] = csrf_token
     app.before_request(_enforce_csrf)
     app.after_request(_add_security_headers)
