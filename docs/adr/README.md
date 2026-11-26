@@ -24,6 +24,7 @@ ADR that supersedes the old one, rather than an edit.
 | [0016](0016-approved-idempotent-handoff-attempts.md) | A handoff to an outside service is drafted, approved, then executed once and recorded as an attempt | Accepted |
 | [0017](0017-staple-policies-decide-what-may-put-an-item-on-a-plan.md) | An item's staple policy decides what may put it on a plan | Accepted |
 | [0018](0018-receipts-are-reviewed-evidence.md) | What arrived is recorded from a receipt a member confirms | Accepted |
+| [0019](0019-check-reminders-are-rate-limited-suggestions.md) | Check reminders are rate-limited suggestions about kept items we no longer know about | Accepted |
 
 A status of "Accepted, with conditions" means the decision stands and work
 may start, but the ADR names something a person must still do before part
