@@ -237,6 +237,7 @@ class TestParseIngredient:
             "is_pantry_item": False,
         }
         result = _parse_ingredient(data)
+        assert result is not None
         assert result.ingredient == "chicken thighs"
         assert result.quantity == 2.0
         assert result.unit == "lb"
@@ -246,13 +247,26 @@ class TestParseIngredient:
 
     def test_defaults_for_missing_fields(self):
         """Test default values when fields are missing."""
-        result = _parse_ingredient({})
-        assert result.ingredient == ""
+        result = _parse_ingredient({"ingredient": "salt"})
+        assert result is not None
+        assert result.ingredient == "salt"
         assert result.quantity == 0.0
         assert result.unit == "each"
         assert result.category == IngredientCategory.OTHER
         assert result.notes == ""
         assert result.is_pantry_item is False
+
+    @pytest.mark.parametrize(
+        "data",
+        [{}, {"ingredient": ""}, {"ingredient": "  \t "}, {"ingredient": None}],
+    )
+    def test_a_blank_name_is_not_an_ingredient(self, data: dict[str, object]):
+        """A nameless ingredient is dropped, not built (issue #198)."""
+        assert _parse_ingredient(data) is None
+
+    def test_an_entry_that_is_not_an_object_is_not_an_ingredient(self):
+        """Claude sometimes returns a bare string in an ingredient list."""
+        assert _parse_ingredient("garlic") is None
 
 
 class TestParseMealFromDict:
@@ -288,6 +302,39 @@ class TestParseMealFromDict:
         result = _parse_meal_from_dict(data)
         assert result.purchase_items == []
         assert result.pantry_items == []
+
+    def test_blank_ingredients_are_dropped_and_the_meal_is_flagged(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """The good ingredients survive and a person is asked to check."""
+        data: dict[str, object] = {
+            "name": "Tacos",
+            "servings": 4,
+            "needs_confirmation": False,
+            "purchase_items": [
+                {"ingredient": "tortillas", "quantity": 8, "unit": "each"},
+                {"ingredient": "   ", "quantity": 1, "unit": "lb"},
+            ],
+            "pantry_items": [{"quantity": 1, "unit": "tsp"}, "cumin"],
+        }
+
+        with caplog.at_level("WARNING"):
+            result = _parse_meal_from_dict(data)
+
+        assert [i.ingredient for i in result.purchase_items] == ["tortillas"]
+        assert result.pantry_items == []
+        assert result.needs_confirmation is True
+        assert "Dropped 3 ingredients with no name from 'Tacos'" in caplog.text
+
+    def test_a_clean_meal_keeps_its_own_confirmation_flag(self):
+        """Nothing dropped, nothing flagged."""
+        data: dict[str, object] = {
+            "name": "Tacos",
+            "needs_confirmation": False,
+            "purchase_items": [{"ingredient": "tortillas", "quantity": 8}],
+        }
+
+        assert _parse_meal_from_dict(data).needs_confirmation is False
 
 
 class TestScaleIngredients:
@@ -993,6 +1040,7 @@ class TestMalformedCategoryDegradation:
             "category": "spices",
         }
         result = _parse_ingredient(data)
+        assert result is not None
         assert result.category == IngredientCategory.OTHER
 
     def test_decompose_meal_unknown_category_degrades_to_other(

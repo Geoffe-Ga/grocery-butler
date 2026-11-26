@@ -600,3 +600,30 @@ class TestBrandPreference:
         )
         assert pref.preference_type == BrandPreferenceType.AVOID
         assert pref.notes == "Quality issues"
+
+
+class TestIngredientNamesAreNotBlank:
+    """A blank name is refused when the model is built (issue #198)."""
+
+    @pytest.mark.parametrize("name", ["", " ", "\t\n", "   "])
+    def test_ingredient_refuses_a_blank_name(self, name: str) -> None:
+        """An ingredient with no name never exists, so no store can see one."""
+        with pytest.raises(ValidationError, match="An ingredient needs a name"):
+            Ingredient(
+                ingredient=name,
+                quantity=1.0,
+                unit="each",
+                category=IngredientCategory.OTHER,
+            )
+
+    @pytest.mark.parametrize("name", ["", " ", "\t\n"])
+    def test_inventory_item_refuses_a_blank_name(self, name: str) -> None:
+        """The same rule for a tracked inventory item."""
+        with pytest.raises(ValidationError, match="An ingredient needs a name"):
+            InventoryItem(ingredient=name, display_name="Something")
+
+    def test_a_real_name_is_kept_exactly_as_given(self) -> None:
+        """The check refuses blanks; it does not rewrite names."""
+        item = InventoryItem(ingredient=" Olive Oil ", display_name="Olive Oil")
+
+        assert item.ingredient == " Olive Oil "

@@ -117,7 +117,7 @@ class PantryManager:
                 "default_quantity, default_unit, default_search_term, notes, item_id "
                 "FROM household_inventory ORDER BY ingredient"
             )
-            return [_row_to_item(row) for row in cursor.fetchall()]
+            return _rows_to_items(cursor.fetchall())
         finally:
             conn.close()
 
@@ -140,7 +140,8 @@ class PantryManager:
                 (ingredient.lower(),),
             )
             row = cursor.fetchone()
-            return _row_to_item(row) if row else None
+            items = _rows_to_items([row] if row else [])
+            return items[0] if items else None
         finally:
             conn.close()
 
@@ -309,7 +310,7 @@ class PantryManager:
                 "ORDER BY ingredient",
                 (InventoryStatus.LOW.value, InventoryStatus.OUT.value),
             )
-            return [_row_to_item(row) for row in cursor.fetchall()]
+            return _rows_to_items(cursor.fetchall())
         finally:
             conn.close()
 
@@ -427,6 +428,25 @@ class PantryManager:
         )
 
         return _call_claude_with_retry(self._client, prompt)
+
+
+def _rows_to_items(rows: list[Any]) -> list[InventoryItem]:
+    """Convert inventory rows to models, leaving out any with no name.
+
+    A row with a blank name can only come from a database older than the
+    model's own check (issue #198). It can't be shown, bought or matched,
+    and one such row must not make the whole inventory unreadable.
+
+    Args:
+        rows: Rows from the household_inventory table.
+
+    Returns:
+        One InventoryItem per row that has a name.
+    """
+    named = [row for row in rows if str(row["ingredient"]).strip()]
+    if len(named) < len(rows):
+        logger.warning("Skipped %d inventory rows with no name", len(rows) - len(named))
+    return [_row_to_item(row) for row in named]
 
 
 def _row_to_item(row: Any) -> InventoryItem:

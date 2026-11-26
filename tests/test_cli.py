@@ -598,6 +598,20 @@ class TestHandleStock:
         captured = capsys.readouterr()
         assert "invalid" in captured.err.lower()
 
+    def test_add_blank_name_is_an_error_not_a_traceback(self, db_path: str, capsys):
+        """A blank item name is reported and nothing is written (issue #198)."""
+        with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
+            mock_cfg.return_value = MagicMock(database_path=db_path)
+            from grocery_butler.cli import _handle_stock
+
+            parser = _build_parser()
+            args = parser.parse_args(["stock", "add", "   ", "dairy"])
+            code = _handle_stock(args)
+
+        assert code == 1
+        assert "needs a name" in capsys.readouterr().err
+        assert PantryManager(db_path).get_inventory() == []
+
     def test_update_nonexistent_item(self, db_path: str, capsys):
         """Test updating a non-existent item fails."""
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
@@ -902,6 +916,23 @@ class TestHandlePantry:
         assert code == 1
         captured = capsys.readouterr()
         assert "invalid" in captured.err.lower()
+
+    def test_add_pantry_staple_blank_name_is_an_error(self, db_path: str, capsys):
+        """A blank staple name is reported and nothing is written (issue #198)."""
+        store = RecipeStore(db_path)
+        before = store.get_pantry_staple_names()
+
+        with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
+            mock_cfg.return_value = MagicMock(database_path=db_path)
+            from grocery_butler.cli import _handle_pantry
+
+            parser = _build_parser()
+            args = parser.parse_args(["pantry", "add", "  ", "pantry_dry"])
+            code = _handle_pantry(args)
+
+        assert code == 1
+        assert "needs a name" in capsys.readouterr().err
+        assert store.get_pantry_staple_names() == before
 
     def test_remove_pantry_staple(self, db_path: str, capsys):
         """Test removing a pantry staple."""

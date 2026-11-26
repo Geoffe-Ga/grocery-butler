@@ -11,9 +11,15 @@ import datetime as dt
 import logging
 from contextlib import suppress
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -394,10 +400,34 @@ class OrganicPreference(StrEnum):
 # ---------------------------------------------------------------------------
 
 
+def _require_name(value: str) -> str:
+    """Refuse a blank ingredient name.
+
+    Args:
+        value: The name as given.
+
+    Returns:
+        The name, unchanged.
+
+    Raises:
+        ValueError: If the name is empty or only whitespace.
+    """
+    if not value.strip():
+        msg = "An ingredient needs a name."
+        raise ValueError(msg)
+    return value
+
+
+# A name that is checked when the model is built, so a blank one from a
+# degenerate parse is a validation error at the edge rather than a failure
+# deep inside item resolution (issue #198). The value is not rewritten.
+IngredientName = Annotated[str, AfterValidator(_require_name)]
+
+
 class Ingredient(BaseModel):
     """A single ingredient with quantity and category."""
 
-    ingredient: str
+    ingredient: IngredientName
     quantity: float
     unit: Unit
     category: IngredientCategory
@@ -457,7 +487,7 @@ class ShoppingListItem(BaseModel):
 class InventoryItem(BaseModel):
     """A tracked household inventory item."""
 
-    ingredient: str
+    ingredient: IngredientName
     display_name: str
     category: IngredientCategory | None = None
     status: InventoryStatus = InventoryStatus.ON_HAND
