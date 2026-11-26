@@ -14,6 +14,7 @@ ADR that supersedes the old one, rather than an edit.
 | [0006](0006-canonical-household-item-identity.md) | Canonical household items, with aliases and reversible merges | Accepted |
 | [0007](0007-append-only-inventory-observations.md) | Append-only inventory observations and a snapshot derived on read | Accepted |
 | [0008](0008-explicit-replenishment-needs.md) | Explicit replenishment needs, one per item, with first-class reasons | Accepted |
+| [0009](0009-capability-api-v2-contract.md) | Capability API v2 contract: named actors, idempotency keys, coded errors | Accepted |
 
 The product backlog these decisions serve is
 [`docs/OPENCLAW_ERP_BACKLOG.md`](../OPENCLAW_ERP_BACKLOG.md).
