@@ -22,6 +22,7 @@ ADR that supersedes the old one, rather than an edit.
 | [0014](0014-instacart-developer-platform-as-first-handoff-adapter.md) | Build the Instacart shopping list link as the first handoff adapter | Accepted, with conditions |
 | [0015](0015-audit-events-metrics-and-bounded-retries.md) | Audit events as structured logs, five metrics read on demand, and one bounded retry | Accepted |
 | [0016](0016-approved-idempotent-handoff-attempts.md) | A handoff to an outside service is drafted, approved, then executed once and recorded as an attempt | Accepted |
+| [0017](0017-staple-policies-decide-what-may-put-an-item-on-a-plan.md) | An item's staple policy decides what may put it on a plan | Accepted |
 
 A status of "Accepted, with conditions" means the decision stands and work
 may start, but the ADR names something a person must still do before part

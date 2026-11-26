@@ -26,6 +26,7 @@ from grocery_butler.models import (
     NeedReasonKind,
     NeedStatus,
     ReplenishmentNeed,
+    StaplePolicy,
     StockState,
 )
 
@@ -76,6 +77,10 @@ _INTEGRITY_ERRORS: tuple[type[Exception], ...] = (
 
 INVENTORY_SOURCE = "inventory"
 SYNC_ACTOR = "system"
+STANDING_APPROVAL = "Always keep: approved by the item's policy."
+
+# Policies under which running low never raises a need by itself.
+_NO_INVENTORY_NEEDS = frozenset({StaplePolicy.MEALS_ONLY, StaplePolicy.NEVER_SUGGEST})
 
 # The inventory reason each stated state calls for.
 _REASON_FOR_STATE: dict[StockState, NeedReasonKind] = {
@@ -394,6 +399,10 @@ class ReplenishmentNeeds:
         both, and ``unknown`` changes nothing. A dismissal holds against
         the observation that prompted it.
 
+        The item's staple policy shapes that rule (ADR 0017): ``meals_only``
+        and ``never_suggest`` items get no need from inventory at all, and
+        an ``always_keep`` item's need is approved by the policy itself.
+
         Args:
             item_id: Any item id; a merged id is followed to its target.
 
@@ -405,7 +414,9 @@ class ReplenishmentNeeds:
         """
         snapshot = self._ledger.snapshot(item_id)
         self._wake_if_due(snapshot.item_id)
-        wanted = _REASON_FOR_STATE.get(snapshot.state)
+        policy = self._items.canonical(snapshot.item_id).staple_policy
+        suppressed = policy in _NO_INVENTORY_NEEDS
+        wanted = None if suppressed else _REASON_FOR_STATE.get(snapshot.state)
         # Add before withdrawing: a need going from low to out must never be
         # left without a reason in between, or it would be cancelled.
         if wanted is not None and not self._dismissed_since(snapshot):
@@ -417,7 +428,7 @@ class ReplenishmentNeeds:
                 actor=SYNC_ACTOR,
                 detail={"observation_id": observation_id},
             )
-        if snapshot.state is not StockState.UNKNOWN:
+        if suppressed or snapshot.state is not StockState.UNKNOWN:
             for kind in _INVENTORY_REASONS:
                 if kind is not wanted:
                     self.withdraw_reason(
@@ -426,7 +437,44 @@ class ReplenishmentNeeds:
                         source_key=INVENTORY_SOURCE,
                         actor=SYNC_ACTOR,
                     )
+        self._apply_standing_approval(snapshot.item_id, policy)
         return self.open_need_for_item(snapshot.item_id)
+
+    def _apply_standing_approval(
+        self, item_id: int, policy: StaplePolicy | None
+    ) -> None:
+        """Approve, or stand down, a need on the strength of a policy.
+
+        The household approved buying an always-keep item whenever it runs
+        low when it chose that policy. So such an item's suggested need is
+        approved at once. A need approved that way is cancelled again once
+        its reasons are gone, whatever the item's policy is by then. A need
+        a member approved themselves is left alone.
+
+        Args:
+            item_id: The canonical item.
+            policy: The item's policy now.
+        """
+        need = self.open_need_for_item(item_id)
+        if need is None:
+            return
+        if (
+            policy is StaplePolicy.ALWAYS_KEEP
+            and need.status is NeedStatus.SUGGESTED
+            and need.active_reasons
+        ):
+            self.transition(
+                need.id, NeedStatus.APPROVED, actor=SYNC_ACTOR, note=STANDING_APPROVAL
+            )
+        elif need.status is NeedStatus.APPROVED and not need.active_reasons:
+            last = self.history(need.id)[-1]
+            if last.actor == SYNC_ACTOR and last.note == STANDING_APPROVAL:
+                self.transition(
+                    need.id,
+                    NeedStatus.CANCELLED,
+                    actor=SYNC_ACTOR,
+                    note="No reason for it remains.",
+                )
 
     def sync_all(self) -> None:
         """Sync the need of every active household item."""

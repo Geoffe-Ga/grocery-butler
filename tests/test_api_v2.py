@@ -1243,6 +1243,102 @@ class TestPlans:
         assert _error(response)["code"] == "plan_not_found"
 
 
+class TestStaplePolicies:
+    """A policy set through the API shapes needs and plans at once (ADR 0017)."""
+
+    def _low(self, api: Api, item_id: int) -> None:
+        """Say the item is running low."""
+        response = api.call("POST", f"/items/{item_id}/observations", {"state": "low"})
+        assert response.status_code == 201
+
+    def test_policy_and_target_are_set_and_returned(self, api: Api) -> None:
+        """PATCH sets a policy, a whole target and a cadence."""
+        item_id = _item(api, "coffee")
+
+        response = api.call(
+            "PATCH",
+            f"/items/{item_id}",
+            {
+                "staple_policy": "always_keep",
+                "target_quantity": 2,
+                "target_unit": "bag",
+                "cadence_days": 14,
+            },
+        )
+        item = response.get_json()
+
+        assert response.status_code == 200
+        assert item["staple_policy"] == "always_keep"
+        assert (item["target_quantity"], item["target_unit"]) == (2.0, "bag")
+        assert item["cadence_days"] == 14
+
+    def test_always_keep_reaches_the_plan_without_an_approval(self, api: Api) -> None:
+        """Coffee marked low is on the next plan, with its target amount."""
+        item_id = _item(api, "coffee")
+        api.call(
+            "PATCH",
+            f"/items/{item_id}",
+            {
+                "staple_policy": "always_keep",
+                "target_quantity": 2,
+                "target_unit": "bag",
+            },
+        )
+        self._low(api, item_id)
+
+        plan = api.call("POST", "/plans", {}).get_json()
+
+        assert [line["display_name"] for line in plan["lines"]] == ["Coffee"]
+        assert plan["lines"][0]["amounts"] == [{"quantity": 2.0, "unit": "bag"}]
+
+    def test_changing_the_policy_resyncs_the_need_at_once(self, api: Api) -> None:
+        """A suggestion is approved, then withdrawn, as the policy changes."""
+        item_id = _item(api, "paprika")
+        self._low(api, item_id)
+        suggested = api.call("GET", f"/items/{item_id}").get_json()["open_need"]
+
+        api.call("PATCH", f"/items/{item_id}", {"staple_policy": "always_keep"})
+        approved = api.call("GET", f"/items/{item_id}").get_json()["open_need"]
+        api.call("PATCH", f"/items/{item_id}", {"staple_policy": "meals_only"})
+        quiet = api.call("GET", f"/items/{item_id}").get_json()["open_need"]
+
+        assert suggested["status"] == "suggested"
+        assert approved["status"] == "approved"
+        assert quiet is None
+
+    @pytest.mark.parametrize("body", [{"target_quantity": 2}, {"target_unit": "bag"}])
+    def test_half_a_target_is_refused(self, api: Api, body: dict[str, Any]) -> None:
+        """A quantity and a unit travel together."""
+        item_id = _item(api, "coffee")
+
+        response = api.call("PATCH", f"/items/{item_id}", body)
+
+        assert (response.status_code, _error(response)["code"]) == (
+            400,
+            "target_incomplete",
+        )
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"staple_policy": "sometimes"},
+            {"target_quantity": 0, "target_unit": "bag"},
+            {"target_quantity": 1, "target_unit": "armful"},
+            {"cadence_days": 0},
+        ],
+    )
+    def test_invalid_values_are_refused(self, api: Api, body: dict[str, Any]) -> None:
+        """Unknown policies and units, and non-positive numbers, are 400s."""
+        item_id = _item(api, "coffee")
+
+        response = api.call("PATCH", f"/items/{item_id}", body)
+
+        assert (response.status_code, _error(response)["code"]) == (
+            400,
+            "validation_failed",
+        )
+
+
 class TestHandoffs:
     """Draft, approve and execute a handoff to an outside service (ADR 0016)."""
 
