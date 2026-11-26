@@ -18,6 +18,7 @@ kind of record is and when it stops mattering.
 | Approval envelopes | Until deleted | An approval expires 30 minutes after it is drafted. The record stays. |
 | Handoff attempts | Until deleted | One row per approved handoff: the adapter, the plan version, the link and when it expires. No payment or order data; none exists. |
 | Receipts and their lines | Until deleted | What the household said arrived, and each member's decision. Item names as the receipt worded them. No prices, no payment data. |
+| Check reminder choices and history | Until deleted | Which items a member snoozed, dismissed or stopped, and each reminder issued, with who and when. |
 | API idempotency records | Until deleted | A key is only honoured for 30 days. |
 | Operational counters | Until deleted | One number per counter per day. No household content. |
 | Audit events | Not in the database | Lines in the platform's logs, kept as long as the platform keeps logs. No images or secrets. |

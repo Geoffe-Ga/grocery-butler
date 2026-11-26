@@ -16,7 +16,7 @@ import datetime as dt
 import functools
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from flask import Blueprint, Response, current_app, g, request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -30,6 +30,7 @@ from grocery_butler.approvals import (
     StaleEnvelopeError,
 )
 from grocery_butler.auth_middleware import require_bearer
+from grocery_butler.check_reminders import CheckReminders, SnoozeInvalidError
 from grocery_butler.constraints import (
     COMMON_ALLERGENS,
     ConstraintNotFoundError,
@@ -1860,6 +1861,121 @@ def reject_receipt(receipt_id: int) -> JsonResult:
     """
     receipt = Reconciliations(_db_path()).reject(receipt_id, actor=g.actor)
     return _receipt_payload(receipt), 200
+
+
+# ---------------------------------------------------------------------------
+# Check reminders (ADR 0019)
+# ---------------------------------------------------------------------------
+
+
+class _IssueReminders(BaseModel):
+    """Body of ``POST /reminders/checks/issue``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max: int | None = Field(default=None, ge=0, le=20)
+
+
+class _ReminderChoice(BaseModel):
+    """Body of ``POST /items/<id>/check-reminder``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["snooze", "dismiss", "stop", "resume"]
+    days: int | None = None
+
+
+def _reminder_state_payload(reminders: CheckReminders, item_id: int) -> dict[str, Any]:
+    """Serialize an item's reminder state with its history.
+
+    Args:
+        reminders: The reminder service.
+        item_id: The item.
+
+    Returns:
+        The state and every reminder issued or choice made, oldest first.
+    """
+    payload = reminders.state(item_id).model_dump(mode="json")
+    payload["history"] = [
+        event.model_dump(mode="json") for event in reminders.history(item_id)
+    ]
+    return payload
+
+
+@api_v2.get("/reminders/checks")
+def list_check_reminders() -> Response:
+    """List the items worth asking the household about now.
+
+    Reading records nothing. At most as many candidates are returned as
+    may still be issued today.
+
+    Returns:
+        ``candidates``, ``daily_limit``, ``issued_today``,
+        ``remaining_today`` and ``suggested_hour_utc``.
+    """
+    overview = CheckReminders(_db_path()).overview()
+    return _json(overview.model_dump(mode="json"), 200)
+
+
+@api_v2.post("/reminders/checks/issue")
+@mutation()
+def issue_check_reminders() -> JsonResult:
+    """Take the next reminders to surface, and record them as issued.
+
+    Returns:
+        ``{"issued": [...]}``: never more than today's remaining allowance.
+    """
+    body = _IssueReminders.model_validate(request.get_json(silent=True) or {})
+    issued = CheckReminders(_db_path()).issue(actor=g.actor, max_count=body.max)
+    return {"issued": [c.model_dump(mode="json") for c in issued]}, 200
+
+
+@api_v2.get("/items/<int:item_id>/check-reminder")
+def get_check_reminder(item_id: int) -> Response:
+    """Return what members have asked for about an item's reminders.
+
+    Args:
+        item_id: The item's id.
+
+    Returns:
+        The reminder state and its history.
+
+    Raises:
+        ItemNotFoundError: If no item has this id.
+    """
+    return _json(_reminder_state_payload(CheckReminders(_db_path()), item_id), 200)
+
+
+@api_v2.post("/items/<int:item_id>/check-reminder")
+@mutation()
+def choose_check_reminder(item_id: int) -> JsonResult:
+    """Snooze, dismiss, stop or resume an item's reminders.
+
+    Args:
+        item_id: The item's id.
+
+    Returns:
+        The reminder state and its history after the choice.
+
+    Raises:
+        ItemNotFoundError: If no item has this id.
+        ApiError: 400 ``validation_failed`` when a snooze has no ``days``
+            or an impossible number of them.
+    """
+    body = _ReminderChoice.model_validate(_body())
+    reminders = CheckReminders(_db_path())
+    try:
+        if body.action == "snooze":
+            reminders.snooze(item_id, days=body.days or 0, actor=g.actor)
+        elif body.action == "dismiss":
+            reminders.dismiss(item_id, actor=g.actor)
+        elif body.action == "stop":
+            reminders.stop(item_id, actor=g.actor)
+        else:
+            reminders.resume(item_id, actor=g.actor)
+    except SnoozeInvalidError as err:
+        raise ApiError(400, "validation_failed", str(err)) from err
+    return _reminder_state_payload(reminders, item_id), 200
 
 
 # ---------------------------------------------------------------------------

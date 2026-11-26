@@ -617,7 +617,8 @@ The contract is [`docs/api/v2.md`](docs/api/v2.md); the reasons are in
 - **Live today:** household members; household items with their aliases,
   merges, policies, current state and history; observations a member states
   directly; observation batches; replenishment needs; shopping plans; handoffs
-  to an outside service behind an approval; receipts; operational metrics;
+  to an outside service behind an approval; receipts; check reminders;
+  operational metrics;
   and the full household export.
 
 ### Discord Bot Commands
@@ -873,6 +874,17 @@ schema the backup was taken at, loads it, and applies the migrations written
 since. Delete removes every row and needs a typed phrase. The runbook, what
 is retained and who else handles the data are in
 [`docs/operations/data-lifecycle.md`](docs/operations/data-lifecycle.md).
+
+**Check reminders ([ADR 0019](docs/adr/0019-check-reminders-are-rate-limited-suggestions.md)).**
+`grocery_butler/check_reminders.py` chooses which items are worth asking
+the household about: ones it keeps in stock whose state was never checked,
+has gone stale, or was read with low confidence. Always-keep items come
+first. At most three are issued a day unless the household changes the
+`check_reminders_per_day` preference, and an issued item rests for three
+days. A member can snooze an item, dismiss it until new evidence arrives, or
+say "stop asking", which holds until they turn it back on; each choice is
+recorded with who made it. Reminders are suggestions to OpenClaw. Nothing in
+Grocery Butler sends a notification.
 
 **Receipts and reconciliation ([ADR 0018](docs/adr/0018-receipts-are-reviewed-evidence.md)).**
 `grocery_butler/reconciliation.py` records what actually came home. A
@@ -1172,6 +1184,8 @@ written: such fields are replaced with `[redacted]`.
 | `receipt.submitted` | A receipt was stored for review | `receipt_id`, `attempt_id`, `lines`, `needs_review`, `actor` |
 | `receipt.resolved` | A member reviewed a receipt | `receipt_id`, `attempt_id`, `confirmed`, `skipped`, `actor` |
 | `receipt.rejected` | A receipt was thrown away | `receipt_id`, `actor` |
+| `reminder.issued` | Check reminders were taken to surface | `count`, `actor` |
+| `reminder.snoozed`, `reminder.dismissed`, `reminder.stopped`, `reminder.resumed` | A member chose how an item's reminders behave | `item_id`, `actor` |
 | `audit.count_failed` | A counter could not be advanced | `counted`, `error` |
 
 `capture_session` (`batch-<id>`) is the same on every event about one
