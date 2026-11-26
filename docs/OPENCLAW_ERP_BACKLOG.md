@@ -609,7 +609,7 @@ Create these issues first; do not explode the entire document into tickets until
 
 ## Decisions still required
 
-Six of the seven original questions are settled; each links to its ADR.
+All seven original questions are settled; each links to its ADR. One, the fulfillment path, is settled with conditions that only Geoff can meet; they are listed in its ADR.
 
 1. **Deployment model:** one household for the first production release, with no tenancy in the schema. [ADR 0002](adr/0002-single-household-pilot-with-named-members.md)
 2. **Photo retention:** a source photo is kept until its evidence batch closes, then deleted. [ADR 0005](adr/0005-photo-capture-after-the-fulfillment-handoff.md)
