@@ -274,6 +274,15 @@ The one adapter today is the **list export** (`fulfillment/export.py`): any
 plan version as a grouped checklist in text, JSON or CSV, for any store. It
 contacts nothing. Get it from `GET /api/v2/plans/{version}/export`.
 
+The **Instacart adapter** (`fulfillment/instacart/`) is a stub
+([ADR 0014](docs/adr/0014-instacart-developer-platform-as-first-handoff-adapter.md)).
+It is off unless `INSTACART_ENABLED=true`, and even then it runs on a stub
+transport: it returns a fake link on `example.invalid` and contacts nothing.
+It claims one capability, `shopping_list_link`, enforces no hard constraint
+(so it reports every one), and today sends each plan line by name only.
+Quantities and preferences arrive with #147, real link creation behind an
+approval with #148. No API offers an Instacart handoff yet.
+
 The live-API verification plans that used to live here (#31, #32, #60) are
 superseded by the ADR.
 
