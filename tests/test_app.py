@@ -2088,6 +2088,16 @@ class TestPreferencesPage:
         response = client.get("/preferences")
         assert response.status_code == 200
 
+    def test_dietary_field_says_it_does_not_block_purchases(
+        self, client: FlaskClient
+    ) -> None:
+        """ADR 0012: the free text is guidance; allergies need an exclusion."""
+        html = client.get("/preferences").data.decode()
+
+        assert "does not block" in html
+        assert "allergen exclusion" in html
+        assert 'aria-describedby="dietary_restrictions_help"' in html
+
     def test_preferences_contains_title(self, client: FlaskClient) -> None:
         """Test preferences page has the title."""
         response = client.get("/preferences")

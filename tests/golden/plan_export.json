@@ -11,6 +11,11 @@
             }
           ],
           "item": "Buttermilk",
+          "must": [
+            "no peanut",
+            "vegetarian",
+            "no substitutes"
+          ],
           "preferred_brand": "Clover",
           "preferred_size": "1 qt",
           "reasons": [
@@ -21,6 +26,10 @@
         {
           "amounts": [],
           "item": "Oat Milk",
+          "must": [
+            "no peanut",
+            "vegetarian"
+          ],
           "preferred_brand": null,
           "preferred_size": null,
           "reasons": [
@@ -39,6 +48,7 @@
             }
           ],
           "item": "Yogurt",
+          "must": [],
           "preferred_brand": null,
           "preferred_size": null,
           "reasons": [
@@ -58,6 +68,7 @@
             }
           ],
           "item": "Rice",
+          "must": [],
           "preferred_brand": null,
           "preferred_size": null,
           "reasons": [
@@ -73,6 +84,7 @@
         {
           "amounts": [],
           "item": "Birthday Candles",
+          "must": [],
           "preferred_brand": null,
           "preferred_size": null,
           "reasons": [

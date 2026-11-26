@@ -19,8 +19,9 @@ from grocery_butler.fulfillment.base import (
     FulfillmentAdapter,
     HandoffResult,
     HandoffStatus,
+    unenforced_constraints,
 )
-from grocery_butler.models import NeedReasonKind
+from grocery_butler.models import HardConstraintKind, NeedReasonKind
 
 if TYPE_CHECKING:
     from grocery_butler.models import PlanLine, ShoppingPlan
@@ -45,6 +46,12 @@ _CSV_COLUMNS = (
     "reasons",
     "preferred_brand",
     "preferred_size",
+    "must",
+)
+
+CHECK_CONSTRAINTS = (
+    " A list can't enforce the lines marked MUST: check each of those "
+    "products yourself."
 )
 
 # A spreadsheet treats a cell starting with one of these as a formula.
@@ -89,6 +96,39 @@ def _reasons(line: PlanLine) -> list[str]:
     if named:
         labels.append("for " + ", ".join(named))
     return labels
+
+
+def _must(line: PlanLine) -> list[str]:
+    """Word a line's hard constraints for a person.
+
+    Args:
+        line: A plan line.
+
+    Returns:
+        One short phrase per hard constraint, e.g. ``no peanut``.
+    """
+    phrases = []
+    for constraint in line.hard_constraints:
+        if constraint.kind is HardConstraintKind.ALLERGEN_EXCLUSION:
+            phrases.append(f"no {constraint.value}")
+        elif constraint.kind is HardConstraintKind.DO_NOT_SUBSTITUTE:
+            phrases.append("no substitutes")
+        else:
+            phrases.append(constraint.value)
+    return phrases
+
+
+def _must_text(line: PlanLine) -> str:
+    """Summarize a line's hard constraints for the checklist.
+
+    Args:
+        line: A plan line.
+
+    Returns:
+        `` {MUST: ...}``, or an empty string when the line has none.
+    """
+    phrases = _must(line)
+    return f" {{MUST: {'; '.join(phrases)}}}" if phrases else ""
 
 
 def _number(quantity: float) -> str:
@@ -188,6 +228,7 @@ def render_text(plan: ShoppingPlan) -> str:
         rows = [
             f"[ ] {line.display_name}: {_amount_text(line)}"
             f" ({'; '.join(_reasons(line))}){_preference_text(line)}"
+            f"{_must_text(line)}"
             for line in lines
         ]
         blocks.append("\n".join([category, *rows]))
@@ -218,6 +259,7 @@ def render_json(plan: ShoppingPlan) -> str:
                     "reasons": _reasons(line),
                     "preferred_brand": line.constraints.get("preferred_brand"),
                     "preferred_size": line.constraints.get("preferred_size"),
+                    "must": _must(line),
                 }
                 for line in lines
             ],
@@ -263,6 +305,7 @@ def render_csv(plan: ShoppingPlan) -> str:
                         "; ".join(_reasons(line)),
                         str(line.constraints.get("preferred_brand") or ""),
                         str(line.constraints.get("preferred_size") or ""),
+                        "; ".join(_must(line)),
                     )
                 )
     return buffer.getvalue()
@@ -297,7 +340,10 @@ class ExportAdapter(FulfillmentAdapter):
 
         Returns:
             A created handoff whose artifacts hold the text, JSON and CSV.
+            A list can enforce nothing, so every hard constraint on the plan
+            is printed on its line and reported as unenforced.
         """
+        unenforced = unenforced_constraints(self.describe(), plan)
         return HandoffResult(
             adapter="export",
             status=HandoffStatus.CREATED,
@@ -306,7 +352,9 @@ class ExportAdapter(FulfillmentAdapter):
             human_action=(
                 "Take this list to any store or shopping site and buy what you "
                 "choose there. Nothing has been ordered."
+                + (CHECK_CONSTRAINTS if unenforced else "")
             ),
+            unenforced_constraints=unenforced,
             artifacts={
                 "text": render_text(plan),
                 "json": render_json(plan),

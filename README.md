@@ -259,6 +259,9 @@ through `grocery_butler/fulfillment/registry.py`.
   provider's developer program, or the user's own session.
 - **Core modules never import an adapter.** A test walks the imports of
   every domain module to hold that line.
+- **A hard constraint is enforced or reported, never dropped.** An adapter
+  declares the kinds it can guarantee; the rest come back on the handoff as
+  unenforced, for a person to check.
 
 The one adapter today is the **list export** (`fulfillment/export.py`): any
 plan version as a grouped checklist in text, JSON or CSV, for any store. It
@@ -719,6 +722,8 @@ public ones:
 | `InventorySnapshot` | What we currently believe about an item, and the observation behind it. |
 | `ReplenishmentNeed` | An item that should be bought, with its status and reasons. |
 | `ShoppingPlan` | One immutable version of what the household intends to buy. |
+| `HardConstraint` | Something that must hold: an allergen exclusion, a dietary rule, no substitutes. |
+| `SoftPreference` | Something the household would like: a brand, a size, organic, generic. |
 
 Vocabulary enums (`StrEnum`): `IngredientCategory`, `InventoryStatus`, `Unit`,
 `BrandPreferenceType`, `BrandMatchType`, `PendingActionStatus`,
@@ -781,6 +786,18 @@ makes the next version. Amounts come only from recipes; a line that only a
 need put there has no amount and means "the usual". The older shopping list
 (`/api/v1/shopping-list/preview` and the dashboard page) still works as
 before and is retired with v1.
+
+**Hard constraints and soft preferences ([ADR 0012](docs/adr/0012-hard-constraints-and-soft-preferences.md)).**
+`grocery_butler/constraints.py` keeps two things apart. A hard constraint
+must hold: an allergen exclusion, a dietary rule, or "don't substitute this
+item". A soft preference is what the household would like: a brand, a size,
+organic, generic. They are different types in different tables, and nothing
+converts one into the other. Every plan line carries the hard constraints
+that apply to it, in a field of its own, and changing one makes the current
+plan stale. A fulfillment adapter either enforces a hard constraint or
+reports it as unenforced for a person to check; it never drops one. The old
+free-text dietary restrictions were copied, word for word, into one
+unverified dietary rule: enter real allergens as allergen exclusions.
 
 The backlog's next domain concepts (`FulfillmentDraft` and others) are
 described in

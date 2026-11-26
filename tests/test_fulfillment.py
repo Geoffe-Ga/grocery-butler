@@ -23,7 +23,9 @@ from grocery_butler.fulfillment.base import (
     FulfillmentAdapter,
     HandoffResult,
     HandoffStatus,
+    UnenforcedConstraint,
     UnsupportedCapabilityError,
+    unenforced_constraints,
 )
 from grocery_butler.fulfillment.export import EXPORT_FORMATS, ExportAdapter
 from grocery_butler.fulfillment.registry import (
@@ -32,9 +34,11 @@ from grocery_butler.fulfillment.registry import (
     default_registry,
 )
 from grocery_butler.models import (
+    HardConstraintKind,
     IngredientCategory,
     NeedReasonKind,
     PlanAmount,
+    PlanHardConstraint,
     PlanLine,
     PlanReason,
     ShoppingPlan,
@@ -48,6 +52,7 @@ PACKAGE = Path(__file__).resolve().parent.parent / "grocery_butler"
 CORE_MODULES = [
     "approvals",
     "consolidator",
+    "constraints",
     "household_items",
     "inventory_ledger",
     "members",
@@ -68,12 +73,24 @@ def _reason(kind: NeedReasonKind, recipe: str | None = None) -> PlanReason:
     return PlanReason(kind=kind, source_key=key, detail=detail)
 
 
+PEANUT = PlanHardConstraint(
+    kind=HardConstraintKind.ALLERGEN_EXCLUSION, value="peanut", scope="household"
+)
+VEGETARIAN = PlanHardConstraint(
+    kind=HardConstraintKind.DIETARY_RULE, value="vegetarian", scope="household"
+)
+NO_SUBSTITUTES = PlanHardConstraint(
+    kind=HardConstraintKind.DO_NOT_SUBSTITUTE, value="", scope="item"
+)
+
+
 def _line(
     item_id: int,
     name: str,
     category: IngredientCategory | None,
     amounts: list[tuple[float, Unit]],
     reasons: list[PlanReason],
+    must: list[PlanHardConstraint] | None = None,
     **constraints: str,
 ) -> PlanLine:
     """Build a plan line."""
@@ -85,6 +102,7 @@ def _line(
         reasons=reasons,
         constraints=dict(constraints),
         need_id=None,
+        hard_constraints=must or [],
     )
 
 
@@ -111,6 +129,7 @@ def plan() -> ShoppingPlan:
                     _reason(recipe, "Biscuits"),
                     _reason(recipe, "Pancakes"),
                 ],
+                [PEANUT, VEGETARIAN, NO_SUBSTITUTES],
                 preferred_brand="Clover",
                 preferred_size="1 qt",
             ),
@@ -120,6 +139,7 @@ def plan() -> ShoppingPlan:
                 IngredientCategory.DAIRY,
                 [],
                 [_reason(NeedReasonKind.OUT)],
+                [PEANUT, VEGETARIAN],
             ),
             _line(
                 3,
@@ -190,7 +210,7 @@ class TestExportGoldenFiles:
 
         assert artifacts["text"] == "Shopping plan v3\n\nNothing to buy.\n"
         assert artifacts["csv"].splitlines() == [
-            "category,item,quantity,unit,reasons,preferred_brand,preferred_size"
+            "category,item,quantity,unit,reasons,preferred_brand,preferred_size,must"
         ]
         assert json.loads(artifacts["json"])["categories"] == []
 
@@ -244,12 +264,115 @@ class TestExportHandoff:
             authorization=Authorization.NONE,
             data_freshness=description.data_freshness,
             human_required=True,
+            enforces=frozenset(),
         )
         assert "plan" in description.data_freshness
 
 
+class TestHardConstraintsInTheExport:
+    """A list can't enforce anything, so it shows and reports everything."""
+
+    def test_every_hard_constraint_is_reported_as_unenforced(
+        self, plan: ShoppingPlan
+    ) -> None:
+        """Five constraints on two lines, five reports, none dropped."""
+        result = ExportAdapter().create_handoff(plan)
+
+        assert result.unenforced_constraints == (
+            UnenforcedConstraint(1, "Buttermilk", PEANUT.kind, "peanut"),
+            UnenforcedConstraint(1, "Buttermilk", VEGETARIAN.kind, "vegetarian"),
+            UnenforcedConstraint(1, "Buttermilk", NO_SUBSTITUTES.kind, ""),
+            UnenforcedConstraint(2, "Oat Milk", PEANUT.kind, "peanut"),
+            UnenforcedConstraint(2, "Oat Milk", VEGETARIAN.kind, "vegetarian"),
+        )
+        assert "marked MUST" in result.human_action
+
+    def test_a_plan_without_hard_constraints_reports_none(
+        self, plan: ShoppingPlan
+    ) -> None:
+        """No constraints, no warning."""
+        plain = plan.model_copy(update={"lines": plan.lines[2:]})
+
+        result = ExportAdapter().create_handoff(plain)
+
+        assert result.unenforced_constraints == ()
+        assert "MUST" not in result.human_action
+        assert "MUST" not in result.artifacts["text"]
+
+    def test_hard_constraints_are_never_written_as_preferences(
+        self, plan: ShoppingPlan
+    ) -> None:
+        """In every format a constraint sits under must, never under prefer."""
+        artifacts = ExportAdapter().create_handoff(plan).artifacts
+        document = json.loads(artifacts["json"])
+        buttermilk = document["categories"][0]["lines"][0]
+        row = next(csv.DictReader(io.StringIO(artifacts["csv"])))
+        text_line = artifacts["text"].splitlines()[3]
+
+        assert buttermilk["must"] == ["no peanut", "vegetarian", "no substitutes"]
+        assert "peanut" not in json.dumps(
+            {k: v for k, v in buttermilk.items() if k != "must"}
+        )
+        assert row["must"] == "no peanut; vegetarian; no substitutes"
+        assert "peanut" not in row["preferred_brand"] + row["preferred_size"]
+        prefer, must = text_line.split("{MUST:")
+        assert "peanut" not in prefer
+        assert "no peanut" in must
+
+    def test_the_export_enforces_nothing_by_itself(self) -> None:
+        """It must not claim a guarantee a piece of paper can't give."""
+        assert ExportAdapter().describe().enforces == frozenset()
+
+
 class TestAdapterContract:
     """What every registered adapter must honour."""
+
+    @pytest.mark.parametrize(
+        "adapter", default_registry().adapters(), ids=default_registry().names()
+    )
+    def test_adapter_enforces_or_reports_every_hard_constraint(
+        self, adapter: FulfillmentAdapter, plan: ShoppingPlan
+    ) -> None:
+        """ADR 0012: a hard constraint is never silently dropped."""
+        description = adapter.describe()
+        result = adapter.create_handoff(plan)
+        reported = {
+            (entry.item_id, entry.kind, entry.value)
+            for entry in result.unenforced_constraints
+        }
+
+        for line in plan.lines:
+            for constraint in line.hard_constraints:
+                enforced = constraint.kind in description.enforces
+                was_reported = (
+                    line.item_id,
+                    constraint.kind,
+                    constraint.value,
+                ) in reported
+                assert enforced or was_reported, (line.display_name, constraint)
+        assert result.unenforced_constraints == unenforced_constraints(
+            description, plan
+        )
+
+    def test_an_adapter_that_enforces_a_kind_is_not_asked_to_report_it(
+        self, plan: ShoppingPlan
+    ) -> None:
+        """The helper reports exactly what the adapter doesn't enforce."""
+        description = AdapterDescription(
+            name="strict",
+            display_name="Strict",
+            capabilities=frozenset({Capability.EXPORT_LIST}),
+            authorization=Authorization.NONE,
+            data_freshness="n/a",
+            human_required=True,
+            enforces=frozenset({HardConstraintKind.ALLERGEN_EXCLUSION}),
+        )
+
+        kinds = [entry.kind for entry in unenforced_constraints(description, plan)]
+
+        assert HardConstraintKind.ALLERGEN_EXCLUSION not in kinds
+        assert kinds.count(HardConstraintKind.DIETARY_RULE) == 2
+        assert kinds.count(HardConstraintKind.DO_NOT_SUBSTITUTE) == 1
 
     @pytest.mark.parametrize(
         "adapter", default_registry().adapters(), ids=default_registry().names()

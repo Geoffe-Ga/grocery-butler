@@ -10,9 +10,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from grocery_butler.constraints import HouseholdRules
 from grocery_butler.db import get_connection, init_db
 from grocery_butler.household_items import HouseholdItemStore
 from grocery_butler.models import (
+    HardConstraintKind,
     HouseholdItemUpdate,
     Ingredient,
     IngredientCategory,
@@ -410,6 +412,92 @@ class TestBuildFromMeals:
                 [PlanMeal(recipe_id=recipe_id), PlanMeal(recipe_id=recipe_id)],
                 actor=ACTOR,
             )
+
+
+class TestHardConstraintsOnLines:
+    """A plan line carries every hard constraint that applies to it."""
+
+    def test_household_and_item_constraints_reach_the_line(
+        self, plans: ShoppingPlans, needs: ReplenishmentNeeds, db_path: str
+    ) -> None:
+        """Household-wide ones on every line, item ones on their own line."""
+        milk_id = _approved_need(db_path, needs, "oat milk", NeedReasonKind.OUT)
+        _approved_need(db_path, needs, "eggs", NeedReasonKind.OUT)
+        rules = HouseholdRules(db_path)
+        rules.add_hard(HardConstraintKind.ALLERGEN_EXCLUSION, "peanut", actor=ACTOR)
+        rules.add_hard(
+            HardConstraintKind.DO_NOT_SUBSTITUTE, "", actor=ACTOR, item_id=milk_id
+        )
+
+        plan = plans.build([], actor=ACTOR)
+
+        by_name = {
+            line.display_name: [
+                (c.kind.value, c.value, c.scope) for c in line.hard_constraints
+            ]
+            for line in plan.lines
+        }
+        assert by_name == {
+            "Eggs": [("allergen_exclusion", "peanut", "household")],
+            "Oat Milk": [
+                ("allergen_exclusion", "peanut", "household"),
+                ("do_not_substitute", "", "item"),
+            ],
+        }
+
+    def test_hard_constraints_are_kept_out_of_the_preferences_field(
+        self, plans: ShoppingPlans, needs: ReplenishmentNeeds, db_path: str
+    ) -> None:
+        """ADR 0012: a hard constraint can't be read as a preference."""
+        item_id = _approved_need(db_path, needs, "oat milk", NeedReasonKind.OUT)
+        HouseholdItemStore(db_path).update(
+            item_id, HouseholdItemUpdate(preferred_brand="Oatly"), actor=ACTOR
+        )
+        HouseholdRules(db_path).add_hard(
+            HardConstraintKind.ALLERGEN_EXCLUSION, "peanut", actor=ACTOR
+        )
+
+        line = plans.build([], actor=ACTOR).lines[0]
+
+        assert line.constraints == {"preferred_brand": "Oatly"}
+        assert [c.value for c in line.hard_constraints] == ["peanut"]
+
+    def test_changing_a_hard_constraint_makes_the_plan_stale_and_a_new_version(
+        self, plans: ShoppingPlans, needs: ReplenishmentNeeds, db_path: str
+    ) -> None:
+        """An approval built on the old plan can't survive a new allergen."""
+        _approved_need(db_path, needs, "oat milk", NeedReasonKind.OUT)
+        first = plans.build([], actor=ACTOR)
+        rules = HouseholdRules(db_path)
+
+        constraint = rules.add_hard(
+            HardConstraintKind.ALLERGEN_EXCLUSION, "peanut", actor=ACTOR
+        )
+        stale = plans.current_fingerprint(first.version)
+        second = plans.build([], actor=ACTOR)
+        rules.deactivate_hard(constraint.id, actor=ACTOR)
+        third = plans.build([], actor=ACTOR)
+
+        assert stale != first.content_hash
+        assert (second.version, third.version) == (2, 3)
+        assert third.lines[0].hard_constraints == []
+        assert plans.get(2) == second
+
+    def test_stored_constraints_round_trip(
+        self, plans: ShoppingPlans, needs: ReplenishmentNeeds, db_path: str
+    ) -> None:
+        """What was built is what is read back."""
+        _approved_need(db_path, needs, "oat milk", NeedReasonKind.OUT)
+        HouseholdRules(db_path).add_hard(
+            HardConstraintKind.DIETARY_RULE, "vegetarian", actor=ACTOR
+        )
+
+        built = plans.build([], actor=ACTOR)
+
+        assert plans.get(built.version) == built
+        assert (
+            built.lines[0].hard_constraints[0].kind is HardConstraintKind.DIETARY_RULE
+        )
 
 
 class TestDeterminismAndVersions:

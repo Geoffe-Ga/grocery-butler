@@ -10,6 +10,10 @@ Two rules hold for every adapter:
 - A handoff is not an order. A result says a handoff was created or failed.
   It never says anything was purchased.
 - A person completes the purchase. Every adapter requires a human to act.
+- A hard constraint is enforced or reported, never dropped (ADR 0012). An
+  adapter declares the kinds it can enforce by itself. Every other hard
+  constraint on the plan is listed on the result as unenforced, for a
+  person to check.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import datetime as dt
 
-    from grocery_butler.models import ShoppingPlan
+    from grocery_butler.models import HardConstraintKind, ShoppingPlan
 
 
 class Capability(enum.StrEnum):
@@ -64,7 +68,9 @@ class AdapterDescription:
     """What an adapter declares about itself.
 
     ``data_freshness`` says, in a sentence, how current anything the
-    adapter reports about the outside world is.
+    adapter reports about the outside world is. ``enforces`` lists the hard
+    constraint kinds the adapter can guarantee by itself; anything else it
+    must report as unenforced.
     """
 
     name: str
@@ -73,6 +79,17 @@ class AdapterDescription:
     authorization: Authorization
     data_freshness: str
     human_required: bool
+    enforces: frozenset[HardConstraintKind] = frozenset()
+
+
+@dataclass(frozen=True)
+class UnenforcedConstraint:
+    """A hard constraint an adapter could not guarantee for one plan line."""
+
+    item_id: int
+    display_name: str
+    kind: HardConstraintKind
+    value: str
 
 
 @dataclass(frozen=True)
@@ -82,7 +99,8 @@ class HandoffResult:
     ``artifacts`` maps a format name to content the household can use (an
     export's text, say). ``external_url`` is where the household continues,
     for adapters that create one. ``human_action`` tells the person what to
-    do next.
+    do next. ``unenforced_constraints`` lists every hard constraint on the
+    plan that the adapter could not guarantee; a person has to check those.
     """
 
     adapter: str
@@ -94,6 +112,7 @@ class HandoffResult:
     external_url: str | None = None
     expires_at: dt.datetime | None = None
     detail: str = ""
+    unenforced_constraints: tuple[UnenforcedConstraint, ...] = ()
 
 
 class UnsupportedCapabilityError(ValueError):
@@ -111,6 +130,35 @@ class UnsupportedCapabilityError(ValueError):
         )
         self.adapter = adapter
         self.capability = capability
+
+
+def unenforced_constraints(
+    description: AdapterDescription, plan: ShoppingPlan
+) -> tuple[UnenforcedConstraint, ...]:
+    """List the plan's hard constraints an adapter can't guarantee.
+
+    Every adapter builds its result's ``unenforced_constraints`` with this,
+    so a constraint it does not enforce is always reported.
+
+    Args:
+        description: The adapter's own description.
+        plan: The plan being handed off.
+
+    Returns:
+        One entry per line and hard constraint whose kind the adapter does
+        not enforce, in plan order.
+    """
+    return tuple(
+        UnenforcedConstraint(
+            item_id=line.item_id,
+            display_name=line.display_name,
+            kind=constraint.kind,
+            value=constraint.value,
+        )
+        for line in plan.lines
+        for constraint in line.hard_constraints
+        if constraint.kind not in description.enforces
+    )
 
 
 class FulfillmentAdapter(abc.ABC):
