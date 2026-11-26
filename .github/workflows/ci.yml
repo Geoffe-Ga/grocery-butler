@@ -6,7 +6,7 @@ name: CI
 # disagree.
 #
 # Every job sets timeout-minutes so a hung job costs minutes, not GitHub's
-# six-hour default. tests/test_ci_triggers.py holds every job here to it.
+# six-hour default. tests/test_workflows.py holds every workflow to it.
 
 # No push trigger: a merge to main starts no run. A PR's own CI tests what
 # lands, and the nightly full run is the backstop for skew between merges.
