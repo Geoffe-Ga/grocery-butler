@@ -17,6 +17,7 @@ from grocery_butler.consolidator import (
     _format_restock_queue,
     _parse_response_items,
     _parse_shopping_item,
+    merge_duplicate_lines,
 )
 from grocery_butler.models import (
     Ingredient,
@@ -1471,3 +1472,250 @@ class TestMergeHelperDirect:
         )
         Consolidator._merge_quantity(entry, item)
         assert entry["quantity"] == pytest.approx(3.0)
+
+
+# ---------------------------------------------------------------------------
+# Meal demand and restock demand for the same ingredient (issue #141)
+# ---------------------------------------------------------------------------
+
+
+def _meal(name: str, ingredient: str, quantity: float, unit: Unit) -> ParsedMeal:
+    """Build a one-ingredient meal.
+
+    Args:
+        name: Meal name.
+        ingredient: The single purchase ingredient.
+        quantity: Its quantity.
+        unit: Its unit.
+
+    Returns:
+        The meal.
+    """
+    return ParsedMeal(
+        name=name,
+        servings=2,
+        known_recipe=True,
+        needs_confirmation=False,
+        purchase_items=[
+            Ingredient(
+                ingredient=ingredient,
+                quantity=quantity,
+                unit=unit,
+                category=IngredientCategory.DAIRY,
+            )
+        ],
+        pantry_items=[],
+    )
+
+
+def _low(ingredient: str, quantity: float, unit: Unit, term: str) -> InventoryItem:
+    """Build a low inventory item with restock defaults.
+
+    Args:
+        ingredient: Ingredient name.
+        quantity: Default restock quantity.
+        unit: Default restock unit.
+        term: Default search term.
+
+    Returns:
+        The inventory item.
+    """
+    return InventoryItem(
+        ingredient=ingredient,
+        display_name=ingredient.title(),
+        category=IngredientCategory.DAIRY,
+        status=InventoryStatus.LOW,
+        default_quantity=quantity,
+        default_unit=unit,
+        default_search_term=term,
+    )
+
+
+class TestMealAndRestockForOneIngredient:
+    """An ingredient with two reasons is one line that shows both."""
+
+    def test_compatible_units_become_one_line_with_both_reasons(self) -> None:
+        """2 cup for a meal plus a 1 gal restock is one summed milk line."""
+        result = Consolidator().consolidate_simple(
+            [_meal("pancakes", "milk", 2.0, Unit.CUP)],
+            [_low("milk", 1.0, Unit.GAL, "whole milk gallon")],
+            [],
+        )
+
+        assert len(result) == 1
+        line = result[0]
+        assert line.ingredient == "milk"
+        assert line.unit is Unit.CUP
+        assert line.quantity == pytest.approx(18.0)
+        assert line.from_meals == ["pancakes", "restock"]
+        assert line.search_term == "whole milk gallon"
+
+    def test_name_match_ignores_case(self) -> None:
+        """A meal's "Milk" and inventory's "milk" are the same ingredient."""
+        result = Consolidator().consolidate_simple(
+            [_meal("pancakes", "Milk", 2.0, Unit.CUP)],
+            [_low("milk", 1.0, Unit.GAL, "milk")],
+            [],
+        )
+
+        assert [line.from_meals for line in result] == [["pancakes", "restock"]]
+
+    def test_incompatible_units_stay_separate_and_share_reasons(self) -> None:
+        """A jar can't be added to cups, but both lines say why they exist."""
+        result = Consolidator().consolidate_simple(
+            [_meal("curry", "yogurt", 1.0, Unit.CUP)],
+            [_low("yogurt", 1.0, Unit.JAR, "greek yogurt")],
+            [],
+        )
+
+        assert [(line.quantity, line.unit) for line in result] == [
+            (1.0, Unit.CUP),
+            (1.0, Unit.JAR),
+        ]
+        assert result[0].from_meals == ["curry", "restock"]
+        assert result[1].from_meals == ["restock", "curry"]
+
+    def test_two_meals_with_incompatible_units_do_not_share_reasons(self) -> None:
+        """Only a restock reason crosses lines; meals keep their own lines."""
+        result = Consolidator().consolidate_simple(
+            [
+                _meal("curry", "yogurt", 1.0, Unit.CUP),
+                _meal("parfait", "yogurt", 1.0, Unit.JAR),
+            ],
+            [],
+            [],
+        )
+
+        assert [line.from_meals for line in result] == [["curry"], ["parfait"]]
+
+    def test_restock_alone_is_unchanged(self) -> None:
+        """A restock item no meal needs is one restock line."""
+        result = Consolidator().consolidate_simple(
+            [], [_low("milk", 1.0, Unit.GAL, "whole milk gallon")], []
+        )
+
+        assert len(result) == 1
+        assert result[0].from_meals == ["restock"]
+        assert (result[0].quantity, result[0].unit) == (1.0, Unit.GAL)
+
+    def test_restocked_pantry_staple_merges_with_nothing_and_is_listed_once(
+        self,
+    ) -> None:
+        """Inventory still overrides the staple exclusion, exactly once."""
+        result = Consolidator().consolidate_simple(
+            [_meal("toast", "butter", 2.0, Unit.TBSP)],
+            [_low("butter", 1.0, Unit.LB, "unsalted butter")],
+            ["butter"],
+        )
+
+        assert [(line.ingredient, line.from_meals) for line in result] == [
+            ("butter", ["restock"])
+        ]
+
+    def test_claude_output_with_a_duplicate_is_merged_too(
+        self, mock_client: MagicMock
+    ) -> None:
+        """The same guarantee holds when Claude returns two lines."""
+        mock_client.messages.create.return_value = _make_claude_response(
+            json.dumps(
+                [
+                    {
+                        "ingredient": "milk",
+                        "quantity": 2.0,
+                        "unit": "cup",
+                        "category": "dairy",
+                        "search_term": "milk",
+                        "from_meals": ["pancakes"],
+                    },
+                    {
+                        "ingredient": "milk",
+                        "quantity": 1.0,
+                        "unit": "gal",
+                        "category": "dairy",
+                        "search_term": "whole milk gallon",
+                        "from_meals": ["restock"],
+                    },
+                ]
+            )
+        )
+
+        result = Consolidator(anthropic_client=mock_client).consolidate(
+            [_meal("pancakes", "milk", 2.0, Unit.CUP)],
+            [_low("milk", 1.0, Unit.GAL, "whole milk gallon")],
+            [],
+        )
+
+        assert len(result) == 1
+        assert result[0].quantity == pytest.approx(18.0)
+        assert result[0].from_meals == ["pancakes", "restock"]
+
+
+class TestMergeDuplicateLines:
+    """merge_duplicate_lines is the one rule both paths share."""
+
+    def test_distinct_ingredients_are_untouched(self) -> None:
+        """Nothing to merge, nothing changes."""
+        lines = [
+            ShoppingListItem(
+                ingredient="milk",
+                quantity=1.0,
+                unit=Unit.GAL,
+                category=IngredientCategory.DAIRY,
+                search_term="milk",
+                from_meals=["restock"],
+            ),
+            ShoppingListItem(
+                ingredient="eggs",
+                quantity=12.0,
+                unit=Unit.EACH,
+                category=IngredientCategory.DAIRY,
+                search_term="eggs",
+                from_meals=["omelette"],
+            ),
+        ]
+
+        assert merge_duplicate_lines(lines) == lines
+
+    def test_first_lines_search_term_wins_when_it_was_chosen(self) -> None:
+        """A deliberate search term is not replaced by a later one."""
+        lines = [
+            ShoppingListItem(
+                ingredient="milk",
+                quantity=1.0,
+                unit=Unit.GAL,
+                category=IngredientCategory.DAIRY,
+                search_term="oat milk barista",
+                from_meals=["latte"],
+            ),
+            ShoppingListItem(
+                ingredient="milk",
+                quantity=1.0,
+                unit=Unit.GAL,
+                category=IngredientCategory.DAIRY,
+                search_term="whole milk gallon",
+                from_meals=["restock"],
+            ),
+        ]
+
+        merged = merge_duplicate_lines(lines)
+
+        assert len(merged) == 1
+        assert merged[0].search_term == "oat milk barista"
+        assert merged[0].quantity == 2.0
+
+    def test_input_lines_are_not_mutated(self) -> None:
+        """Merging returns new lines."""
+        first = ShoppingListItem(
+            ingredient="milk",
+            quantity=2.0,
+            unit=Unit.CUP,
+            category=IngredientCategory.DAIRY,
+            search_term="milk",
+            from_meals=["pancakes"],
+        )
+        second = first.model_copy(update={"from_meals": ["restock"]})
+
+        merge_duplicate_lines([first, second])
+
+        assert first.quantity == 2.0
+        assert first.from_meals == ["pancakes"]
