@@ -15,7 +15,11 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from grocery_butler.claude_utils import extract_json_text
+from grocery_butler.claude_utils import (
+    create_message,
+    extract_json_text,
+    extraction_failed,
+)
 from grocery_butler.db import get_connection
 from grocery_butler.household_items import SYSTEM_ACTOR, HouseholdItemStore
 from grocery_butler.inventory_ledger import InventoryLedger
@@ -32,6 +36,8 @@ from grocery_butler.prompt_loader import load_prompt
 from grocery_butler.replenishment import ReplenishmentNeeds
 
 logger = logging.getLogger(__name__)
+
+_EXTRACTION_STAGE = "inventory_update"
 
 _RESTOCK_STATUSES = (InventoryStatus.LOW, InventoryStatus.OUT)
 
@@ -514,7 +520,9 @@ def _call_claude_with_retry(
     attempts = 0
     while attempts <= max_retries:
         try:
-            response = client.messages.create(
+            response = create_message(
+                client,
+                what="model.inventory_update",
                 model="claude-sonnet-4-6",
                 max_tokens=1024,
                 messages=[{"role": "user", "content": prompt}],
@@ -525,8 +533,10 @@ def _call_claude_with_retry(
             attempts += 1
             if attempts > max_retries:
                 logger.warning("Failed to parse Claude response after retries")
+                extraction_failed(_EXTRACTION_STAGE, "invalid_json")
                 return []
         except Exception:
             logger.exception("Claude API call failed")
+            extraction_failed(_EXTRACTION_STAGE, "call_failed")
             return []
     return []  # pragma: no cover

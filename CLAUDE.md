@@ -80,7 +80,8 @@ grocery-butler/
 │   │   replenishment.py, observation_batches.py, approvals.py, shopping_plans.py,
 │   │   constraints.py, data_lifecycle.py,
 │   │   recipe_store.py, shopping_list_store.py, pending_actions.py   # Domain services
-│   ├── fulfillment/        # Adapter interface (base.py), registry.py, export.py (list export)
+│   ├── fulfillment/        # Adapter interface (base.py), registry.py, runner.py, export.py (list export)
+│   ├── observability.py, metrics.py, retries.py   # Audit events, operational metrics, bounded retries
 │   ├── models.py, units.py, config.py, network_guard.py
 │   ├── claude_utils.py, prompt_loader.py, prompts/   # Anthropic wrapper and prompt templates
 │   ├── db/                 # adapter.py (SQLite/Postgres), migrate.py, migrations/

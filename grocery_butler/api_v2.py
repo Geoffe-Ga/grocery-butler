@@ -31,6 +31,7 @@ from grocery_butler.constraints import (
 from grocery_butler.data_lifecycle import HouseholdData
 from grocery_butler.fulfillment.base import Capability
 from grocery_butler.fulfillment.registry import default_registry
+from grocery_butler.fulfillment.runner import create_handoff
 from grocery_butler.household_items import (
     AliasConflictError,
     HouseholdItemStore,
@@ -54,6 +55,7 @@ from grocery_butler.members import (
     MemberNotFoundError,
     MemberStore,
 )
+from grocery_butler.metrics import Metrics
 from grocery_butler.models import (
     BatchStatus,
     HardConstraintKind,
@@ -1403,6 +1405,23 @@ def export_household() -> Response:
 
 
 # ---------------------------------------------------------------------------
+# Operations: metrics
+# ---------------------------------------------------------------------------
+
+
+@api_v2.get("/operations/metrics")
+def operations_metrics() -> Response:
+    """Report the operational metrics (ADR 0015).
+
+    Returns:
+        Extraction failures and adapter failures (each ``total`` and
+        ``last_7_days``), the correction rate, the stale inventory count
+        and the reconciliation gap count, with the time they were read.
+    """
+    return _json(Metrics(_db_path()).snapshot(), 200)
+
+
+# ---------------------------------------------------------------------------
 # Fulfillment: adapters and the universal list export
 # ---------------------------------------------------------------------------
 
@@ -1452,7 +1471,7 @@ def export_plan(version: int) -> Response:
         raise PlanNotFoundError(version)
     adapter = default_registry().get("export")
     adapter.require(Capability.EXPORT_LIST)
-    result = adapter.create_handoff(plan)
+    result = create_handoff(adapter, plan)
     wanted = request.args.get("format", "text")
     if wanted not in result.artifacts:
         raise ApiError(

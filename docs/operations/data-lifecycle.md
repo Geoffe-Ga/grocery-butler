@@ -17,6 +17,8 @@ kind of record is and when it stops mattering.
 | Observation batches and their proposals | Until deleted | A batch nobody reviews expires after 72 hours and can no longer be applied. The record stays. |
 | Approval envelopes | Until deleted | An approval expires 30 minutes after it is drafted. The record stays. |
 | API idempotency records | Until deleted | A key is only honoured for 30 days. |
+| Operational counters | Until deleted | One number per counter per day. No household content. |
+| Audit events | Not in the database | Lines in the platform's logs, kept as long as the platform keeps logs. No images or secrets. |
 | Photos | Not stored | Only a reference is recorded today. Photo storage arrives with #162, kept until the batch closes (ADR 0005). |
 | Archived Safeway tables | Until deleted | Left from before ADR 0001. Read by nothing. Included in export and delete. |
 

@@ -11,7 +11,11 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from grocery_butler.claude_utils import extract_json_text
+from grocery_butler.claude_utils import (
+    create_message,
+    extract_json_text,
+    extraction_failed,
+)
 from grocery_butler.models import (
     Ingredient,
     ParsedMeal,
@@ -25,6 +29,9 @@ if TYPE_CHECKING:
     from grocery_butler.config import Config
 
 logger = logging.getLogger(__name__)
+
+_EXTRACTION_STAGE = "meal_parse"
+_MODEL_CALL = "model.meal_parse"
 
 _MATCH_CONFIDENCE_THRESHOLD = 0.6
 
@@ -307,6 +314,7 @@ class MealParser:
         prompt = self._build_decomposition_prompt(name, target_servings)
         response_text = self._call_claude(prompt)
         if response_text is None:
+            extraction_failed(_EXTRACTION_STAGE, "call_failed")
             return _build_stub_meal(name, target_servings)
 
         parsed = self._parse_decomposition_response(response_text, name)
@@ -316,11 +324,14 @@ class MealParser:
         # Retry once on parse failure
         retry_text = self._retry_claude(prompt, response_text)
         if retry_text is None:
+            extraction_failed(_EXTRACTION_STAGE, "call_failed")
             return _build_stub_meal(name, target_servings)
 
         retried = self._parse_decomposition_response(retry_text, name)
         if retried is not None:
             return retried
+
+        extraction_failed(_EXTRACTION_STAGE, "invalid_json")
 
         return _build_stub_meal(name, target_servings)
 
@@ -338,7 +349,9 @@ class MealParser:
             Response text or None on failure.
         """
         try:
-            response = self._client.messages.create(
+            response = create_message(
+                self._client,
+                what=_MODEL_CALL,
                 model=self._get_model(),
                 max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
@@ -363,7 +376,9 @@ class MealParser:
             New response text or None on failure.
         """
         try:
-            response = self._client.messages.create(
+            response = create_message(
+                self._client,
+                what=_MODEL_CALL,
                 model=self._get_model(),
                 max_tokens=4096,
                 messages=[

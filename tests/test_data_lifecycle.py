@@ -476,6 +476,19 @@ class TestCli:
         assert json.loads(target.read_text())["format"] == EXPORT_FORMAT
         assert str(target) in capsys.readouterr().out
 
+    def test_export_tightens_a_file_that_already_exists(
+        self, db_path: str, tmp_path: Path
+    ) -> None:
+        """A readable file already at the path ends up private too."""
+        target = tmp_path / "household.json"
+        target.write_text("old")
+        target.chmod(0o644)
+
+        self._run("export", "--database", db_path, "--output", str(target))
+
+        assert target.stat().st_mode & 0o777 == 0o600
+        assert json.loads(target.read_text())["format"] == EXPORT_FORMAT
+
     def test_database_comes_from_the_environment(
         self,
         db_path: str,

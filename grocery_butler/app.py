@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from grocery_butler.models import Ingredient, ParsedMeal, ShoppingListItem
 
 from grocery_butler.db import get_connection, init_db
+from grocery_butler.metrics import Metrics
 from grocery_butler.models import (
     BrandMatchType,
     BrandPreference,
@@ -33,6 +34,7 @@ from grocery_butler.models import (
     InventoryStatus,
     parse_unit,
 )
+from grocery_butler.observability import init_observability
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
 from grocery_butler.web_security import register_web_security
@@ -249,6 +251,8 @@ def create_app(db_path: str | None = None) -> Flask:
 
     init_db(resolved)
 
+    # First, so a request a later hook rejects is still identified and audited.
+    init_observability(app, count=Metrics(resolved).count_event)
     _register_teardown(app)
     _register_error_handlers(app)
     _register_context_processors(app)
