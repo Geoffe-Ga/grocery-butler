@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}Handoff - Grocery Butler{% endblock %}
+
+{% block content %}
+<h1>Handoff</h1>
+
+{% if not plan %}
+<section class="empty-state">
+    <p>There is no shopping plan yet. Ask OpenClaw to build one.</p>
+</section>
+{% else %}
+<section class="handoff-status" aria-labelledby="handoff-heading">
+    <h2 id="handoff-heading">Shopping plan {{ plan.version }}</h2>
+
+    {% if not attempt %}
+    <p class="handoff-state" data-state="none">
+        This plan has not been handed off. Ask OpenClaw to hand it off, or
+        take the list with you.
+    </p>
+    {% else %}
+    <p class="handoff-state" data-state="{{ attempt.status.value }}">{{ summary }}</p>
+
+    {% if attempt.status.value in ("created", "opened") %}
+    <p>
+        <a class="btn btn-primary" role="button"
+           href="/handoff/attempts/{{ attempt.id }}/open"
+           rel="noopener">{{ open_button }}</a>
+    </p>
+    {% if attempt.link_expires_at %}
+    <p class="handoff-expiry">
+        The link works until {{ attempt.link_expires_at.strftime("%Y-%m-%d") }}.
+    </p>
+    {% endif %}
+    {% endif %}
+
+    {% if checks %}
+    <h3>Check these yourself</h3>
+    <ul class="handoff-checks">
+        {% for check in checks %}
+        <li>{{ check }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+    {% endif %}
+
+    <p><a href="/handoff/export.txt">{{ export_link }}</a></p>
+    <p class="handoff-note"><small>{{ not_an_order }}</small></p>
+</section>
+{% endif %}
+{% endblock %}

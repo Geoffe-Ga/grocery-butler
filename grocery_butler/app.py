@@ -494,6 +494,7 @@ def _register_context_processors(app: Flask) -> None:
                     "url": "/shopping-list",
                     "endpoint": "shopping_list",
                 },
+                {"label": "Handoff", "url": "/handoff", "endpoint": "handoff"},
                 {"label": "Brands", "url": "/brands", "endpoint": "brands"},
                 {
                     "label": "Preferences",
@@ -502,6 +503,100 @@ def _register_context_processors(app: Flask) -> None:
                 },
             ]
         }
+
+
+def _register_handoff_routes(app: Flask) -> None:
+    """Register the read-only handoff page, its redirect and the list export.
+
+    The page shows where the latest plan's handoff stands. Drafting and
+    approving a handoff name a household member, so they go through
+    OpenClaw and ``/api/v2``, not this page.
+
+    Args:
+        app: Flask application instance.
+    """
+    from grocery_butler.fulfillment.base import Capability
+    from grocery_butler.fulfillment.handoffs import (
+        AttemptNotFoundError,
+        HandoffNotAvailableError,
+        Handoffs,
+    )
+    from grocery_butler.fulfillment.registry import default_registry
+    from grocery_butler.fulfillment.runner import create_handoff
+    from grocery_butler.fulfillment.wording import (
+        EXPORT_LINK,
+        NOT_AN_ORDER,
+        OPEN_BUTTON,
+        checks_for,
+        summarize,
+    )
+    from grocery_butler.shopping_plans import ShoppingPlans
+
+    def _service() -> Handoffs:
+        """Build the handoff service for this request."""
+        return Handoffs(app.config["DATABASE_PATH"], default_registry().get)
+
+    @app.route("/handoff")
+    def handoff() -> str:
+        """Render where the latest plan's handoff stands.
+
+        Returns:
+            Rendered handoff HTML.
+        """
+        plan = ShoppingPlans(app.config["DATABASE_PATH"]).latest()
+        service = _service()
+        attempt = service.latest_for_plan(plan.version) if plan else None
+        approved = service.approved_payload(attempt) if attempt else {}
+        return render_template(
+            "handoff.html",
+            active_page="handoff",
+            plan=plan,
+            attempt=attempt,
+            summary=summarize(attempt, approved) if attempt else None,
+            checks=checks_for(approved),
+            open_button=OPEN_BUTTON,
+            export_link=EXPORT_LINK,
+            not_an_order=NOT_AN_ORDER,
+        )
+
+    @app.route("/handoff/attempts/<int:attempt_id>/open")
+    def open_handoff(attempt_id: int) -> Response:
+        """Record that a handoff link was opened, then go to it.
+
+        The destination is the link stored on the attempt, never anything
+        from the request.
+
+        Args:
+            attempt_id: The attempt whose link is being followed.
+
+        Returns:
+            A redirect to the link, or back to the handoff page with a
+            message when there is no live link.
+        """
+        try:
+            attempt = _service().mark_opened(attempt_id)
+        except (AttemptNotFoundError, HandoffNotAvailableError) as err:
+            flash(str(err), "error")
+            return redirect("/handoff")
+        return redirect(attempt.external_url or "/handoff")
+
+    @app.route("/handoff/export.txt")
+    def export_latest_plan() -> Response:
+        """Download the latest plan as a plain list, for any store.
+
+        Works whether or not any other adapter is enabled or failing.
+
+        Returns:
+            The list as plain text, or a redirect when there is no plan.
+        """
+        plan = ShoppingPlans(app.config["DATABASE_PATH"]).latest()
+        if plan is None:
+            flash("There is no shopping plan to export yet.", "error")
+            return redirect("/handoff")
+        adapter = default_registry().get("export")
+        adapter.require(Capability.EXPORT_LIST)
+        result = create_handoff(adapter, plan)
+        return app.response_class(result.artifacts["text"], mimetype="text/plain")
 
 
 def _register_routes(app: Flask) -> None:
@@ -516,6 +611,7 @@ def _register_routes(app: Flask) -> None:
     _register_recipe_routes(app)
     _register_shopping_list_routes(app)
     _register_pantry_routes(app)
+    _register_handoff_routes(app)
     _register_brand_routes(app)
     _register_preferences_routes(app)
 
