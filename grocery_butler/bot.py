@@ -245,7 +245,26 @@ def _format_preferences(prefs: dict[str, str]) -> str:
     return _truncate("\n".join(lines))
 
 
-def create_bot(config: Config) -> discord.Client:
+class GroceryBot(discord.Client):
+    """A Discord client that carries its command tree and configuration.
+
+    Declaring them on a subclass gives the event handlers and tests typed
+    access, where setting them on a plain ``discord.Client`` needed casts.
+    """
+
+    def __init__(self, config: Config, *, intents: discord.Intents) -> None:
+        """Create the client, its command tree and its configuration.
+
+        Args:
+            config: Application configuration.
+            intents: The gateway intents to connect with.
+        """
+        super().__init__(intents=intents)
+        self.config = config
+        self.tree: app_commands.CommandTree[GroceryBot] = app_commands.CommandTree(self)
+
+
+def create_bot(config: Config) -> GroceryBot:
     """Create and configure the Discord bot with all slash commands.
 
     Args:
@@ -262,12 +281,8 @@ def create_bot(config: Config) -> discord.Client:
     intents = discord.Intents.default()
     intents.message_content = True
 
-    client = discord.Client(intents=intents)
-    tree = app_commands.CommandTree(client)
-
-    # Store references on the client for access in event handlers
-    client.tree = tree  # type: ignore[attr-defined]
-    client.config = config  # type: ignore[attr-defined]
+    client = GroceryBot(config, intents=intents)
+    tree = client.tree
 
     # Initialize backend services
     db_path = config.database_path

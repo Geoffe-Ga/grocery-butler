@@ -8,6 +8,7 @@ where the branch-coverage floor sits.
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import json
 import os
@@ -16,6 +17,8 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import warnings
+from contextlib import closing
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -256,11 +259,9 @@ def test_branch_coverage_passes_at_or_above_the_floor(
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def mutmut_cache(tmp_path: Path) -> Path:
-    """A tiny mutmut cache: two files, one killed and one survived mutant each."""
-    path = tmp_path / ".mutmut-cache"
-    with sqlite3.connect(path) as conn:
+def _write_mutmut_cache(path: Path) -> None:
+    """Write a tiny mutmut cache: two files, one killed and one survived mutant each."""
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.executescript(
             """
             CREATE TABLE SourceFile (id INTEGER PRIMARY KEY, filename TEXT);
@@ -277,7 +278,30 @@ def mutmut_cache(tmp_path: Path) -> Path:
                                       (3, 2, 'ok_killed', 1);
             """
         )
+
+
+@pytest.fixture
+def mutmut_cache(tmp_path: Path) -> Path:
+    """A tiny mutmut cache on disk, for the analyze_mutations tests."""
+    path = tmp_path / ".mutmut-cache"
+    _write_mutmut_cache(path)
     return path
+
+
+def test_writing_the_mutmut_cache_closes_its_connection(tmp_path: Path) -> None:
+    """The cache helper closes its connection, so no ResourceWarning is left behind.
+
+    ``with sqlite3.connect(...)`` only commits; it does not close. An unclosed
+    connection is reported whenever the garbage collector gets to it, which
+    shows up under some later, unrelated test. Collecting right after the call
+    makes the check deterministic.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        _write_mutmut_cache(tmp_path / ".mutmut-cache")
+        gc.collect()
+    unclosed = [w for w in caught if issubclass(w.category, ResourceWarning)]
+    assert unclosed == []
 
 
 def test_analyze_mutations_counts_every_file_without_a_filter(
