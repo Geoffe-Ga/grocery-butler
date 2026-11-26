@@ -189,6 +189,117 @@ def _build_ingredient_text(
     return "\n".join(lines)
 
 
+RESTOCK_REASON = "restock"
+
+
+def _quantity_in(quantity: float, unit: Unit, target_unit: Unit) -> float:
+    """Express a quantity in another unit of the same merge group.
+
+    Callers only combine quantities that share a group key, so the units are
+    always convertible. If they ever were not, the quantity is returned
+    unconverted rather than dropped.
+
+    Args:
+        quantity: The amount to convert.
+        unit: The unit it is in.
+        target_unit: The unit to express it in.
+
+    Returns:
+        The converted amount.
+    """
+    converted = convert(quantity, unit, target_unit)
+    return converted if converted is not None else quantity
+
+
+def _absorb_line(target: ShoppingListItem, extra: ShoppingListItem) -> ShoppingListItem:
+    """Fold one line into another line of the same ingredient and dimension.
+
+    Args:
+        target: The line that survives; its unit and category are kept.
+        extra: The line folded into it.
+
+    Returns:
+        A new line with the summed quantity and both lines' reasons. A
+        search term someone chose (one that differs from the bare
+        ingredient name) is kept in preference to a default one.
+    """
+    chosen = target.search_term.lower() != target.ingredient.lower()
+    return target.model_copy(
+        update={
+            "quantity": target.quantity
+            + _quantity_in(extra.quantity, extra.unit, target.unit),
+            "from_meals": _union(target.from_meals, extra.from_meals),
+            "search_term": target.search_term if chosen else extra.search_term,
+        }
+    )
+
+
+def _union(first: list[str], second: list[str]) -> list[str]:
+    """Join two reason lists, keeping order and dropping repeats.
+
+    Args:
+        first: Reasons already on a line.
+        second: Reasons to add.
+
+    Returns:
+        The combined reasons.
+    """
+    return [*first, *[reason for reason in second if reason not in first]]
+
+
+def _share_restock_reason(lines: list[ShoppingListItem]) -> list[ShoppingListItem]:
+    """Make unmergeable lines of a restocked ingredient show every reason.
+
+    When an ingredient has a restock line and meal lines whose units can't
+    be added to it, each meal line gains the restock reason and the restock
+    line gains the meal names. Two meal lines never trade names.
+
+    Args:
+        lines: Lines already merged by ingredient and dimension.
+
+    Returns:
+        The lines, with reasons shared where a restock line exists.
+    """
+    by_name: dict[str, list[ShoppingListItem]] = {}
+    for line in lines:
+        by_name.setdefault(line.ingredient.lower(), []).append(line)
+
+    shared: list[ShoppingListItem] = []
+    for line in lines:
+        siblings = [s for s in by_name[line.ingredient.lower()] if s is not line]
+        if RESTOCK_REASON in line.from_meals:
+            extra = [r for s in siblings for r in s.from_meals]
+        elif any(RESTOCK_REASON in s.from_meals for s in siblings):
+            extra = [RESTOCK_REASON]
+        else:
+            extra = []
+        reasons = _union(line.from_meals, extra)
+        shared.append(line.model_copy(update={"from_meals": reasons}))
+    return shared
+
+
+def merge_duplicate_lines(lines: list[ShoppingListItem]) -> list[ShoppingListItem]:
+    """Merge shopping-list lines that are the same ingredient (issue #141).
+
+    An ingredient needed by a meal and also on the restock queue is one
+    line carrying both reasons, with quantities converted and summed, when
+    the units share a dimension. Where they don't, the lines stay separate
+    and each shows the other's reason. Applied to the pure-Python list and
+    to Claude's, so both paths give the same guarantee.
+
+    Args:
+        lines: Shopping-list lines, possibly with repeats.
+
+    Returns:
+        New lines, in first-appearance order, with repeats merged.
+    """
+    merged: dict[tuple[str, str], ShoppingListItem] = {}
+    for line in lines:
+        key = Consolidator._ingredient_group_key(line.ingredient, line.unit)
+        merged[key] = _absorb_line(merged[key], line) if key in merged else line
+    return _share_restock_reason(list(merged.values()))
+
+
 class Consolidator:
     """Consolidates meal ingredients into a unified shopping list.
 
@@ -267,14 +378,14 @@ class Consolidator:
 
         items = _parse_response_items(response_text)
         if items is not None:
-            return items
+            return merge_duplicate_lines(items)
 
         # Retry once on invalid JSON
         retry_text = self._retry_claude(prompt, response_text)
         if retry_text is not None:
             retried = _parse_response_items(retry_text)
             if retried is not None:
-                return retried
+                return merge_duplicate_lines(retried)
 
         return self.consolidate_simple(
             meals,
@@ -305,14 +416,16 @@ class Consolidator:
             pantry_staples: Names of pantry staple ingredients.
 
         Returns:
-            Consolidated shopping list with unit-aware merging.
+            Consolidated shopping list with unit-aware merging. An
+            ingredient that a meal needs and that is also on the restock
+            queue is one line with both reasons (see
+            :func:`merge_duplicate_lines`).
         """
         pantry_lower = {s.lower() for s in pantry_staples}
         merged = self._merge_meal_ingredients(meals, pantry_lower)
         result = self._build_items_from_merged(merged)
-        restock_items = self._build_restock_items(restock_queue)
-        result.extend(restock_items)
-        return result
+        result.extend(self._build_restock_items(restock_queue))
+        return merge_duplicate_lines(result)
 
     # ------------------------------------------------------------------
     # Simple consolidation helpers
@@ -367,9 +480,9 @@ class Consolidator:
         raw_unit = entry.get("unit")
         canonical_unit = raw_unit if isinstance(raw_unit, Unit) else Unit.EACH
 
-        converted = convert(item.quantity, item.unit, canonical_unit)
-        addition = converted if converted is not None else item.quantity
-        entry["quantity"] = current_qty + addition
+        entry["quantity"] = current_qty + _quantity_in(
+            item.quantity, item.unit, canonical_unit
+        )
 
     @staticmethod
     def _merge_meal_ingredients(
@@ -469,7 +582,7 @@ class Consolidator:
             restock_queue: Inventory items to check.
 
         Returns:
-            List of ShoppingListItem with from_meals=["restock"].
+            List of ShoppingListItem with from_meals=[RESTOCK_REASON].
         """
         items: list[ShoppingListItem] = []
         for inv in restock_queue:
@@ -490,7 +603,7 @@ class Consolidator:
                     search_term=inv.default_search_term
                     if inv.default_search_term is not None
                     else inv.ingredient,
-                    from_meals=["restock"],
+                    from_meals=[RESTOCK_REASON],
                     estimated_price=None,
                 )
             )
