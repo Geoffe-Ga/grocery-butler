@@ -172,7 +172,7 @@ class TestSaveAndGetLatestList:
         """Test restock provenance round-trips as ``["restock"]`` exactly.
 
         The shopping_list.html template distinguishes restock items via
-        ``item.from_meals == ['restock']``; from_meals must come back as
+        ``'restock' in item.from_meals``; from_meals must come back as
         a real list of strings, not a JSON string or tuple.
         """
         store.save_list(

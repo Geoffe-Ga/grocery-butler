@@ -27,10 +27,10 @@
         <h2>{{ category }}</h2>
         <ul class="shopping-items">
             {% for item in items %}
-            <li class="shopping-item{% if item.from_meals == ['restock'] %} shopping-item-restock{% endif %}">
+            <li class="shopping-item{% if 'restock' in item.from_meals %} shopping-item-restock{% endif %}">
                 <span class="shopping-item-name">{{ item.ingredient }}</span>
                 <span class="shopping-item-qty">{{ item.quantity }} {{ item.unit }}</span>
-                {% if item.from_meals == ['restock'] %}
+                {% if 'restock' in item.from_meals %}
                 <span class="badge badge-out">restock</span>
                 {% endif %}
             </li>

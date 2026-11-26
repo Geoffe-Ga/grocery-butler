@@ -21,6 +21,7 @@ from grocery_butler.models import (
     InventoryStatus,
     ParsedMeal,
     ShoppingListItem,
+    Unit,
     parse_unit,
 )
 from grocery_butler.pantry_manager import PantryManager
@@ -1151,6 +1152,38 @@ class TestShoppingListPage:
         html = response.data.decode()
         assert "restock" in html
         assert "shopping-item-restock" in html
+
+    def test_item_needed_by_a_meal_and_restock_keeps_its_restock_badge(
+        self, client: FlaskClient, db_path: str
+    ) -> None:
+        """Issue #141: a merged meal-plus-restock line is still marked restock."""
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        ShoppingListStore(db_path).save_list(
+            [
+                ShoppingListItem(
+                    ingredient="milk",
+                    quantity=18.0,
+                    unit=Unit.CUP,
+                    category=IngredientCategory.DAIRY,
+                    search_term="whole milk gallon",
+                    from_meals=["pancakes", "restock"],
+                ),
+                ShoppingListItem(
+                    ingredient="flour",
+                    quantity=2.0,
+                    unit=Unit.CUP,
+                    category=IngredientCategory.PANTRY_DRY,
+                    search_term="flour",
+                    from_meals=["pancakes"],
+                ),
+            ]
+        )
+
+        html = client.get("/shopping-list").data.decode()
+
+        assert html.count("shopping-item-restock") == 1
+        assert html.count('<span class="badge badge-out">restock</span>') == 1
 
     def test_shopping_list_renders_large_persisted_list_completely(
         self, app: Flask, db_path: str

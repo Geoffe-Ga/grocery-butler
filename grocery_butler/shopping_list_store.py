@@ -31,7 +31,7 @@ def _row_to_item(row: DictRow) -> ShoppingListItem:
 
     ``from_meals`` is stored as JSON-encoded TEXT (see migration 005) and
     is decoded back into a real ``list[str]`` here so template checks such
-    as ``item.from_meals == ['restock']`` work against a genuine list
+    as ``'restock' in item.from_meals`` work against a genuine list
     rather than a JSON string.
 
     Args:
