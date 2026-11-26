@@ -29,6 +29,7 @@ from grocery_butler.models import (
     coerce_category_optional,
 )
 from grocery_butler.prompt_loader import load_prompt
+from grocery_butler.replenishment import ReplenishmentNeeds
 
 logger = logging.getLogger(__name__)
 
@@ -346,7 +347,8 @@ class PantryManager:
 
         The inventory table is still what older readers use; the ledger is
         the complete record. Runs after the inventory write has committed,
-        because the ledger writes on its own connection.
+        because the ledger writes on its own connection. The item's
+        replenishment need is then synced with its new state (ADR 0008).
 
         Args:
             item_id: The row's household item, or None for a row that was
@@ -367,6 +369,7 @@ class PantryManager:
                 unit=unit,
             )
         )
+        ReplenishmentNeeds(self._db_path).sync_item(item_id)
 
     def should_include_in_order(
         self,
