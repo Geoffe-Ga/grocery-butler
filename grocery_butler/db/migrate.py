@@ -47,7 +47,9 @@ _MIGRATION_RE = re.compile(r"^(\d{3})_(.+?)(?:_pg)?\.sql$")
 MIGRATION_LOCK_KEY = 7_824_078
 
 # Serializes runners inside one process (threads, and ``:memory:``
-# databases that have no file to lock beside).
+# databases that have no file to lock beside). It is one lock for every
+# database path: a process migrates one database, so two paths never wait on
+# each other in practice, and if they did they would only run in turn.
 _PROCESS_LOCK = threading.Lock()
 
 
