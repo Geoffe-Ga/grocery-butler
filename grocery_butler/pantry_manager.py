@@ -518,6 +518,8 @@ def _call_claude_with_retry(
         Returns empty list on API errors.
     """
     attempts = 0
+    # Two layers, on purpose. This loop asks again when the reply isn't valid
+    # JSON. create_message, inside it, retries only a passing transport fault.
     while attempts <= max_retries:
         try:
             response = create_message(
