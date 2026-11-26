@@ -1,0 +1,44 @@
+name: Container scan
+
+# Builds the production image and scans it (./scripts/container-scan.sh).
+#
+# Deliberately not part of the CI gate (issue #138): a CVE published overnight
+# in the base image should be seen within a day, not block every unrelated
+# pull request. It runs nightly, by hand, and on a pull request that changes
+# what goes into the image or the scan itself.
+#
+# tests/test_container_scan.py holds the triggers and the job's timeout.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-entrypoint.sh
+      - requirements.txt
+      - scripts/container-scan.sh
+      - .github/workflows/container-scan.yml
+  # 15:43 UTC. Not :00 or :30, where GitHub delays and drops scheduled runs,
+  # and not the same minute as the nightly CI run.
+  schedule:
+    - cron: "43 15 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Container scan
+    runs-on: ubuntu-latest
+    # No run measured yet: an image build plus a database download and scan.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ./scripts/container-scan.sh
+        run: ./scripts/container-scan.sh

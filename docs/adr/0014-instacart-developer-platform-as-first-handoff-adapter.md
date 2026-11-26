@@ -58,6 +58,10 @@ decision can go.
    deferred.** Each needs something this project doesn't have: a stored
    customer grant, a partner approval, or a representative.
 
+**Chosen for the dogfood (Geoff, 2026-11-26):** a development key now, against
+Instacart's development host. A production key is requested only after the
+conditions below are met.
+
 ## Before a production key
 
 These are conditions on this ADR, and each needs Geoff:
