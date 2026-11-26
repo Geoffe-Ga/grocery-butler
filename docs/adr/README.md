@@ -19,6 +19,7 @@ ADR that supersedes the old one, rather than an edit.
 | [0011](0011-versioned-deterministic-shopping-plans.md) | Shopping plans are immutable versions built by a deterministic rule | Accepted |
 | [0012](0012-hard-constraints-and-soft-preferences.md) | Hard constraints and soft preferences are different types | Accepted |
 | [0013](0013-household-data-lifecycle.md) | One JSON export is the household's portable copy and its backup | Accepted |
+| [0014](0014-instacart-developer-platform-as-first-handoff-adapter.md) | Build the Instacart shopping list link as the first handoff adapter | Accepted, with conditions |
 
 The product backlog these decisions serve is
 [`docs/OPENCLAW_ERP_BACKLOG.md`](../OPENCLAW_ERP_BACKLOG.md).
