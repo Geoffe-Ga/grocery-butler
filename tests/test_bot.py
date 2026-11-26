@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import discord
 import pytest
+from discord import app_commands
 
 from grocery_butler.bot import (
+    GroceryBot,
     _format_brands,
     _format_inventory,
     _format_pantry_list,
@@ -564,21 +566,26 @@ class TestCreateBot:
         bot = create_bot(config)
         assert isinstance(bot, discord.Client)
 
-    def test_client_has_tree(self, config):
-        """Test the returned client has a command tree."""
+    def test_client_is_a_grocery_bot(self, config):
+        """The client is a typed GroceryBot, so its attributes need no casts."""
         bot = create_bot(config)
-        assert hasattr(bot, "tree")
+        assert isinstance(bot, GroceryBot)
+
+    def test_client_has_its_own_command_tree(self, config):
+        """The command tree is a CommandTree bound to this client."""
+        bot = create_bot(config)
+        assert isinstance(bot.tree, app_commands.CommandTree)
+        assert bot.tree.client is bot
 
     def test_client_has_config(self, config):
         """Test the returned client stores config."""
         bot = create_bot(config)
-        assert hasattr(bot, "config")
-        assert bot.config == config  # type: ignore[attr-defined]
+        assert bot.config is config
 
     def test_registers_no_order_command(self, config):
         """The retired Safeway /order group is gone (ADR 0001)."""
         bot = create_bot(config)
-        names = {cmd.name for cmd in bot.tree.get_commands()}  # type: ignore[attr-defined]
+        names = {cmd.name for cmd in bot.tree.get_commands()}
         assert "order" not in names
         assert "pantry" in names
 
@@ -606,7 +613,7 @@ class TestDiscordPermissions:
         Returns:
             The command/group, or None if not found.
         """
-        tree = bot.tree  # type: ignore[attr-defined]
+        tree = bot.tree
         for cmd in tree.get_commands():
             if cmd.name == name:
                 return cmd
@@ -701,7 +708,7 @@ class TestMealsCommand:
 
     def _get_command(self, bot):
         """Get the meals command from the tree."""
-        tree = bot.tree  # type: ignore[attr-defined]
+        tree = bot.tree
         for cmd in tree.get_commands():
             if cmd.name == "meals":
                 return cmd
@@ -754,7 +761,7 @@ class TestPantryCommands:
 
     def _get_subcommand(self, bot, name):
         """Get a pantry subcommand by name."""
-        tree = bot.tree  # type: ignore[attr-defined]
+        tree = bot.tree
         for cmd in tree.get_commands():
             if cmd.name == "pantry":
                 for sub in cmd.commands:
@@ -852,7 +859,7 @@ class TestStockCommands:
 
     def _get_subcommand(self, bot, name):
         """Get a stock subcommand by name."""
-        tree = bot.tree  # type: ignore[attr-defined]
+        tree = bot.tree
         for cmd in tree.get_commands():
             if cmd.name == "stock":
                 for sub in cmd.commands:
@@ -1033,7 +1040,7 @@ class TestRestockCommands:
 
     def _get_subcommand(self, bot, name):
         """Get a restock subcommand by name."""
-        tree = bot.tree  # type: ignore[attr-defined]
+        tree = bot.tree
         for cmd in tree.get_commands():
             if cmd.name == "restock":
                 for sub in cmd.commands:
@@ -1095,7 +1102,7 @@ class TestBrandsCommands:
 
     def _get_subcommand(self, bot, name):
         """Get a brands subcommand by name."""
-        tree = bot.tree  # type: ignore[attr-defined]
+        tree = bot.tree
         for cmd in tree.get_commands():
             if cmd.name == "brands":
                 for sub in cmd.commands:
@@ -1277,7 +1284,7 @@ class TestRecipesCommands:
 
     def _get_subcommand(self, bot, name):
         """Get a recipes subcommand by name."""
-        tree = bot.tree  # type: ignore[attr-defined]
+        tree = bot.tree
         for cmd in tree.get_commands():
             if cmd.name == "recipes":
                 for sub in cmd.commands:
@@ -1361,7 +1368,7 @@ class TestPreferencesCommands:
 
     def _get_subcommand(self, bot, name):
         """Get a preferences subcommand by name."""
-        tree = bot.tree  # type: ignore[attr-defined]
+        tree = bot.tree
         for cmd in tree.get_commands():
             if cmd.name == "preferences":
                 for sub in cmd.commands:
@@ -1429,7 +1436,7 @@ class TestOnReadyEvent:
         mock_user.__str__ = lambda self: "TestBot#1234"
 
         # Mock tree.sync
-        tree = bot.tree  # type: ignore[attr-defined]
+        tree = bot.tree
         tree.sync = AsyncMock()
 
         # Patch the read-only 'user' property on the Client class
