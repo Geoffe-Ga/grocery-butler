@@ -19,7 +19,6 @@ import argparse
 import fcntl
 import importlib
 import logging
-import os
 import re
 import sys
 import threading
@@ -27,6 +26,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from grocery_butler.config import database_target
 from grocery_butler.db import get_connection
 
 if TYPE_CHECKING:
@@ -370,7 +370,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "db_path",
         nargs="?",
         default=None,
-        help="Database path or URL (defaults to DATABASE_URL env var).",
+        help="Database path or URL (defaults to DATABASE_URL, then DATABASE_PATH).",
     )
     parser.add_argument(
         "-v",
@@ -395,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
-    db_path = args.db_path or os.environ.get("DATABASE_URL", "mealbot.db")
+    db_path = args.db_path or database_target()
     migrate(db_path)
     return 0
 

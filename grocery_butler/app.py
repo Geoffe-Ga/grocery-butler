@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from flask import Flask, flash, g, jsonify, redirect, render_template, request, url_for
 
 from grocery_butler.claude_utils import make_anthropic_client
+from grocery_butler.config import database_target
 from grocery_butler.db.adapter import IntegrityError
 
 if TYPE_CHECKING:
@@ -221,9 +222,7 @@ def _resolve_database_target(db_path: str | None) -> str:
     """
     if db_path is not None:
         return db_path
-    return os.environ.get("DATABASE_URL") or os.environ.get(
-        "DATABASE_PATH", "mealbot.db"
-    )
+    return database_target()
 
 
 def create_app(db_path: str | None = None) -> Flask:

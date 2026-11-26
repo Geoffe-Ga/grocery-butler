@@ -20,6 +20,8 @@ import itertools
 import json
 import os
 import time
+import uuid
+from contextlib import closing
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
@@ -28,12 +30,13 @@ import pytest
 from grocery_butler.api_v2 import IDEMPOTENCY_HEADER, MEMBER_HEADER
 from grocery_butler.app import create_app
 from grocery_butler.auth_middleware import SECRET_ENV_VAR, RequestBinding, mint_token
-from grocery_butler.db import init_db
+from grocery_butler.data_lifecycle import quote_identifier
+from grocery_butler.db import get_connection, init_db
 from grocery_butler.models import Ingredient, IngredientCategory, ParsedMeal
 from grocery_butler.recipe_store import RecipeStore
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from flask import Flask
@@ -41,6 +44,9 @@ if TYPE_CHECKING:
 
 #: Shared HMAC secret every minted token in this suite is signed with.
 E2E_SHARED_SECRET = "e2e-test-secret"
+
+#: A throwaway Postgres database, when one is available (CI sets it).
+POSTGRES_URL = os.environ.get("TEST_DATABASE_URL", "")
 
 #: Deterministic seeded recipe name, resolvable via RecipeStore without Claude.
 SEEDED_RECIPE_NAME = "spaghetti bolognese"
@@ -51,41 +57,95 @@ SEEDED_RECIPE_NAME = "spaghetti bolognese"
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> str:
-    """Return a fresh temporary SQLite database path.
-
-    A single seam for the storage backend: every fixture and service in
-    this suite reads and writes through this path, so a future
-    PostgreSQL variant only needs to change this fixture.
+def _postgres_url_for_schema(base_url: str, schema: str) -> str:
+    """Return a Postgres URL whose connections work inside one schema.
 
     Args:
-        tmp_path: Pytest's per-test temporary directory.
+        base_url: The throwaway database's URL.
+        schema: The schema every connection should read and write in.
 
     Returns:
-        Absolute path string for a database file that does not yet exist.
+        The URL with ``search_path`` set through libpq's ``options``.
     """
-    path = str(tmp_path / "e2e.db")
-    init_db(path)
-    return path
+    joiner = "&" if "?" in base_url else "?"
+    return f"{base_url}{joiner}options=-csearch_path%3D{schema}"
+
+
+def _run_on_postgres(statement: str) -> None:
+    """Run one statement against the throwaway Postgres database."""
+    with closing(get_connection(POSTGRES_URL)) as conn:
+        conn.execute(statement)
+        conn.commit()
+
+
+@pytest.fixture(
+    params=[
+        "sqlite",
+        pytest.param(
+            "postgres",
+            marks=pytest.mark.skipif(
+                not POSTGRES_URL, reason="TEST_DATABASE_URL not set"
+            ),
+        ),
+    ]
+)
+def db_path(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[str]:
+    """Yield a fresh, migrated database: once on SQLite, once on Postgres.
+
+    The single seam for the storage backend. Every fixture and service in
+    this suite reads and writes through this value, so each end-to-end
+    test runs against both dialects with the same assertions (issue #227).
+
+    On Postgres each test gets a schema of its own inside the throwaway
+    database, dropped afterwards. No test sees another's rows, so none
+    depends on order or on cleanup having run.
+
+    Args:
+        request: Says which dialect this run is for.
+        tmp_path: Pytest's per-test temporary directory.
+
+    Yields:
+        A SQLite file path, or a Postgres URL bound to the test's schema.
+    """
+    if request.param == "sqlite":
+        path = str(tmp_path / "e2e.db")
+        init_db(path)
+        yield path
+        return
+    schema = f"e2e_{uuid.uuid4().hex}"
+    _run_on_postgres(f"CREATE SCHEMA {quote_identifier(schema)}")
+    url = _postgres_url_for_schema(POSTGRES_URL, schema)
+    try:
+        init_db(url)
+        yield url
+    finally:
+        _run_on_postgres(f"DROP SCHEMA {quote_identifier(schema)} CASCADE")
 
 
 @pytest.fixture(autouse=True)
 def e2e_env(monkeypatch: pytest.MonkeyPatch, db_path: str) -> None:
-    """Set every environment variable the app needs, isolated per test.
+    """Set every environment variable the app and CLI read under test.
 
-    ``load_config`` calls ``load_dotenv`` with the default
+    ``load_config`` calls ``load_dotenv()`` (python-dotenv) with
     ``override=False``, so these ``monkeypatch.setenv`` calls always win
-    over any local ``.env`` file -- CI has no secrets and none are
-    needed here.
+    over anything a developer has in a local ``.env`` file.
+
+    The database goes in ``DATABASE_URL`` when it is a Postgres URL and in
+    ``DATABASE_PATH`` when it is a file, the way each is configured in
+    real use. The other one is removed so nothing ambient can win.
 
     Args:
         monkeypatch: Pytest's monkeypatch fixture.
-        db_path: The temporary database path for this test.
+        db_path: The temporary database for this test.
     """
     monkeypatch.setenv(SECRET_ENV_VAR, E2E_SHARED_SECRET)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-e2e-not-real")
-    monkeypatch.setenv("DATABASE_PATH", db_path)
+    if db_path.startswith("postgresql://"):
+        monkeypatch.setenv("DATABASE_URL", db_path)
+        monkeypatch.delenv("DATABASE_PATH", raising=False)
+    else:
+        monkeypatch.setenv("DATABASE_PATH", db_path)
+        monkeypatch.delenv("DATABASE_URL", raising=False)
 
 
 @pytest.fixture()

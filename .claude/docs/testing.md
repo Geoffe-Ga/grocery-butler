@@ -13,7 +13,8 @@ tests/
 ├── conftest.py          # shared helpers (bearer_header mints request-bound tokens)
 ├── test_<module>.py     # unit tests, one file per module under grocery_butler/
 └── e2e/
-    ├── conftest.py      # real create_app(), real temp SQLite, real stores
+    ├── conftest.py      # real create_app(), real stores, a fresh database per test
+    ├── test_journeys.py # whole flows: one capability feeding the next
     └── test_*.py        # marked e2e via pytestmark
 ```
 
@@ -40,7 +41,7 @@ If a test only fails sometimes, it shares state, depends on order, or reads the 
 
 ## 3. Postgres Tests
 
-The adapter, store and pending-action tests have Postgres variants that skip unless `TEST_DATABASE_URL` is set:
+Every end-to-end test runs twice, on SQLite and on Postgres: the `db_path` fixture in `tests/e2e/conftest.py` is parametrized, and on Postgres each test gets a schema of its own that is dropped afterwards. The adapter, store and pending-action tests have Postgres variants too. All of them skip unless `TEST_DATABASE_URL` is set:
 
 ```bash
 TEST_DATABASE_URL=postgresql://localhost/grocery_test ./scripts/check-all.sh

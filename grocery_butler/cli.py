@@ -15,6 +15,7 @@ import os
 import sys
 from typing import TYPE_CHECKING
 
+from grocery_butler.config import database_target
 from grocery_butler.consolidator import Consolidator
 from grocery_butler.data_lifecycle import HouseholdData, LifecycleError
 from grocery_butler.db import init_db
@@ -75,7 +76,7 @@ def _ready_database(cfg: Config | None) -> str:
     Returns:
         The database path the command should use.
     """
-    db_path = cfg.database_path if cfg else "mealbot.db"
+    db_path = cfg.database if cfg else database_target()
     init_db(db_path)
     return db_path
 
@@ -711,11 +712,7 @@ def _handle_data(args: argparse.Namespace) -> int:
     Returns:
         Exit code (0 for success, 1 for failure).
     """
-    db_path: str = (
-        args.database
-        or os.environ.get("DATABASE_URL")
-        or os.environ.get("DATABASE_PATH", "mealbot.db")
-    )
+    db_path: str = args.database or database_target()
     try:
         return _DATA_ACTIONS[args.action](args, db_path)
     except LifecycleError as err:

@@ -44,6 +44,32 @@ class Config:
     default_servings: int = 4
     default_units: str = "imperial"  # "imperial" or "metric"
 
+    @property
+    def database(self) -> str:
+        """The database to use: the URL when there is one, else the file.
+
+        Returns:
+            A Postgres URL or a SQLite file path.
+        """
+        return self.database_url or self.database_path
+
+
+def database_target() -> str:
+    """Return the database every entry point should use.
+
+    ``DATABASE_URL`` if it is set and not blank, then ``DATABASE_PATH``,
+    then the local ``mealbot.db``. The web app, each CLI command and the
+    migration runner all ask here, so they can't end up on different
+    databases. Production sets the URL; a command that looked only at
+    the path would quietly work on a throwaway SQLite file instead.
+
+    Returns:
+        A Postgres URL or a SQLite file path.
+    """
+    return os.environ.get("DATABASE_URL") or os.environ.get(
+        "DATABASE_PATH", "mealbot.db"
+    )
+
 
 def _int_env(name: str, default: str) -> int:
     """Read an integer environment variable.
