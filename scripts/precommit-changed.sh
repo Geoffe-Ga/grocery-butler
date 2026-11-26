@@ -7,14 +7,15 @@
 # Base: $BASE_REF if set (CI passes a PR's base; its other runs set FULL=true),
 # else origin/main after a quiet fetch. Files are diffed from the merge-base.
 # Falls back to every file when no usable base exists, when $FULL=true, or
-# when .pre-commit-config.yaml itself changed.
+# when the hooks' config, tool pins or tool settings changed
+# (.pre-commit-config.yaml, requirements-dev.txt, pyproject.toml).
 #
 # Usage: ./scripts/precommit-changed.sh [extra pre-commit args]
 
 set -euo pipefail
 
 if [[ "${1:-}" == "--help" ]]; then
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
 fi
 
@@ -36,8 +37,10 @@ fi
 
 if [[ -z "$base" ]]; then
     full=true
-elif ! git diff --quiet "$base" HEAD -- .pre-commit-config.yaml; then
-    echo "Hook config changed: checking every file."
+elif ! git diff --quiet "$base" HEAD -- .pre-commit-config.yaml requirements-dev.txt pyproject.toml; then
+    # The hooks run the pinned tools with pyproject.toml's settings, so any of
+    # these can change the verdict on a file this change didn't touch.
+    echo "Hook config, tool pins or tool settings changed: checking every file."
     full=true
 fi
 

@@ -39,6 +39,8 @@ repos:
 
 - repo: local
   hooks:
+  # --fix applies Ruff's safe fixes locally. In CI a fix still fails the hook,
+  # because pre-commit fails any hook that changes a file.
   - id: ruff-lint
     name: ruff (lint, pinned)
     entry: ruff check --fix

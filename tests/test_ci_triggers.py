@@ -151,6 +151,16 @@ def test_the_gate_needs_every_other_job_but_mutation() -> None:
     assert gate["if"] == "always()"
 
 
+@pytest.mark.parametrize("job", ["python", "pre-commit"])
+def test_the_jobs_the_gate_guards_always_run(job: str) -> None:
+    """The gate counts ``skipped`` as passed, so a guarded job may never skip.
+
+    An ``if:`` on one of them would let it skip and the gate pass with the
+    check never run.
+    """
+    assert "if" not in _ci()["jobs"][job]
+
+
 def test_a_nightly_run_and_a_dispatch_never_cancel_each_other() -> None:
     """Both run on refs/heads/main, so the group must tell their events apart.
 
