@@ -22,10 +22,12 @@ import os
 import time
 import uuid
 from contextlib import closing
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
+from flask import request
 
 from grocery_butler.api_v2 import IDEMPOTENCY_HEADER, MEMBER_HEADER
 from grocery_butler.app import create_app
@@ -34,12 +36,12 @@ from grocery_butler.data_lifecycle import quote_identifier
 from grocery_butler.db import get_connection, init_db
 from grocery_butler.models import Ingredient, IngredientCategory, ParsedMeal
 from grocery_butler.recipe_store import RecipeStore
+from tests.e2e.route_ledger import Route, problems, registered_routes
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
-    from pathlib import Path
 
-    from flask import Flask
+    from flask import Flask, Response
     from flask.testing import FlaskClient
 
 #: Shared HMAC secret every minted token in this suite is signed with.
@@ -47,6 +49,9 @@ E2E_SHARED_SECRET = "e2e-test-secret"
 
 #: A throwaway Postgres database, when one is available (CI sets it).
 POSTGRES_URL = os.environ.get("TEST_DATABASE_URL", "")
+
+#: Every route an end-to-end test has sent a request to in this run.
+REACHED: set[Route] = set()
 
 #: Deterministic seeded recipe name, resolvable via RecipeStore without Claude.
 SEEDED_RECIPE_NAME = "spaghetti bolognese"
@@ -226,6 +231,14 @@ def app(db_path: str, e2e_env: None) -> Flask:
     # CSRF has its own tests (tests/test_web_security.py); off here so these
     # tests can post forms directly.
     application.config["WEB_CSRF_ENABLED"] = False
+
+    def note_route(response: Response) -> Response:
+        """Record which route this request reached, for the route ledger."""
+        if request.url_rule is not None:
+            REACHED.add((request.method, request.url_rule.rule))
+        return response
+
+    application.after_request(note_route)
     return application
 
 
@@ -499,3 +512,47 @@ def fake_claude(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], None]:
         lambda api_key: mock_client,
     )
     return _script
+
+
+# ---------------------------------------------------------------------------
+# Route ledger
+# ---------------------------------------------------------------------------
+
+
+def _whole_lane_ran(session: pytest.Session) -> bool:
+    """Say whether every end-to-end test file ran, unfiltered, and passed.
+
+    The ledger compares all the routes the lane reached with all the
+    routes there are, so it only means something after the whole lane.
+    A run narrowed to some files or by ``-k`` is left alone.
+
+    Args:
+        session: The finished test session.
+
+    Returns:
+        True only for a complete, passing run of ``tests/e2e``.
+    """
+    if session.exitstatus != pytest.ExitCode.OK or session.config.option.keyword:
+        return False
+    here = Path(__file__).parent
+    ran = {
+        Path(str(item.fspath)).name for item in session.items if "e2e" in item.keywords
+    }
+    return ran == {path.name for path in here.glob("test_*.py")}
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    """Fail a complete end-to-end run that leaves a route unaccounted for.
+
+    Args:
+        session: The finished test session.
+    """
+    if not _whole_lane_ran(session):
+        return
+    found = problems(registered_routes(create_app(db_path=":memory:")), REACHED)
+    if not found:
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    for line in ["", "Route ledger (tests/e2e/route_ledger.py):", *found]:
+        reporter.write_line(line, red=True)
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED

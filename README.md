@@ -517,6 +517,7 @@ routes are server-rendered HTML except where noted.
 | Method | Path | Returns |
 |--------|------|---------|
 | `GET` | `/health` | `200 {"status":"healthy","database":"connected"}` or `503` if the DB is unreachable. JSON. |
+| `GET` | `/healthz` | `200 {"ok":true}`. A liveness probe with no database check. Exempt from the network guard, like `/health`. |
 
 #### Dashboard
 
@@ -571,6 +572,14 @@ routes are server-rendered HTML except where noted.
 |--------|------|-------------|
 | `GET` | `/preferences` | Render the preferences form. |
 | `POST` | `/preferences` | Form: `default_servings`, `default_units`, `dietary_restrictions`. |
+
+#### Handoff
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/handoff` | The current plan's handoff: what was sent, what to check, and the link if there is one. |
+| `GET` | `/handoff/attempts/<id>/open` | Record that the link was followed, then redirect to it. |
+| `GET` | `/handoff/export.txt` | Download the current plan as a plain list for any store. |
 
 ### OpenClaw Integration (/api/v1)
 
