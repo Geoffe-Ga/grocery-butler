@@ -16,22 +16,27 @@ secrets) and locally.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import time
+import uuid
+from contextlib import closing
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
 
+from grocery_butler.api_v2 import IDEMPOTENCY_HEADER, MEMBER_HEADER
 from grocery_butler.app import create_app
 from grocery_butler.auth_middleware import SECRET_ENV_VAR, RequestBinding, mint_token
-from grocery_butler.db import init_db
+from grocery_butler.data_lifecycle import quote_identifier
+from grocery_butler.db import get_connection, init_db
 from grocery_butler.models import Ingredient, IngredientCategory, ParsedMeal
 from grocery_butler.recipe_store import RecipeStore
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from flask import Flask
@@ -39,6 +44,9 @@ if TYPE_CHECKING:
 
 #: Shared HMAC secret every minted token in this suite is signed with.
 E2E_SHARED_SECRET = "e2e-test-secret"
+
+#: A throwaway Postgres database, when one is available (CI sets it).
+POSTGRES_URL = os.environ.get("TEST_DATABASE_URL", "")
 
 #: Deterministic seeded recipe name, resolvable via RecipeStore without Claude.
 SEEDED_RECIPE_NAME = "spaghetti bolognese"
@@ -49,41 +57,95 @@ SEEDED_RECIPE_NAME = "spaghetti bolognese"
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def db_path(tmp_path: Path) -> str:
-    """Return a fresh temporary SQLite database path.
-
-    A single seam for the storage backend: every fixture and service in
-    this suite reads and writes through this path, so a future
-    PostgreSQL variant only needs to change this fixture.
+def _postgres_url_for_schema(base_url: str, schema: str) -> str:
+    """Return a Postgres URL whose connections work inside one schema.
 
     Args:
-        tmp_path: Pytest's per-test temporary directory.
+        base_url: The throwaway database's URL.
+        schema: The schema every connection should read and write in.
 
     Returns:
-        Absolute path string for a database file that does not yet exist.
+        The URL with ``search_path`` set through libpq's ``options``.
     """
-    path = str(tmp_path / "e2e.db")
-    init_db(path)
-    return path
+    joiner = "&" if "?" in base_url else "?"
+    return f"{base_url}{joiner}options=-csearch_path%3D{schema}"
+
+
+def _run_on_postgres(statement: str) -> None:
+    """Run one statement against the throwaway Postgres database."""
+    with closing(get_connection(POSTGRES_URL)) as conn:
+        conn.execute(statement)
+        conn.commit()
+
+
+@pytest.fixture(
+    params=[
+        "sqlite",
+        pytest.param(
+            "postgres",
+            marks=pytest.mark.skipif(
+                not POSTGRES_URL, reason="TEST_DATABASE_URL not set"
+            ),
+        ),
+    ]
+)
+def db_path(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[str]:
+    """Yield a fresh, migrated database: once on SQLite, once on Postgres.
+
+    The single seam for the storage backend. Every fixture and service in
+    this suite reads and writes through this value, so each end-to-end
+    test runs against both dialects with the same assertions (issue #227).
+
+    On Postgres each test gets a schema of its own inside the throwaway
+    database, dropped afterwards. No test sees another's rows, so none
+    depends on order or on cleanup having run.
+
+    Args:
+        request: Says which dialect this run is for.
+        tmp_path: Pytest's per-test temporary directory.
+
+    Yields:
+        A SQLite file path, or a Postgres URL bound to the test's schema.
+    """
+    if request.param == "sqlite":
+        path = str(tmp_path / "e2e.db")
+        init_db(path)
+        yield path
+        return
+    schema = f"e2e_{uuid.uuid4().hex}"
+    _run_on_postgres(f"CREATE SCHEMA {quote_identifier(schema)}")
+    url = _postgres_url_for_schema(POSTGRES_URL, schema)
+    try:
+        init_db(url)
+        yield url
+    finally:
+        _run_on_postgres(f"DROP SCHEMA {quote_identifier(schema)} CASCADE")
 
 
 @pytest.fixture(autouse=True)
 def e2e_env(monkeypatch: pytest.MonkeyPatch, db_path: str) -> None:
-    """Set every environment variable the app needs, isolated per test.
+    """Set every environment variable the app and CLI read under test.
 
-    ``load_config`` calls ``load_dotenv`` with the default
+    ``load_config`` calls ``load_dotenv()`` (python-dotenv) with
     ``override=False``, so these ``monkeypatch.setenv`` calls always win
-    over any local ``.env`` file -- CI has no secrets and none are
-    needed here.
+    over anything a developer has in a local ``.env`` file.
+
+    The database goes in ``DATABASE_URL`` when it is a Postgres URL and in
+    ``DATABASE_PATH`` when it is a file, the way each is configured in
+    real use. The other one is removed so nothing ambient can win.
 
     Args:
         monkeypatch: Pytest's monkeypatch fixture.
-        db_path: The temporary database path for this test.
+        db_path: The temporary database for this test.
     """
     monkeypatch.setenv(SECRET_ENV_VAR, E2E_SHARED_SECRET)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-e2e-not-real")
-    monkeypatch.setenv("DATABASE_PATH", db_path)
+    if db_path.startswith("postgresql://"):
+        monkeypatch.setenv("DATABASE_URL", db_path)
+        monkeypatch.delenv("DATABASE_PATH", raising=False)
+    else:
+        monkeypatch.setenv("DATABASE_PATH", db_path)
+        monkeypatch.delenv("DATABASE_URL", raising=False)
 
 
 @pytest.fixture()
@@ -264,17 +326,93 @@ def signed_request(
         method: str,
         path: str,
         json_body: Any = None,
+        *,
+        extra_headers: dict[str, str] | None = None,
         **header_kwargs: Any,
     ) -> Any:
         """Mint a token bound to this exact request, then send it."""
         body = b"" if json_body is None else json.dumps(json_body).encode()
         headers = signed_headers(method=method, path=path, body=body, **header_kwargs)
+        headers.update(extra_headers or {})
         call = getattr(client, method.lower())
         if json_body is None:
             return call(path, headers=headers)
         return call(path, data=body, content_type="application/json", headers=headers)
 
     return _send
+
+
+class V2:
+    """Calls ``/api/v2`` the way OpenClaw does, as one household member.
+
+    Every request is signed for exactly its method, path and body. Each
+    mutation names the member and carries a fresh idempotency key.
+    """
+
+    def __init__(self, send: Callable[..., Any], member: str) -> None:
+        """Wrap the signing sender.
+
+        Args:
+            send: The ``signed_request`` helper.
+            member: The member key every mutation is attributed to.
+        """
+        self._send = send
+        self._member = member
+        self._keys = itertools.count(1)
+
+    def get(self, path: str) -> Any:
+        """GET a path under ``/api/v2`` and return the response."""
+        return self._send("GET", f"/api/v2{path}")
+
+    def post(self, path: str, body: dict[str, Any] | None = None) -> Any:
+        """POST to a path under ``/api/v2`` and return the response."""
+        return self._send(
+            "POST",
+            f"/api/v2{path}",
+            body,
+            extra_headers={
+                MEMBER_HEADER: self._member,
+                IDEMPOTENCY_HEADER: f"journey-{next(self._keys):06d}",
+            },
+        )
+
+    def ok(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+        """Send a request that must succeed and return its JSON.
+
+        Args:
+            method: ``GET`` or ``POST``.
+            path: Path under ``/api/v2``.
+            body: JSON body for a POST.
+
+        Returns:
+            The decoded response body.
+        """
+        response = self.get(path) if method == "GET" else self.post(path, body)
+        assert response.status_code in {200, 201}, response.get_data(as_text=True)
+        return response.get_json()
+
+
+@pytest.fixture()
+def v2(signed_request: Callable[..., Any]) -> V2:
+    """Return a v2 client acting as the household's first member.
+
+    The member is created through the API itself, which is how a new
+    deployment is bootstrapped.
+
+    Args:
+        signed_request: The signing sender.
+
+    Returns:
+        A client whose mutations are attributed to ``geoff``.
+    """
+    created = signed_request(
+        "POST",
+        "/api/v2/members",
+        {"key": "geoff", "display_name": "Geoff"},
+        extra_headers={IDEMPOTENCY_HEADER: "journey-bootstrap"},
+    )
+    assert created.status_code == 201, created.get_data(as_text=True)
+    return V2(signed_request, "geoff")
 
 
 # ---------------------------------------------------------------------------

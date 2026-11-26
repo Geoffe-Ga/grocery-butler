@@ -12,7 +12,7 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
-from grocery_butler.config import Config, ConfigError, load_config
+from grocery_butler.config import Config, ConfigError, database_target, load_config
 
 
 class TestConfig:
@@ -248,3 +248,51 @@ class TestConfigReprHidesSecrets:
         assert bot_marker not in text
         assert db_marker not in text
         assert "default_servings=4" in text
+
+
+class TestDatabaseTarget:
+    """One rule says which database every entry point uses."""
+
+    def test_the_url_wins_over_the_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Production sets the URL; a leftover path must not shadow it."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://db.invalid/butler")
+        monkeypatch.setenv("DATABASE_PATH", "/data/meals.db")
+
+        assert database_target() == "postgresql://db.invalid/butler"
+
+    def test_the_path_is_used_without_a_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Development sets only the path."""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.setenv("DATABASE_PATH", "/data/meals.db")
+
+        assert database_target() == "/data/meals.db"
+
+    def test_a_blank_url_counts_as_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An empty variable must not hide the path."""
+        monkeypatch.setenv("DATABASE_URL", "")
+        monkeypatch.setenv("DATABASE_PATH", "/data/meals.db")
+
+        assert database_target() == "/data/meals.db"
+
+    def test_the_default_is_the_local_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With nothing set, the local SQLite file."""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("DATABASE_PATH", raising=False)
+
+        assert database_target() == "mealbot.db"
+
+    def test_a_config_names_the_same_database(self) -> None:
+        """The loaded config and the bare rule can't disagree."""
+        with_url = Config(
+            anthropic_api_key="k",
+            database_path="/data/meals.db",
+            database_url="postgresql://db.invalid/butler",
+        )
+        without = Config(anthropic_api_key="k", database_path="/data/meals.db")
+
+        assert with_url.database == "postgresql://db.invalid/butler"
+        assert without.database == "/data/meals.db"

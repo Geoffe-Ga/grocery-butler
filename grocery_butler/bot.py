@@ -286,7 +286,7 @@ def create_bot(config: Config) -> GroceryBot:
     tree = client.tree
 
     # Initialize backend services
-    db_path = config.database_path
+    db_path = config.database
     init_db(db_path)
     recipe_store = RecipeStore(db_path)
     pantry_manager = PantryManager(db_path)

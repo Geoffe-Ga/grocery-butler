@@ -130,7 +130,7 @@ def mock_config() -> MagicMock:
     """
     cfg = MagicMock()
     cfg.anthropic_api_key = "test-key"
-    cfg.database_path = ":memory:"
+    cfg.database = ":memory:"
     cfg.default_servings = 4
     cfg.default_units = "imperial"
     return cfg
@@ -139,6 +139,40 @@ def mock_config() -> MagicMock:
 # ---------------------------------------------------------------------------
 # Format helpers tests
 # ---------------------------------------------------------------------------
+
+
+class TestReadyDatabase:
+    """Every command uses the database the web app uses."""
+
+    def test_a_postgres_url_in_the_config_is_used(self) -> None:
+        """Production sets a URL; a command must not fall back to a file."""
+        from grocery_butler.cli import _ready_database
+        from grocery_butler.config import Config
+
+        cfg = Config(
+            anthropic_api_key="k",
+            database_path="mealbot.db",
+            database_url="postgresql://db.invalid/butler",
+        )
+
+        with patch("grocery_butler.cli.init_db") as init:
+            target = _ready_database(cfg)
+
+        assert target == "postgresql://db.invalid/butler"
+        init.assert_called_once_with("postgresql://db.invalid/butler")
+
+    def test_without_a_config_the_environment_still_decides(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A missing API key must not send a command to a different database."""
+        from grocery_butler.cli import _ready_database
+
+        wanted = tmp_path / "wanted.db"
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.setenv("DATABASE_PATH", str(wanted))
+
+        assert _ready_database(None) == str(wanted)
+        assert wanted.exists()
 
 
 class TestFormatQuantity:
@@ -490,7 +524,7 @@ class TestHandleStock:
         pantry_mgr.add_item(item)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_stock
 
             parser = _build_parser()
@@ -513,7 +547,7 @@ class TestHandleStock:
         pantry_mgr.add_item(item)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_stock
 
             parser = _build_parser()
@@ -536,7 +570,7 @@ class TestHandleStock:
         pantry_mgr.add_item(item)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_stock
 
             parser = _build_parser()
@@ -559,7 +593,7 @@ class TestHandleStock:
         pantry_mgr.add_item(item)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_stock
 
             parser = _build_parser()
@@ -573,7 +607,7 @@ class TestHandleStock:
     def test_add_item(self, db_path: str, capsys):
         """Test adding a new inventory item."""
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_stock
 
             parser = _build_parser()
@@ -587,7 +621,7 @@ class TestHandleStock:
     def test_add_invalid_category(self, db_path: str, capsys):
         """Test adding with invalid category fails."""
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_stock
 
             parser = _build_parser()
@@ -601,7 +635,7 @@ class TestHandleStock:
     def test_add_blank_name_is_an_error_not_a_traceback(self, db_path: str, capsys):
         """A blank item name is reported and nothing is written (issue #198)."""
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_stock
 
             parser = _build_parser()
@@ -615,7 +649,7 @@ class TestHandleStock:
     def test_update_nonexistent_item(self, db_path: str, capsys):
         """Test updating a non-existent item fails."""
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_stock
 
             parser = _build_parser()
@@ -659,7 +693,7 @@ class TestHandleStock:
         pantry_mgr.add_item(item)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_stock
 
             parser = _build_parser()
@@ -697,7 +731,7 @@ class TestHandleRestock:
     def test_empty_restock_queue(self, db_path: str, capsys):
         """Test empty restock queue message."""
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_restock
 
             parser = _build_parser()
@@ -720,7 +754,7 @@ class TestHandleRestock:
         pantry_mgr.add_item(item)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_restock
 
             parser = _build_parser()
@@ -743,7 +777,7 @@ class TestHandleRestock:
         pantry_mgr.add_item(item)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_restock
 
             parser = _build_parser()
@@ -769,7 +803,7 @@ class TestHandleRecipes:
         store.save_recipe(sample_meal)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_recipes
 
             parser = _build_parser()
@@ -786,7 +820,7 @@ class TestHandleRecipes:
         store.save_recipe(sample_meal)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_recipes
 
             parser = _build_parser()
@@ -803,7 +837,7 @@ class TestHandleRecipes:
         RecipeStore(db_path)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_recipes
 
             parser = _build_parser()
@@ -820,7 +854,7 @@ class TestHandleRecipes:
         store.save_recipe(sample_meal)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_recipes
 
             parser = _build_parser()
@@ -836,7 +870,7 @@ class TestHandleRecipes:
         RecipeStore(db_path)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_recipes
 
             parser = _build_parser()
@@ -873,7 +907,7 @@ class TestHandlePantry:
         RecipeStore(db_path)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_pantry
 
             parser = _build_parser()
@@ -890,7 +924,7 @@ class TestHandlePantry:
         RecipeStore(db_path)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_pantry
 
             parser = _build_parser()
@@ -906,7 +940,7 @@ class TestHandlePantry:
         RecipeStore(db_path)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_pantry
 
             parser = _build_parser()
@@ -923,7 +957,7 @@ class TestHandlePantry:
         before = store.get_pantry_staple_names()
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_pantry
 
             parser = _build_parser()
@@ -939,7 +973,7 @@ class TestHandlePantry:
         RecipeStore(db_path)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_pantry
 
             parser = _build_parser()
@@ -955,7 +989,7 @@ class TestHandlePantry:
         RecipeStore(db_path)
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             from grocery_butler.cli import _handle_pantry
 
             parser = _build_parser()
@@ -994,7 +1028,7 @@ class TestHandlePlan:
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
             cfg = MagicMock()
             cfg.anthropic_api_key = "test"
-            cfg.database_path = db_path
+            cfg.database = db_path
             cfg.default_servings = 4
             cfg.default_units = "imperial"
             mock_cfg.return_value = cfg
@@ -1020,7 +1054,7 @@ class TestHandlePlan:
         ):
             cfg = MagicMock()
             cfg.anthropic_api_key = "test"
-            cfg.database_path = db_path
+            cfg.database = db_path
             cfg.default_servings = 4
             cfg.default_units = "imperial"
             mock_cfg.return_value = cfg
@@ -1048,7 +1082,7 @@ class TestHandlePlan:
         ):
             cfg = MagicMock()
             cfg.anthropic_api_key = "test"
-            cfg.database_path = db_path
+            cfg.database = db_path
             cfg.default_servings = 4
             cfg.default_units = "imperial"
             mock_cfg.return_value = cfg
@@ -1112,7 +1146,7 @@ class TestHandlePlan:
         ):
             cfg = MagicMock()
             cfg.anthropic_api_key = "test"
-            cfg.database_path = db_path
+            cfg.database = db_path
             cfg.default_servings = 4
             cfg.default_units = "imperial"
             mock_cfg.return_value = cfg
@@ -1143,7 +1177,7 @@ class TestHandlePlan:
         ):
             cfg = MagicMock()
             cfg.anthropic_api_key = "test"
-            cfg.database_path = db_path
+            cfg.database = db_path
             cfg.default_servings = 4
             cfg.default_units = "imperial"
             mock_cfg.return_value = cfg
@@ -1182,7 +1216,7 @@ class TestHandlePlan:
         ):
             cfg = MagicMock()
             cfg.anthropic_api_key = "test"
-            cfg.database_path = db_path
+            cfg.database = db_path
             cfg.default_servings = 4
             cfg.default_units = "imperial"
             mock_cfg.return_value = cfg
@@ -1285,7 +1319,7 @@ class TestMain:
             patch("grocery_butler.cli._load_config_safe") as mock_cfg,
             pytest.raises(SystemExit) as exc_info,
         ):
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             main(["stock"])
         assert exc_info.value.code == 0
 
@@ -1295,7 +1329,7 @@ class TestMain:
             patch("grocery_butler.cli._load_config_safe") as mock_cfg,
             pytest.raises(SystemExit) as exc_info,
         ):
-            mock_cfg.return_value = MagicMock(database_path=db_path)
+            mock_cfg.return_value = MagicMock(database=db_path)
             main(["restock"])
         assert exc_info.value.code == 0
 
@@ -1422,7 +1456,7 @@ class TestCommandsMigrateBeforeUse:
         fresh = str(tmp_path / "fresh.db")
 
         with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
-            mock_cfg.return_value = MagicMock(database_path=fresh)
+            mock_cfg.return_value = MagicMock(database=fresh)
             from grocery_butler.cli import _handle_stock
 
             code = _handle_stock(_build_parser().parse_args(["stock"]))
