@@ -494,6 +494,8 @@ Run a four-week protocol:
 - Post-shop receipt reconciliation
 - Log corrections, missing items, false suggestions, time spent, and avoided mental work
 
+The protocol and the weekly log template are in [`docs/operations/dogfood-protocol.md`](operations/dogfood-protocol.md). Each pilot gate maps to a field in the log.
+
 ### P2.7 Design-partner pilot — M operational effort
 
 - Recruit 10–20 households already using a personal AI agent or willing to use OpenClaw.
