@@ -303,6 +303,17 @@ that failed with a passing fault is tried again under the same key. If the
 plan's needs change, the approval is stale and nothing is sent. A created
 attempt is a link, not an order: it changes no need and no inventory.
 
+*What we say about a handoff*
+([ADR 0020](docs/adr/0020-handoff-wording-and-the-opened-state.md)). Every
+sentence about a handoff is built in `fulfillment/wording.py`, and a test
+refuses "ordered", "purchased", "on the way" and similar words in any
+handoff sentence, page or API response. The dashboard's **Handoff** page
+shows where the latest plan's handoff stands, what to check yourself, a
+"Shop on Instacart" button and "Export list instead". The button goes
+through `/handoff/attempts/{id}/open`, which records that the link was
+opened and redirects to it. `/handoff/export.txt` serves the plan as a
+plain list whether or not Instacart is enabled or working.
+
 The API key is held by one module (`instacart/http_transport.py`), sent in
 one header to one of two fixed hosts, and appears in no `repr`, error or
 log. Tests never call Instacart: a suite-wide fixture fails any test that
@@ -1181,6 +1192,7 @@ written: such fields are replaced with `[redacted]`.
 | `handoff.drafted` | A handoff was drafted for approval | `envelope_id`, `adapter`, `plan_version`, `actor` |
 | `handoff.approved`, `handoff.rejected` | A member approved or turned down a handoff | `envelope_id`, `actor` |
 | `handoff.attempt` | An approved handoff was carried out | `attempt_id`, `envelope_id`, `adapter`, `plan_version`, `status`, `error`, `retryable` |
+| `handoff.opened` | A member followed a handoff link through the redirect | `attempt_id`, `adapter` |
 | `receipt.submitted` | A receipt was stored for review | `receipt_id`, `attempt_id`, `lines`, `needs_review`, `actor` |
 | `receipt.resolved` | A member reviewed a receipt | `receipt_id`, `attempt_id`, `confirmed`, `skipped`, `actor` |
 | `receipt.rejected` | A receipt was thrown away | `receipt_id`, `actor` |
@@ -1200,6 +1212,7 @@ batch, across the requests that submit and review it.
 | `correction_rate` | How often a member had to correct a proposal. Rising means proposals are getting worse. |
 | `stale_inventory` | Items nobody has checked within their freshness window. |
 | `reconciliation_gaps` | Needs marked ordered over 3 days ago and never confirmed received, plus handoffs that old with no confirmed receipt. |
+| `handoffs` | How handoffs turn out: created, opened, abandoned, reconciled, failed, and drafts corrected before sending. |
 
 **Retries.** A model or adapter call that times out, loses its connection,
 or gets a 408, 429 or 5xx is tried up to three times, with pauses of 0.5 s

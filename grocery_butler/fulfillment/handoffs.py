@@ -72,19 +72,19 @@ _INTEGRITY_ERRORS = (
 _SELECT_BY_ID = (
     "SELECT id, envelope_id, adapter, plan_version, plan_content_hash,"
     " idempotency_key, status, external_url, link_expires_at, error_code,"
-    " retryable, human_action, created_by, created_at, updated_at"
+    " retryable, human_action, created_by, created_at, updated_at, opened_at"
     " FROM fulfillment_attempts WHERE id = ?"
 )
 _SELECT_BY_KEY = (
     "SELECT id, envelope_id, adapter, plan_version, plan_content_hash,"
     " idempotency_key, status, external_url, link_expires_at, error_code,"
-    " retryable, human_action, created_by, created_at, updated_at"
+    " retryable, human_action, created_by, created_at, updated_at, opened_at"
     " FROM fulfillment_attempts WHERE idempotency_key = ?"
 )
 _SELECT_FOR_PLAN = (
     "SELECT id, envelope_id, adapter, plan_version, plan_content_hash,"
     " idempotency_key, status, external_url, link_expires_at, error_code,"
-    " retryable, human_action, created_by, created_at, updated_at"
+    " retryable, human_action, created_by, created_at, updated_at, opened_at"
     " FROM fulfillment_attempts WHERE plan_version = ? ORDER BY id"
 )
 _INSERT = (
@@ -96,6 +96,10 @@ _DELETE_PENDING = "DELETE FROM fulfillment_attempts WHERE id = ? AND status = ?"
 _RECLAIM = (
     "UPDATE fulfillment_attempts SET status = ?, updated_at = ?"
     " WHERE id = ? AND status = ? AND retryable = ?"
+)
+_MARK_OPENED = (
+    "UPDATE fulfillment_attempts SET opened_at = ?"
+    " WHERE id = ? AND status = ? AND opened_at IS NULL"
 )
 _FINISH = (
     "UPDATE fulfillment_attempts SET status = ?, external_url = ?,"
@@ -109,6 +113,7 @@ class AttemptStatus(StrEnum):
 
     PENDING = "pending"
     CREATED = "created"
+    OPENED = "opened"
     FAILED = "failed"
     EXPIRED = "expired"
 
@@ -116,8 +121,10 @@ class AttemptStatus(StrEnum):
 class HandoffAttempt(BaseModel):
     """One try at handing an approved plan to an adapter.
 
-    ``status`` is ``expired`` once a created link's expiry has passed; that
-    is worked out on reading, not stored.
+    ``status`` is worked out on reading for two cases, neither stored: a
+    created link is ``expired`` once its expiry has passed, and ``opened``
+    once a member has followed it through our redirect. ``opened`` means
+    the link was opened. It says nothing about what happened next.
     """
 
     id: int
@@ -135,6 +142,7 @@ class HandoffAttempt(BaseModel):
     created_by: str
     created_at: dt.datetime
     updated_at: dt.datetime
+    opened_at: dt.datetime | None = None
 
 
 class HandoffNotAvailableError(ValueError):
@@ -198,6 +206,21 @@ def _needs_no_approval(adapter: str) -> HandoffNotAvailableError:
     return HandoffNotAvailableError(
         f'The "{adapter}" adapter sends nothing outside the household, so it'
         " needs no approval. Use the plan's export instead."
+    )
+
+
+def _no_live_link(attempt: HandoffAttempt) -> HandoffNotAvailableError:
+    """Build the error for an attempt whose link can't be opened.
+
+    Args:
+        attempt: The attempt.
+
+    Returns:
+        The error to raise.
+    """
+    return HandoffNotAvailableError(
+        f"Handoff attempt {attempt.id} is {attempt.status.value} and has no"
+        " link to open. Use the list export, or hand the plan off again."
     )
 
 
@@ -322,6 +345,29 @@ class Handoffs:
     # Reads
     # ------------------------------------------------------------------
 
+    def _shown_status(
+        self,
+        stored: AttemptStatus,
+        expires: dt.datetime | None,
+        opened: dt.datetime | None,
+    ) -> AttemptStatus:
+        """Work out the status to show for a stored one.
+
+        Args:
+            stored: The status in the row.
+            expires: When the link expires, if it has one.
+            opened: When the link was first opened, if it was.
+
+        Returns:
+            ``expired`` for a created link past its expiry, ``opened`` for
+            a live link someone followed, otherwise the stored status.
+        """
+        if stored is not AttemptStatus.CREATED:
+            return stored
+        if expires is not None and expires <= self._clock():
+            return AttemptStatus.EXPIRED
+        return AttemptStatus.OPENED if opened is not None else stored
+
     def _to_attempt(self, row: Any) -> HandoffAttempt:
         """Build an attempt from its row, working out expiry.
 
@@ -331,14 +377,9 @@ class Handoffs:
         Returns:
             The attempt.
         """
-        status = AttemptStatus(row["status"])
         expires = _when(row["link_expires_at"])
-        if (
-            status is AttemptStatus.CREATED
-            and expires is not None
-            and expires <= self._clock()
-        ):
-            status = AttemptStatus.EXPIRED
+        opened = _when(row["opened_at"])
+        status = self._shown_status(AttemptStatus(row["status"]), expires, opened)
         return HandoffAttempt(
             id=row["id"],
             envelope_id=row["envelope_id"],
@@ -355,6 +396,7 @@ class Handoffs:
             created_by=row["created_by"],
             created_at=dt.datetime.fromisoformat(row["created_at"]),
             updated_at=dt.datetime.fromisoformat(row["updated_at"]),
+            opened_at=opened,
         )
 
     def _one(
@@ -384,6 +426,66 @@ class Handoffs:
         """
         with closing(get_connection(self._db_path)) as conn:
             return self._one(conn, _SELECT_BY_ID, attempt_id)
+
+    def approved_payload(self, attempt: HandoffAttempt) -> dict[str, Any]:
+        """Return exactly what was approved for an attempt.
+
+        Args:
+            attempt: The attempt.
+
+        Returns:
+            The envelope payload the attempt was made from: the lines, the
+            unenforced constraints and the translation issues.
+        """
+        envelope = self._envelopes.get(attempt.envelope_id)
+        return dict(envelope.payload) if envelope is not None else {}
+
+    def latest_for_plan(self, version: int) -> HandoffAttempt | None:
+        """Return the most recent attempt for a plan version.
+
+        Args:
+            version: The plan version.
+
+        Returns:
+            The newest attempt, or None when the plan was never handed off.
+        """
+        attempts = self.attempts_for_plan(version)
+        return attempts[-1] if attempts else None
+
+    def mark_opened(self, attempt_id: int) -> HandoffAttempt:
+        """Record that a handoff's link was opened, the first time it is.
+
+        Only a live link can be opened: the attempt must have been created
+        and not yet expired. Opening it again changes nothing.
+
+        Args:
+            attempt_id: The attempt whose link is being followed.
+
+        Returns:
+            The attempt, now ``opened``.
+
+        Raises:
+            AttemptNotFoundError: If there is no such attempt.
+            HandoffNotAvailableError: If the attempt has no live link.
+        """
+        attempt = self.get_attempt(attempt_id)
+        if attempt is None:
+            raise AttemptNotFoundError(attempt_id)
+        if attempt.status is AttemptStatus.OPENED:
+            return attempt
+        if attempt.status is not AttemptStatus.CREATED or attempt.external_url is None:
+            raise _no_live_link(attempt)
+        with closing(get_connection(self._db_path)) as conn:
+            conn.execute(
+                _MARK_OPENED,
+                (self._clock().isoformat(), attempt_id, AttemptStatus.CREATED.value),
+            )
+            conn.commit()
+            opened = self._one(conn, _SELECT_BY_ID, attempt_id)
+        if opened is None:  # pragma: no cover - the row was just updated
+            raise AttemptNotFoundError(attempt_id)
+        audit("handoff.opened", attempt_id=attempt_id, adapter=opened.adapter)
+        return opened
 
     def attempts_for_plan(self, version: int) -> list[HandoffAttempt]:
         """List the attempts made for a plan version, oldest first.

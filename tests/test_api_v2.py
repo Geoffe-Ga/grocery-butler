@@ -1783,6 +1783,8 @@ class TestCheckReminders:
 
         assert client.get("/api/v2/reminders/checks").status_code == 401
         assert client.post("/api/v2/reminders/checks/issue").status_code == 401
+        assert client.get("/api/v2/items/1/check-reminder").status_code == 401
+        assert client.post("/api/v2/items/1/check-reminder").status_code == 401
 
 
 class TestReceipts:
@@ -1976,6 +1978,7 @@ class TestOperationsMetrics:
             "correction_rate",
             "stale_inventory",
             "reconciliation_gaps",
+            "handoffs",
         }
         assert metrics["extraction_failures"] == {"total": 0, "last_7_days": 0}
         assert metrics["correction_rate"]["rate"] is None

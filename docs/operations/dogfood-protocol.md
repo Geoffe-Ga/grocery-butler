@@ -79,7 +79,9 @@ eyes. That number must be zero.
 ### 5. Read the numbers
 
 Once a week, read `GET /api/v2/operations/metrics` and copy the five
-numbers into the log. Then answer the weekly checks in the template.
+numbers into the log. Then answer the weekly checks in the template. The `handoffs` counts say
+whether links were opened and reconciled; open a link from the dashboard's
+Handoff page, or the path OpenClaw gives you, so it is counted.
 
 ### 6. Back up
 

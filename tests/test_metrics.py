@@ -684,6 +684,7 @@ class TestSnapshot:
             "correction_rate",
             "stale_inventory",
             "reconciliation_gaps",
+            "handoffs",
         }
         assert snapshot["as_of"] == NOW.isoformat()
         assert snapshot["extraction_failures"] == {"total": 1, "last_7_days": 1}
