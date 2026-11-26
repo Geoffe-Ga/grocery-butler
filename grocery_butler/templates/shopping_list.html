@@ -8,6 +8,7 @@
 <section class="add-item-section">
     <h2>Generate Shopping List</h2>
     <form action="/shopping-list/generate" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-group">
             <label for="meals">Meals (one per line)</label>
             <textarea id="meals" name="meals" rows="4" class="form-textarea"

@@ -1,7 +1,5 @@
 /* Grocery Butler — Dark Gothic Theme */
 
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;900&display=swap');
-
 :root {
     /* Dark Gothic Color Palette */
     --color-primary: #8b1a1a;
@@ -37,7 +35,7 @@
     /* Typography */
     --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
         "Helvetica Neue", Arial, sans-serif;
-    --font-heading: "Playfair Display", Georgia, "Times New Roman", serif;
+    --font-heading: Georgia, "Times New Roman", serif;
     --font-size-sm: 0.875rem;
     --font-size-base: 1rem;
     --font-size-lg: 1.25rem;

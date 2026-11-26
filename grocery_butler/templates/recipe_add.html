@@ -7,6 +7,7 @@
 
 <section class="add-item-section">
     <form action="/recipes/add" method="post" class="recipe-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-row">
             <div class="form-group">
                 <label for="name">Recipe Name</label>

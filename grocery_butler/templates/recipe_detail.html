@@ -42,7 +42,8 @@
 <div class="page-actions">
     <a href="/recipes" class="btn btn-secondary">Back to Recipes</a>
     <form action="/recipes/{{ recipe_id }}/delete" method="post" class="inline-form"
-          onsubmit="return confirm('Delete this recipe?');">
+          data-confirm="Delete this recipe?">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button type="submit" class="btn btn-danger">Delete Recipe</button>
     </form>
 </div>
