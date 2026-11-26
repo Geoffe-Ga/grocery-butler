@@ -15,11 +15,13 @@ static header dict.
 
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import json
 import logging
 import os
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -27,7 +29,6 @@ import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from flask import Flask
     from flask.testing import FlaskClient
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
     AuthHeaderFactory = Callable[[str, str, bytes], dict[str, str]]
 
 
-from grocery_butler.api import api_v1
+from grocery_butler import api as api_module
 from grocery_butler.app import create_app
 from grocery_butler.auth_middleware import SECRET_ENV_VAR
 from grocery_butler.db import get_connection
@@ -58,28 +59,6 @@ DESTRUCTIVE_ENDPOINTS = [
     "/api/v1/actions/confirm",
     "/api/v1/actions/deny",
 ]
-
-#: Issue #74 AC#2: a view that never calls require_bearer() itself, used
-#: to prove the api_v1 blueprint's before_request hook enforces auth
-#: even when a route forgets the per-route check. Registered once, at
-#: import time -- Flask blueprints only accept new routes before
-#: they've been applied to an app via register_blueprint, and api_v1 is
-#: a process-wide singleton reused by every create_app() call in this
-#: suite, so this must be added before any test in the suite calls
-#: create_app().
-UNAUTHENTICATED_THROWAWAY_PATH = "/api/v1/_test_unauthenticated_view_issue_74"
-
-
-@api_v1.get("/_test_unauthenticated_view_issue_74")
-def _unauthenticated_throwaway_view() -> dict[str, bool]:
-    """Return a fixed payload without ever calling require_bearer().
-
-    Exists solely so ``TestAuthByDefault`` can prove that unauthenticated
-    requests are still rejected -- by the blueprint's before_request
-    hook, not by this view.
-    """
-    return {"ok": True}
-
 
 # ---------------------------------------------------------------------------
 # Fixtures and builders
@@ -1153,41 +1132,61 @@ class TestCrossEndpointTokenReplayRejected:
 class TestAuthByDefault:
     """The api_v1 blueprint enforces auth even without a per-route call.
 
-    ``_unauthenticated_throwaway_view`` (module scope, above) never
-    calls ``require_bearer()`` itself. If the blueprint's
-    ``before_request`` hook is doing its job, unauthenticated requests
-    to it must still 401, and correctly-bound requests must still 200.
+    No view on the blueprint checks the token itself: the module calls
+    ``require_bearer()`` in one place, the ``before_request`` hook. So
+    every real route is an unguarded view, and each must still 401
+    without a token and still answer with one. Nothing is added to the
+    blueprint to test this: it is a process-wide object, and a route
+    registered on it by a test would be served by every app created
+    afterwards in the same run.
     """
 
-    def test_unauthenticated_request_to_unguarded_view_returns_401(
-        self, db_path: str
-    ) -> None:
-        """An unauthenticated request to the unguarded view is rejected.
+    def test_only_the_hook_checks_the_token(self) -> None:
+        """One call to require_bearer in the module, and it is the hook's."""
+        source = Path(api_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
 
-        Args:
-            db_path: Temporary database path fixture for test isolation.
-        """
-        application = create_app(db_path=db_path)
-        application.config["TESTING"] = True
-        response = application.test_client().get(UNAUTHENTICATED_THROWAWAY_PATH)
+        callers = [
+            function.name
+            for function in ast.walk(tree)
+            if isinstance(function, ast.FunctionDef)
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "require_bearer"
+        ]
 
-        assert response.status_code == 401
+        assert callers == ["_enforce_bearer_auth"]
 
-    def test_bound_token_for_unguarded_view_returns_200(self, db_path: str) -> None:
-        """A correctly bound token still reaches the unguarded view.
+    def test_every_route_rejects_a_request_without_a_token(self, app: Flask) -> None:
+        """All of them, read from the app, so a new route is covered too."""
+        client = app.test_client()
+        routes = [
+            (
+                method,
+                rule.rule.replace("<int:recipe_id>", "1").replace("<action_id>", "x"),
+            )
+            for rule in app.url_map.iter_rules()
+            if rule.rule.startswith("/api/v1/")
+            for method in sorted((rule.methods or set()) - {"HEAD", "OPTIONS"})
+        ]
 
-        Args:
-            db_path: Temporary database path fixture for test isolation.
-        """
-        application = create_app(db_path=db_path)
-        application.config["TESTING"] = True
-        test_client = application.test_client()
-        headers = bearer_header("rubotpaul", "GET", UNAUTHENTICATED_THROWAWAY_PATH)
+        answers = {
+            (method, path): client.open(path, method=method).status_code
+            for method, path in routes
+        }
 
-        response = test_client.get(UNAUTHENTICATED_THROWAWAY_PATH, headers=headers)
+        assert len(routes) >= 20
+        assert set(answers.values()) == {401}, answers
+
+    def test_bound_token_for_unguarded_view_returns_200(self, app: Flask) -> None:
+        """A correctly bound token still reaches a view that checks nothing."""
+        headers = bearer_header("rubotpaul", "GET", "/api/v1/pantry")
+
+        response = app.test_client().get("/api/v1/pantry", headers=headers)
 
         assert response.status_code == 200
-        assert response.get_json() == {"ok": True}
+        assert "staples" in response.get_json()
 
     def test_caller_id_helper_without_auth_context_aborts_401(self, app: Flask) -> None:
         """_request_caller_id aborts 401 when the hook never bound a caller.
