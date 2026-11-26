@@ -108,6 +108,29 @@ class ObservationKind(StrEnum):
     RETRACTION = "retraction"
 
 
+class NeedStatus(StrEnum):
+    """Where a replenishment need stands (ADR 0008)."""
+
+    SUGGESTED = "suggested"
+    APPROVED = "approved"
+    DEFERRED = "deferred"
+    DISMISSED = "dismissed"
+    PLANNED = "planned"
+    ORDERED = "ordered"
+    RECEIVED = "received"
+    CANCELLED = "cancelled"
+
+
+class NeedReasonKind(StrEnum):
+    """Why an item is wanted."""
+
+    LOW_STOCK = "low_stock"
+    OUT = "out"
+    RECURRING_STAPLE = "recurring_staple"
+    RECIPE_DEMAND = "recipe_demand"
+    MANUAL_REQUEST = "manual_request"
+
+
 class Unit(StrEnum):
     """Standardized grocery measurement units."""
 
@@ -679,3 +702,76 @@ class InventorySnapshot(BaseModel):
     age_days: float | None
     fresh_for_days: int
     observation: InventoryObservation | None
+
+
+# ---------------------------------------------------------------------------
+# Replenishment needs (ADR 0008)
+# ---------------------------------------------------------------------------
+
+OPEN_NEED_STATUSES = frozenset(
+    {
+        NeedStatus.SUGGESTED,
+        NeedStatus.APPROVED,
+        NeedStatus.DEFERRED,
+        NeedStatus.PLANNED,
+        NeedStatus.ORDERED,
+    }
+)
+
+
+class NeedReason(BaseModel):
+    """One reason an item is wanted.
+
+    ``source_key`` says which source the reason came from (for example
+    ``inventory`` or ``recipe:12``), so the same source can't add the same
+    reason twice. A withdrawn reason stays, with ``active`` false.
+    """
+
+    id: int
+    kind: NeedReasonKind
+    source_key: str
+    detail: dict[str, Any]
+    active: bool
+    created_at: dt.datetime
+
+
+class ReplenishmentNeed(BaseModel):
+    """A household item that someone or something thinks should be bought."""
+
+    id: int
+    item_id: int
+    status: NeedStatus
+    deferred_until: dt.datetime | None
+    reasons: list[NeedReason]
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+    @property
+    def is_open(self) -> bool:
+        """Whether the need is still in play.
+
+        Returns:
+            True unless the need is dismissed, received or cancelled.
+        """
+        return self.status in OPEN_NEED_STATUSES
+
+    @property
+    def active_reasons(self) -> list[NeedReason]:
+        """The reasons that still hold.
+
+        Returns:
+            Reasons that have not been withdrawn.
+        """
+        return [reason for reason in self.reasons if reason.active]
+
+
+class NeedEvent(BaseModel):
+    """One status change in a need's audit trail."""
+
+    id: int
+    need_id: int
+    from_status: NeedStatus | None
+    to_status: NeedStatus
+    actor: str
+    note: str
+    created_at: dt.datetime

@@ -671,11 +671,12 @@ public ones:
 | `ItemEvent` | One entry in a household item's append-only audit trail. |
 | `InventoryObservation` | One row of the append-only observation ledger. |
 | `InventorySnapshot` | What we currently believe about an item, and the observation behind it. |
+| `ReplenishmentNeed` | An item that should be bought, with its status and reasons. |
 
 Vocabulary enums (`StrEnum`): `IngredientCategory`, `InventoryStatus`, `Unit`,
 `BrandPreferenceType`, `BrandMatchType`, `PendingActionStatus`,
 `StaplePolicy`, `ItemEventType`, `StockState`, `ObservationSource`,
-`ObservationKind`.
+`ObservationKind`, `NeedStatus`, `NeedReasonKind`.
 
 **Canonical items ([ADR 0006](docs/adr/0006-canonical-household-item-identity.md)).**
 `grocery_butler/household_items.py` owns item identity. Every name an item
@@ -700,8 +701,20 @@ always says what was last stated, by whom, and when. For now the
 list read; every status change through `PantryManager` is also written to
 the ledger.
 
-The backlog's next domain concepts (`ReplenishmentNeed`, `ShoppingPlan`,
-`FulfillmentDraft`, and others) are
+**Replenishment needs ([ADR 0008](docs/adr/0008-explicit-replenishment-needs.md)).**
+`grocery_butler/replenishment.py` records that an item should be bought.
+A need has a status (`suggested`, `approved`, `deferred`, `dismissed`,
+`planned`, `ordered`, `received`, `cancelled`), the reasons it is wanted
+(low stock, out, recurring staple, recipe demand, manual request), and a
+record of every status change with its actor. An item has at most one open
+need, so an item wanted for two reasons is one need listing both. Inventory
+observations raise and withdraw suggestions; only a person approves, defers
+or dismisses, and nothing is marked received automatically. The shopping
+list still reads the older restock queue; it moves to needs with shopping
+plans.
+
+The backlog's next domain concepts (`ShoppingPlan`, `FulfillmentDraft`, and
+others) are
 described in
 [Domain model changes](docs/OPENCLAW_ERP_BACKLOG.md#domain-model-changes).
 
