@@ -565,10 +565,7 @@ Pause or narrow the product if:
 - P0.4–P0.9: canonical items, observation ledger, needs, migrations, API v2, approval envelopes
 - Deliverable: OpenClaw can safely manage inventory and plans without photos or retailer integration
 
-### Milestone C — Photo walk-through MVP (3–5 weeks)
-
-- P1.2–P1.6 plus P1.13–P1.14
-- Deliverable: photo → proposals → fast review → auditable inventory update
+Milestones keep their letters, but Milestone C now follows the first handoff in Milestone E ([ADR 0005](adr/0005-photo-capture-after-the-fulfillment-handoff.md)).
 
 ### Milestone D — Useful replenishment loop (2–4 weeks)
 
@@ -581,6 +578,12 @@ Pause or narrow the product if:
 - Instacart (epic #142) is the first concrete adapter, and it comes after Milestone B's versioned plans and approval envelopes (#143, #137) and Milestone D's adapter interface, universal export and hard constraints (#144, #145). Order: #139 decision, then #146 tracer, #147 translation, #148 link creation, #149 handoff UX; #150 reconciliation runs alongside.
 - Creating an Instacart link is a handoff, not an order. Grocery Butler records created, opened, expired, or failed, and changes inventory only from confirmed reconciliation.
 - Deliverable: one authorized handoff path and truthful post-order reconciliation
+
+### Milestone C — Photo walk-through MVP (3–5 weeks, after Milestone E's first handoff)
+
+- P1.2–P1.6 plus P1.13–P1.14
+- Whole-shelf capture; photos are deleted when their batch closes
+- Deliverable: photo → proposals → fast review → auditable inventory update
 
 ### Milestone F — External validation
 
@@ -606,15 +609,15 @@ Create these issues first; do not explode the entire document into tickets until
 
 ## Decisions still required
 
-These choices materially affect scope and should be settled through ADRs or short spikes:
+Six of the seven original questions are settled; each links to its ADR.
 
-1. Is Grocery Butler self-hosted software, a managed service, or both?
-2. Are source photos deleted immediately after confirmation or retained briefly for audit/correction?
-3. Is the first photo workflow individual staple capture or shelf-level batch capture? Recommendation: support shelf batches but optimize the first pilot for 10–20 declared staples.
-4. Does the ERP infer numeric quantities, or primarily qualitative state? Recommendation: qualitative by default; numeric only when explicit or reliably observed.
-5. Which authorized fulfillment path is viable? Do not decide before the discovery spike.
-6. Is meal planning central to the initial value proposition? Recommendation: keep it, but make replenishment useful without meal planning.
-7. What is the smallest household identity model needed for the private pilot?
+1. **Deployment model:** one household for the first production release, with no tenancy in the schema. [ADR 0002](adr/0002-single-household-pilot-with-named-members.md)
+2. **Photo retention:** a source photo is kept until its evidence batch closes, then deleted. [ADR 0005](adr/0005-photo-capture-after-the-fulfillment-handoff.md)
+3. **First photo workflow:** whole-shelf capture. [ADR 0005](adr/0005-photo-capture-after-the-fulfillment-handoff.md)
+4. **Quantities:** qualitative state, with an optional quantity only when stated or read from authoritative evidence. [ADR 0003](adr/0003-qualitative-inventory-state-with-optional-quantity.md)
+5. **Fulfillment path:** still open. Do not decide before the discovery spike (#139).
+6. **Meal planning:** kept as an optional source of demand; plans work without it. [ADR 0004](adr/0004-meal-demand-is-an-optional-input-to-shopping-plans.md)
+7. **Household identity:** named members without login. [ADR 0002](adr/0002-single-household-pilot-with-named-members.md)
 
 ## Definition of done for every backlog item
 
