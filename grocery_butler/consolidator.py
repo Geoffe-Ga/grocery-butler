@@ -192,22 +192,23 @@ def _build_ingredient_text(
 RESTOCK_REASON = "restock"
 
 
-def _line_group_key(line: ShoppingListItem) -> tuple[str, str]:
-    """Build the merge key of a shopping-list line.
+def _quantity_in(quantity: float, unit: Unit, target_unit: Unit) -> float:
+    """Express a quantity in another unit of the same merge group.
 
-    Lines of one ingredient merge when their units share a physical
-    dimension (mass, volume or count). Packaging units have none, so they
-    merge only with the same unit.
+    Callers only combine quantities that share a group key, so the units are
+    always convertible. If they ever were not, the quantity is returned
+    unconverted rather than dropped.
 
     Args:
-        line: A shopping-list line.
+        quantity: The amount to convert.
+        unit: The unit it is in.
+        target_unit: The unit to express it in.
 
     Returns:
-        ``(ingredient_lower, group_token)``.
+        The converted amount.
     """
-    dimension = dimension_of(line.unit)
-    token = f"dim:{dimension.value}" if dimension else f"unit:{line.unit.value}"
-    return (line.ingredient.lower(), token)
+    converted = convert(quantity, unit, target_unit)
+    return converted if converted is not None else quantity
 
 
 def _absorb_line(target: ShoppingListItem, extra: ShoppingListItem) -> ShoppingListItem:
@@ -222,12 +223,11 @@ def _absorb_line(target: ShoppingListItem, extra: ShoppingListItem) -> ShoppingL
         search term someone chose (one that differs from the bare
         ingredient name) is kept in preference to a default one.
     """
-    converted = convert(extra.quantity, extra.unit, target.unit)
-    addition = converted if converted is not None else extra.quantity
     chosen = target.search_term.lower() != target.ingredient.lower()
     return target.model_copy(
         update={
-            "quantity": target.quantity + addition,
+            "quantity": target.quantity
+            + _quantity_in(extra.quantity, extra.unit, target.unit),
             "from_meals": _union(target.from_meals, extra.from_meals),
             "search_term": target.search_term if chosen else extra.search_term,
         }
@@ -295,7 +295,7 @@ def merge_duplicate_lines(lines: list[ShoppingListItem]) -> list[ShoppingListIte
     """
     merged: dict[tuple[str, str], ShoppingListItem] = {}
     for line in lines:
-        key = _line_group_key(line)
+        key = Consolidator._ingredient_group_key(line.ingredient, line.unit)
         merged[key] = _absorb_line(merged[key], line) if key in merged else line
     return _share_restock_reason(list(merged.values()))
 
@@ -480,9 +480,9 @@ class Consolidator:
         raw_unit = entry.get("unit")
         canonical_unit = raw_unit if isinstance(raw_unit, Unit) else Unit.EACH
 
-        converted = convert(item.quantity, item.unit, canonical_unit)
-        addition = converted if converted is not None else item.quantity
-        entry["quantity"] = current_qty + addition
+        entry["quantity"] = current_qty + _quantity_in(
+            item.quantity, item.unit, canonical_unit
+        )
 
     @staticmethod
     def _merge_meal_ingredients(
