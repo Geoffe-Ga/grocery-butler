@@ -83,6 +83,10 @@ repos:
   rev: v0.11.0.1
   hooks:
   - id: shellcheck
+    # Follow `# shellcheck source=` directives. Without this, a change to any
+    # script that sources scripts/activate-venv.sh fails with SC1091 unless that
+    # file happens to be in the same commit.
+    args: [--external-sources]
 
 - repo: https://github.com/Yelp/detect-secrets
   rev: v1.5.0

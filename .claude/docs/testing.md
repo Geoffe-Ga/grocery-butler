@@ -16,6 +16,9 @@ tests/
     ├── conftest.py      # real create_app(), real stores, a fresh database per test
     ├── test_journeys.py # whole flows: one capability feeding the next
     └── test_*.py        # marked e2e via pytestmark
+└── browser/
+    ├── conftest.py      # real app on a real port, real headless Chromium
+    └── test_*.py        # marked browser via pytestmark
 ```
 
 | Lane | Marker | Command | Runs in check-all |
@@ -23,6 +26,7 @@ tests/
 | Unit | none | `./scripts/test.sh` (same as `--unit`) | yes |
 | Integration | `integration` | `./scripts/test.sh --integration` | in the coverage step |
 | End to end | `e2e` | `./scripts/test.sh --e2e` | in the coverage step |
+| Browser | `browser` | `./scripts/test.sh --browser` | in the coverage step |
 | Everything | | `./scripts/test.sh --all` | |
 
 `./scripts/coverage.sh` runs the whole suite, so every lane counts toward coverage and every lane must pass. Markers are registered in `pyproject.toml`, and `--strict-markers` rejects unregistered ones.
@@ -42,6 +46,15 @@ If a test only fails sometimes, it shares state, depends on order, or reads the 
 ### The route ledger
 
 A complete run of the end-to-end lane ends by comparing the routes it reached with the routes the app registers. A route that no end-to-end test drives must be listed, with a reason, in `tests/e2e/route_ledger.py`; a listed route that is now driven must be removed. So a new route needs an end-to-end test or a written reason, and the list only shrinks. `tests/test_route_ledger.py` also holds the docs to the app (`docs/api/v2.md` and the README's route tables) and fails if a module is imported by nothing an entry point reaches. A run narrowed to some files or by `-k` skips the comparison.
+
+### Browser tests
+
+`tests/browser` runs the dashboard in headless Chromium ([ADR 0022](../../docs/adr/0022-browser-tests-in-the-gate.md)) and is part of the gate. Install the browser once with `./scripts/install-browser.sh`; without it the lane fails and tells you so. It never skips.
+
+- Wait for one named thing with the browser's own waiting: `page.expect_response(...)`, `expect(locator).to_have_class(...)`, `page.expect_event("dialog")`. Never a fixed delay, never a retry.
+- Check stored state, usually after `page.reload()`, so a control that only redraws itself fails.
+- The `page` fixture fails a test on any console error, script error or Content Security Policy violation. A test that causes one on purpose calls `problems.expect("...")`.
+- A machine that can't reach Playwright's download host can set `BROWSER_TESTS_CHROMIUM` to a Chromium executable.
 
 ## 3. Postgres Tests
 

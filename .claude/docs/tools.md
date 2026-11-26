@@ -9,6 +9,7 @@
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt -e .
+./scripts/install-browser.sh   # Chromium for tests/browser; rerun when the playwright pin changes
 pre-commit install --install-hooks -t pre-commit -t commit-msg
 cp .env.example .env   # then fill in your own values; never commit it
 ```

@@ -55,6 +55,7 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
     "e2e: end-to-end tests exercising real wiring with mocks only at external boundaries",
     "integration: integration tests",
+    "browser: the dashboard's JavaScript in a real headless browser (tests/browser)",
 ]
 
 [tool.coverage.run]
@@ -166,7 +167,9 @@ skips = ["B101"]  # Skip assert_used in tests
 [tool.mutmut]
 paths_to_mutate = "grocery_butler/"
 backup = false
-runner = "python -m pytest --exitfirst --quiet --tb=no"
+# The browser tests are left out: they check the JavaScript, not the Python
+# being mutated, and starting a browser for every mutant would take hours.
+runner = "python -m pytest --exitfirst --quiet --tb=no -m 'not browser'"
 tests_dir = "tests/"
 
 [tool.interrogate]
