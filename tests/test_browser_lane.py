@@ -45,10 +45,16 @@ def test_the_unit_lane_leaves_the_browser_tests_to_the_full_run() -> None:
 
 
 def test_the_install_script_rejects_an_unknown_argument() -> None:
-    """A typo is a usage error, not an install of something unexpected."""
+    """A typo is a usage error, not an install of something unexpected.
+
+    Run with a bare environment, as CI runs it: no virtualenv is active,
+    so the script has to find its own way to the project's tools. Its
+    first CI run failed here because it relied on one being active.
+    """
     result = subprocess.run(
         [str(INSTALL_SCRIPT), "--everything"],
         cwd=ROOT,
+        env={"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "")},
         capture_output=True,
         text=True,
         check=False,
