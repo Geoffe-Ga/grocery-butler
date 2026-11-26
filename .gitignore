@@ -21,3 +21,6 @@ htmlcov/
 
 *.db
 *.sqlite3
+
+# graphify output (scripts/graph/): a local or restored code graph.
+graphify-out/
