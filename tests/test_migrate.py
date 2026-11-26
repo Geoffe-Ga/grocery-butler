@@ -662,6 +662,20 @@ def _migrate_in_child(db_path: str) -> None:
     migrate(db_path)
 
 
+def _existing_lock_path(db_path: str) -> Path:
+    """Return the lock file path of a file-backed database.
+
+    Args:
+        db_path: A SQLite file path (never ``:memory:``).
+
+    Returns:
+        The lock file path, narrowed from ``Path | None``.
+    """
+    lock_path = _lock_file_path(db_path)
+    assert lock_path is not None
+    return lock_path
+
+
 class TestMigrationLock:
     """The runner's check-then-apply runs under a cross-process lock."""
 
@@ -669,7 +683,7 @@ class TestMigrationLock:
         """A second holder cannot take the lock while the context is open."""
         with (
             _migration_lock(db_path),
-            _lock_file_path(db_path).open("w") as other,
+            _existing_lock_path(db_path).open("w") as other,
             pytest.raises(BlockingIOError),
         ):
             fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -679,7 +693,7 @@ class TestMigrationLock:
         with _migration_lock(db_path):
             pass
 
-        with _lock_file_path(db_path).open("w") as other:
+        with _existing_lock_path(db_path).open("w") as other:
             fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(other, fcntl.LOCK_UN)
 
@@ -688,7 +702,7 @@ class TestMigrationLock:
         with pytest.raises(RuntimeError, match="boom"), _migration_lock(db_path):
             raise RuntimeError("boom")
 
-        with _lock_file_path(db_path).open("w") as other:
+        with _existing_lock_path(db_path).open("w") as other:
             fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_memory_database_needs_no_lock_file(self) -> None:
