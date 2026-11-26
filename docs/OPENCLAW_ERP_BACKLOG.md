@@ -380,7 +380,7 @@ Score reach, approval likelihood, economics, data rights, checkout support, main
 - Shopping-list links have no default expiry, so the adapter sets one.
 - Product matching is by name (or UPC) and not guaranteed; the user resolves matches in Instacart.
 
-Still open, and decided in #139 before any Instacart code: program eligibility and the Developer Terms, how a production key is issued, data rights and attribution, link-expiry behavior, the supported units list, and rate limits. Delivery is epic #142.
+**Decision (2026-11-26, [ADR 0014](adr/0014-instacart-developer-platform-as-first-handoff-adapter.md)):** build it, against a development key first. The scored comparison with Kroger, Walmart, Instacart's MCP servers and the list export is in [`docs/research/fulfillment-options.md`](research/fulfillment-options.md). What #139 settled: a production key is requested in the dashboard and stays inert until Instacart approves a recorded demo, about 30 to 40 days; an expired link's page is deleted unless it was shopped or saved; quantities go in `line_item_measurements` with units from a published list; the rate limit is per second with no published number; the affiliate program is optional. Still needing a person before a production key: a full read of the Developer Terms and privacy addendum, and whether a single-household tool is eligible. Delivery is epic #142.
 
 **Acceptance:** Produce a written build/partner/avoid decision; no implementation begins from undocumented endpoints.
 
@@ -609,13 +609,13 @@ Create these issues first; do not explode the entire document into tickets until
 
 ## Decisions still required
 
-Six of the seven original questions are settled; each links to its ADR.
+All seven original questions are settled; each links to its ADR. One, the fulfillment path, is settled with conditions that only Geoff can meet; they are listed in its ADR.
 
 1. **Deployment model:** one household for the first production release, with no tenancy in the schema. [ADR 0002](adr/0002-single-household-pilot-with-named-members.md)
 2. **Photo retention:** a source photo is kept until its evidence batch closes, then deleted. [ADR 0005](adr/0005-photo-capture-after-the-fulfillment-handoff.md)
 3. **First photo workflow:** whole-shelf capture. [ADR 0005](adr/0005-photo-capture-after-the-fulfillment-handoff.md)
 4. **Quantities:** qualitative state, with an optional quantity only when stated or read from authoritative evidence. [ADR 0003](adr/0003-qualitative-inventory-state-with-optional-quantity.md)
-5. **Fulfillment path:** still open. Do not decide before the discovery spike (#139).
+5. **Fulfillment path:** decided in [ADR 0014](adr/0014-instacart-developer-platform-as-first-handoff-adapter.md). The Instacart shopping list link is the first handoff adapter, built against a development key. A production key waits on Geoff's read of the terms and Instacart's approval; until then the list export is the household's real handoff.
 6. **Meal planning:** kept as an optional source of demand; plans work without it. [ADR 0004](adr/0004-meal-demand-is-an-optional-input-to-shopping-plans.md)
 7. **Household identity:** named members without login. [ADR 0002](adr/0002-single-household-pilot-with-named-members.md)
 

@@ -241,7 +241,9 @@ What that means today:
   retailer's own app or site, by a person.
 - New fulfillment paths arrive only as authorized adapters, chosen after the
   terms review in backlog P2.2. No adapter is built from undocumented
-  endpoints.
+  endpoints. The first chosen is Instacart's documented shopping list link
+  ([ADR 0014](docs/adr/0014-instacart-developer-platform-as-first-handoff-adapter.md),
+  [research](docs/research/fulfillment-options.md)); it is not built yet.
 
 ### Fulfillment adapters
 
