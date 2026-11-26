@@ -20,6 +20,7 @@ ADR that supersedes the old one, rather than an edit.
 | [0012](0012-hard-constraints-and-soft-preferences.md) | Hard constraints and soft preferences are different types | Accepted |
 | [0013](0013-household-data-lifecycle.md) | One JSON export is the household's portable copy and its backup | Accepted |
 | [0014](0014-instacart-developer-platform-as-first-handoff-adapter.md) | Build the Instacart shopping list link as the first handoff adapter | Accepted, with conditions |
+| [0015](0015-audit-events-metrics-and-bounded-retries.md) | Audit events as structured logs, five metrics read on demand, and one bounded retry | Accepted |
 
 The product backlog these decisions serve is
 [`docs/OPENCLAW_ERP_BACKLOG.md`](../OPENCLAW_ERP_BACKLOG.md).

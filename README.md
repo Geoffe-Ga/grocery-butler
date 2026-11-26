@@ -185,8 +185,8 @@ serving. Migrations are forward-only: there is no downgrade. Each one is
 recorded in `schema_migrations` only after its SQL and any Python hook
 succeed, so a failed migration is retried from its start on the next boot.
 To recover, fix the migration and redeploy, or restore the database from a
-backup taken before the deploy
-([runbook](docs/operations/data-lifecycle.md)) and redeploy the previous commit. Never edit
+backup taken before the deploy and redeploy the previous commit. The restore
+steps are in the [runbook](docs/operations/data-lifecycle.md). Never edit
 `schema_migrations` by hand to skip a version.
 
 There is no separate worker process in production. The Discord bot
@@ -883,6 +883,9 @@ grocery-butler/
 │   ├── consolidator.py         # Multi-meal -> shopping list
 │   ├── pending_actions.py      # Draft -> confirm -> execute audit trail
 │   ├── data_lifecycle.py       # Export, delete and restore all household data
+│   ├── observability.py        # Audit events and correlation ids
+│   ├── metrics.py              # Operational metrics
+│   ├── retries.py              # Bounded, logged retries
 │   ├── api.py                  # /api/v1 blueprint (OpenClaw)
 │   ├── db/
 │   │   ├── adapter.py          # SQLite/Postgres adapter
@@ -1041,6 +1044,47 @@ require tailnet access, so a limiter would add a dependency without closing
 a live gap — and a naive in-memory limiter is ineffective across
 per-gunicorn-worker processes without a shared store (no Redis is
 provisioned). Revisit if multi-tenant tailnet access is ever introduced.
+
+### Operations: audit events and metrics
+
+How to see what the system did and whether it is drifting
+([ADR 0015](docs/adr/0015-audit-events-metrics-and-bounded-retries.md)).
+
+**Audit events** are single lines of JSON on standard error, from the
+`grocery_butler.audit` logger. Each has `event`, `at`, `correlation_id` and
+a few fields. Every response carries `X-Correlation-ID`; search the logs for
+it to see everything that request did. No image, raw bytes or secret is ever
+written: such fields are replaced with `[redacted]`.
+
+| Event | When | Fields |
+|-------|------|--------|
+| `http.request` | Every `POST`, `PUT`, `PATCH` or `DELETE`, including rejected ones | `method`, `route`, `status`, `actor` |
+| `capture.batch_submitted` | An observation batch is stored | `capture_session`, `batch_id`, `source`, `proposals`, `actor` |
+| `capture.batch_resolved` | A member reviews a batch | `capture_session`, `batch_id`, `status`, `confirmed`, `corrected`, `rejected`, `actor` |
+| `capture.batch_rejected` | A batch is thrown away | `capture_session`, `batch_id`, `proposals`, `actor` |
+| `extraction.failed` | A model reply could not be turned into rows | `stage`, `reason` |
+| `call.attempt` | Each try of a model or adapter call | `what`, `attempt`, `of`, `outcome`, `error`, `will_retry` |
+| `adapter.handoff_created` | A fulfillment handoff succeeded | `adapter`, `plan_version`, `unenforced_constraints` |
+| `adapter.failed` | A fulfillment handoff failed | `adapter`, `plan_version`, `error` |
+| `audit.count_failed` | A counter could not be advanced | `counted`, `error` |
+
+`capture_session` (`batch-<id>`) is the same on every event about one
+batch, across the requests that submit and review it.
+
+**Metrics** are read at `GET /api/v2/operations/metrics`:
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `extraction_failures` | Model replies that couldn't be used. A burst means the model or a prompt changed. |
+| `adapter_failures` | Fulfillment handoffs that failed. |
+| `correction_rate` | How often a member had to correct a proposal. Rising means proposals are getting worse. |
+| `stale_inventory` | Items nobody has checked within their freshness window. |
+| `reconciliation_gaps` | Needs marked ordered over 3 days ago and never confirmed received. |
+
+**Retries.** A model or adapter call that times out, loses its connection,
+or gets a 408, 429 or 5xx is tried up to three times, with pauses of 0.5 s
+then 1 s. Every try is a `call.attempt` event. Any other error fails at
+once.
 
 ### Browser security baseline
 

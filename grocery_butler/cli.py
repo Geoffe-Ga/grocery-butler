@@ -633,6 +633,8 @@ def _data_export(args: argparse.Namespace, db_path: str) -> int:
         return 0
     # The export is the whole household, so only its owner may read the file.
     descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # The mode above only applies to a new file; tighten one that existed.
+    os.fchmod(descriptor, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(text + "\n")
     print(f"Exported every household table to {args.output}.")

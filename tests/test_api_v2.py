@@ -1242,6 +1242,54 @@ class TestPlans:
         assert _error(response)["code"] == "plan_not_found"
 
 
+class TestOperationsMetrics:
+    """OpenClaw can read how well the system is doing."""
+
+    def test_metrics_report_all_five(self, api: Api) -> None:
+        """The five metrics come back under their names."""
+        response = api.call("GET", "/operations/metrics")
+        metrics = response.get_json()
+
+        assert response.status_code == 200
+        assert set(metrics) == {
+            "as_of",
+            "extraction_failures",
+            "adapter_failures",
+            "correction_rate",
+            "stale_inventory",
+            "reconciliation_gaps",
+        }
+        assert metrics["extraction_failures"] == {"total": 0, "last_7_days": 0}
+        assert metrics["correction_rate"]["rate"] is None
+
+    def test_metrics_need_the_bearer(self, app: Flask) -> None:
+        """Operational numbers are not public."""
+        assert app.test_client().get("/api/v2/operations/metrics").status_code == 401
+
+    def test_a_failed_extraction_during_a_request_is_counted(
+        self, api: Api, app: Flask
+    ) -> None:
+        """An audit event raised inside a request advances the app's counter."""
+        from grocery_butler.claude_utils import extraction_failed
+
+        with app.test_request_context("/api/v2/items", method="POST"):
+            app.preprocess_request()
+            extraction_failed("meal_parse", "invalid_json")
+            app.do_teardown_request()
+
+        metrics = api.call("GET", "/operations/metrics").get_json()
+        assert metrics["extraction_failures"] == {"total": 1, "last_7_days": 1}
+
+    def test_exporting_a_plan_is_not_an_adapter_failure(self, api: Api) -> None:
+        """A handoff that works leaves the failure count at zero."""
+        api.call("POST", "/plans", {})
+        export = api.call("GET", "/plans/1/export")
+
+        metrics = api.call("GET", "/operations/metrics").get_json()
+        assert export.status_code == 200
+        assert metrics["adapter_failures"]["total"] == 0
+
+
 class TestHouseholdExport:
     """The household can take all its data away through the API."""
 
