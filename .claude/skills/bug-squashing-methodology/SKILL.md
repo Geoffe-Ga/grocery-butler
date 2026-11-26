@@ -1,12 +1,12 @@
 ---
 name: bug-squashing-methodology
 description: >-
-  Structured 5-step bug fix process with root cause analysis and TDD.
-  Use when fixing bugs, debugging failures, or investigating defects.
-  Covers RCA documentation, reproduction, TDD fix cycle, and PR workflow.
+  Structured 6-step bug fix process with reproduction, root cause analysis,
+  and TDD. Use when fixing bugs, debugging failures, or investigating defects.
+  Covers reproduction, RCA documentation, TDD fix cycle, and PR workflow.
   Do NOT use for general feature development (use stay-green), CI
-  environment issues (use ci-debugging), code reviews (use
-  comprehensive-pr-review), or general git workflow like issue creation,
+  environment issues (use ci-debugging), review feedback (use
+  address-feedback), or general git workflow like issue creation,
   branching, and PRs (use git-workflow).
 metadata:
   author: Geoff
@@ -19,9 +19,16 @@ Systematic process for fixing bugs: Document, Understand, Fix, Verify. Never ski
 
 ## Instructions
 
-### Step 1: Root Cause Analysis (RCA)
+### Step 1: Reproduce First
 
-Create `RCA_ISSUE_XXX.md` with:
+Before writing anything down, reproduce the bug with a failing test or a
+direct repro command: capture the exact error message, stack trace, and
+input. An RCA written from a bug report's prose (not a real reproduction) is
+guesswork; the reproduction is what makes every later step trustworthy.
+
+### Step 2: Root Cause Analysis (RCA)
+
+Write the RCA in a scratch file (not in the repo; it becomes the issue body in Step 3) with:
 - **Problem Statement**: Error message, reproduction steps
 - **Root Cause**: Exact line/logic causing failure
 - **Analysis**: Why it happens, what was confused/wrong
@@ -30,37 +37,44 @@ Create `RCA_ISSUE_XXX.md` with:
 - **Fix Strategy**: Options with recommendation
 - **Prevention**: How to avoid similar bugs
 
-### Step 2: File a GitHub Issue
+### Step 3: File a GitHub Issue
 
 ```bash
 gh issue create --title "bug(component): Brief description" \
-  --body "Reproduction steps, root cause summary, proposed fix" \
+  --body-file <path-to-rca.md> \
   --label "bug"
 ```
 
-### Step 3: Branch and Fix with TDD
+### Step 4: Branch and Fix with TDD
 
 ```bash
-git checkout -b fix-component-issue-XXX
+git checkout -b bugfix/XXX-component
 ```
 
 1. **Red**: Write a test that reproduces the bug (should fail)
 2. **Green**: Write minimal code to fix the bug (test passes)
 3. **Refactor**: Clean up the fix while keeping tests green
 
-### Step 4: Quality Gates
+### Step 5: Quality Gates
 
-Run both gates before committing:
+Run the gates before committing (the canonical list is in `CLAUDE.md`):
 
 ```bash
-# Gate 1: All tests pass
+# All tests pass, including the new regression test
 ./scripts/test.sh --all
 
-# Gate 2: All quality checks pass
-pre-commit run --all-files
+# Every quality check passes
+./scripts/check-all.sh
+
+# Pre-commit is clean on the changed files
+./scripts/precommit-changed.sh
 ```
 
-### Step 5: Commit and PR
+If the bug touched `grocery_butler/db/`, set `TEST_DATABASE_URL` to a
+throwaway Postgres database so the Postgres-only tests run instead of
+skipping.
+
+### Step 6: Commit and PR
 
 Use conventional commit format: `fix(component): brief description (#XXX)`
 
@@ -68,7 +82,7 @@ Include in commit body:
 - Problem description (reference RCA)
 - Solution description
 - Specific file changes
-- Testing confirmation (both gates green)
+- Testing confirmation (every gate green)
 
 ## Examples
 

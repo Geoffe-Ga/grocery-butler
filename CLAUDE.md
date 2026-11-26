@@ -1,511 +1,191 @@
-# Claude Code Project Context: grocery-butler
-
-**Table of Contents**
-- [1. Critical Principles](#1-critical-principles)
-- [2. Project Overview](#2-project-overview)
-- [3. The Maximum Quality Engineering Mindset](#3-the-maximum-quality-engineering-mindset)
-- [4. Stay Green Workflow](#4-stay-green-workflow)
-- [5. Architecture](#5-architecture)
-- [6. Quality Standards](#6-quality-standards)
-- [7. Development Workflow](#7-development-workflow)
-- [8. Testing Strategy](#8-testing-strategy)
-- [9. Tool Usage & Code Standards](#9-tool-usage--code-standards)
-- [10. Common Pitfalls & Troubleshooting](#10-common-pitfalls--troubleshooting)
-- [Appendix A: AI Subagent Guidelines](#appendix-a-ai-subagent-guidelines)
-- [Appendix B: Key Files](#appendix-b-key-files)
-- [Appendix C: External References](#appendix-c-external-references)
+# Claude Code Project Context: Grocery Butler
 
 ---
 
-## 1. Critical Principles
+## What This Project Is
 
-These principles are **non-negotiable** and must be followed without exception:
+**Grocery Butler** is the household's replenishment memory: what we keep, what we probably have, what we need, and why. It is the durable system of record for that work. **OpenClaw** (today through RubotPaul, the household's OpenClaw assistant) is its conversational and visual operator, and people stay in control.
 
-### 1.1 Use Project Scripts, Not Direct Tools
+It is a Python-only small monolith: a Flask web dashboard and the `/api/v1` blueprint OpenClaw calls, a CLI, and a Discord bot that is retired from production but kept in the codebase. One domain layer sits behind those channels, and one database: SQLite in development, Postgres in production, both through `grocery_butler/db/adapter.py`. Claude (the Anthropic API) parses recipes and inventory updates; it never owns state.
 
-Always invoke tools through `./scripts/*` instead of directly.
+**It recently pivoted** ([ADR 0001](docs/adr/0001-pivot-from-private-safeway-api-to-authorized-fulfillment-adapters.md)). The private Safeway ordering runtime is gone: no retailer credentials, no private retailer HTTP calls, no checkout. Fulfillment goes through retailer-neutral adapters with declared capabilities, starting with a plain list export, and no adapter is ever built from undocumented endpoints. A human decides what gets purchased, every time, in the retailer's own checkout.
 
-**Why**: Scripts ensure consistent configuration across local development and CI.
+Read before designing anything:
 
-| Task | NEVER | ALWAYS |
-|------|-------|--------|
-| Format code | `ruff format .` | `./scripts/format.sh` |
-| Run tests | `pytest` | `./scripts/test.sh` |
-| Type check | `mypy .` | `./scripts/typecheck.sh` |
-| Lint code | `ruff check .` | `./scripts/lint.sh` |
-| Security scan | `bandit -r src/` | `./scripts/security.sh` |
-| All checks | *(run each tool)* | `./scripts/check-all.sh` |
+- [`README.md`](README.md): what it does, architecture, ownership boundary, key design rules, API, data model, deployment.
+- [`docs/adr/`](docs/adr/README.md): settled decisions. Record each new architecture decision as an ADR (use `architectural-decisions`).
+- [`docs/OPENCLAW_ERP_BACKLOG.md`](docs/OPENCLAW_ERP_BACKLOG.md): product direction, epics, safety and product principles, delivery sequence.
 
-See [9.1 Tool Invocation Patterns](#91-tool-invocation-patterns) for complete list.
+`plans/` holds historical build plans that ADR 0001 supersedes. Don't build from them.
+
+**Design rules that never bend** (full list: README "Key Design Rules"): inventory status overrides pantry staples; Claude is a parser, not a planner; evidence before mutation; draft, confirm, execute for anything money-moving or destructive; retailers are adapters; never claim a purchase without evidence.
 
 ---
 
-### 1.2 DRY Principle - Single Source of Truth
+## Critical Principles
 
-Never duplicate content. Always reference the canonical source.
+**Details: [.claude/docs/principles.md](.claude/docs/principles.md)**
 
-**Examples**:
-- Workflow documentation -> single source
-- Other files -> Link to canonical docs
-- Never copy workflow steps into multiple files
+1. **Use project scripts, not direct tools.** Run `./scripts/*`.
+2. **Don't duplicate content (DRY).** Link to the canonical source.
+3. **No shortcuts.** Fix root causes and never bypass quality checks.
+4. **Never add `# noqa`, `# type: ignore` or other suppressions to get green; fix the root cause.**
+5. **A flaky test is worse than no test.** Fix its root cause, decouple what it tests, or delete it with a stated reason. Never retry, quarantine or skip it to get green. Unit tests isolate their variable.
+6. **Never put a literal API key or token in any file.** Secrets reach the code only through environment variables.
+7. **Stay Green.** Never request review with failing checks.
+8. **Work from the project root** and use relative paths.
 
-**Why**: Duplicated docs get out of sync, causing confusion and errors.
+**The gates** (this list is canonical; other docs link here):
 
----
+1. **TDD:** a failing test first, then the code.
+2. **`./scripts/check-all.sh` exits 0.** It runs lint and docstring coverage, format, mypy, security, complexity, unit tests, coverage and the package build.
+3. **Pre-commit is clean on the changed files:** `./scripts/precommit-changed.sh`. The commit hook already does this for staged files.
+4. **CI is green.** One job, **CI gate**, is the check to require (`main` has no branch protection yet). It passes only when the Python gate (`./scripts/check-all.sh` on 3.11, 3.12 and 3.13, with a Postgres service) and pre-commit on the changed files both pass. CI runs on pull requests, nightly on `main`, and on manual dispatch. A merge to `main` starts no run.
+5. **The review bot passes.** See [Review Verdicts](#review-verdicts).
 
-### 1.3 No Shortcuts - Fix Root Causes
-
-Never bypass quality checks or suppress errors without justification.
-
-**Forbidden Shortcuts**:
-- Commenting out failing tests
-- Adding `# noqa` without issue reference
-- Lowering quality thresholds to pass builds
-- Using `git commit --no-verify` to skip pre-commit
-- Deleting code to reduce complexity metrics
-
-**Required Approach**:
-- Fix the failing test or mark with `@pytest.mark.skip(reason="Issue #N")`
-- Refactor code to pass linting (or justify with issue: `# noqa  # Issue #N: reason`)
-- Write tests to reach 90% coverage
-- Always run pre-commit checks
-- Refactor complex functions into smaller ones
-
-See [10.1 No Shortcuts Policy](#101-no-shortcuts-policy) for detailed examples.
+**Mutation testing is recommended before a release, not a merge gate.** Run `./scripts/mutation.sh`, or dispatch CI by hand; aim for ≥80%.
 
 ---
 
-### 1.4 Stay Green - Never Request Review with Failing Checks
+## Quality Standards
 
-Follow the 3-gate workflow rigorously.
+**Details: [.claude/docs/quality-standards.md](.claude/docs/quality-standards.md)**
 
-**The Rule**:
-- NEVER create PR while CI is red
-- NEVER request review with failing checks
-- NEVER merge without LGTM
+| Metric | Threshold | Tool |
+|--------|-----------|------|
+| Line coverage | ≥90% | pytest-cov |
+| Branch coverage | ≥90% | pytest-cov (`scripts/coverage.sh`) |
+| Docstring coverage | ≥95% | interrogate |
+| Cyclomatic complexity | ≤10 per function | radon / xenon |
+| Type errors | 0 | mypy (strict flags in `pyproject.toml`) |
+| Lint and format | 0 violations | Ruff |
+| Security findings | 0 | bandit, pip-audit |
+| Mutation score (before a release; not a merge gate) | ≥80% | mutmut |
 
-**The Process**:
-1. Gate 1: Local checks pass (`./scripts/check-all.sh` -> exit 0)
-2. Gate 2: CI pipeline green (all jobs pass)
-3. Gate 3: Code review LGTM
-
-See [4. Stay Green Workflow](#4-stay-green-workflow) for complete documentation.
-
----
-
-### 1.5 Quality First - Meet MAXIMUM QUALITY Standards
-
-Quality thresholds are immutable. Meet them, don't lower them.
-
-**Standards**:
-- Test Coverage: >=90%
-- Docstring Coverage: >=95%
-- Cyclomatic Complexity: <=10 per function
-
-**When code doesn't meet standards**:
-- Never change `fail_under = 70` in pyproject.toml
-- Write more tests, refactor code, improve quality
-
-See [6. Quality Standards](#6-quality-standards) for enforcement mechanisms.
+**One set of rules.** CI runs the same scripts with the exact tool versions pinned in `requirements-dev.txt`. Thresholds and scope live in `pyproject.toml` and `scripts/`, never in `ci.yml`. Change a rule there, once.
 
 ---
 
-### 1.6 Operate from Project Root
-
-Use relative paths from project root. Never `cd` into subdirectories.
-
-**Why**: Ensures commands work in any environment (local, CI, scripts).
-
-**Examples**:
-- `./scripts/test.sh tests/test_main.py`
-- Never `cd tests && pytest test_main.py`
-
-**CI Note**: CI always runs from project root. Commands that use `cd` will break in CI.
-
----
-
-### 1.7 Verify Before Commit
-
-Run `./scripts/check-all.sh` before every commit. Only commit if exit code is 0.
-
-**Pre-Commit Checklist**:
-- [ ] `./scripts/check-all.sh` passes (exit 0)
-- [ ] All new functions have tests
-- [ ] Coverage >=90% maintained
-- [ ] No failing tests
-- [ ] Conventional commit message ready
-
-See [10. Common Pitfalls & Troubleshooting](#10-common-pitfalls--troubleshooting) for complete list.
-
----
-
-**These principles are the foundation of MAXIMUM QUALITY ENGINEERING. Follow them without exception.**
-
----
-
-## 2. Project Overview
-
-**grocery-butler** is a Python application designed with maximum quality engineering standards.
-
-**Purpose**: Grocery Butler - a quality-controlled Python project for grocery management workflows.
-
-**Key Features**:
-- TBD - project is in early development
-
----
-
-## 3. The Maximum Quality Engineering Mindset
-
-**Core Philosophy**: It is not merely a goal but a source of profound satisfaction and professional pride to ship software that is GREEN on all checks with ZERO outstanding issues. This is not optional -- it is the foundation of our development culture.
-
-### 3.1 The Green Check Philosophy
-
-When all CI checks pass with zero warnings, zero errors, and maximum quality metrics:
-- Tests: 100% passing
-- Coverage: >=90%
-- Linting: 0 errors, 0 warnings
-- Type checking: 0 errors
-- Security: 0 vulnerabilities
-- Docstring coverage: >=95%
-
-This represents **MAXIMUM QUALITY ENGINEERING** -- the standard to which all code must aspire.
-
-### 3.2 Why Maximum Quality Matters
-
-1. **Pride in Craftsmanship**: Every green check represents excellence in execution
-2. **Zero Compromise**: Quality is not negotiable -- it's the baseline
-3. **Compound Excellence**: Small quality wins accumulate into robust systems
-4. **Trust and Reliability**: Green checks mean the code does what it claims
-5. **Developer Joy**: There is genuine satisfaction in seeing all checks pass
-
-### 3.3 The Role of Quality in Development
-
-Quality engineering is not a checkbox -- it's a continuous commitment:
-
-- **Before Commit**: Run `./scripts/check-all.sh` and fix every issue
-- **During Review**: Address every comment, resolve every suggestion
-- **After Merge**: Monitor CI, ensure all checks remain green
-- **Always**: Treat linting errors as bugs, not suggestions
-
-### 3.4 The "No Red Checks" Rule
-
-**NEVER** merge code with:
-- Failing tests
-- Linting errors (even "minor" ones)
-- Type checking failures
-- Coverage below threshold
-- Security vulnerabilities
-- Unaddressed review comments
-
-If CI shows red, the work is not done. Period.
-
----
-
-## 4. Stay Green Workflow
-
-**Policy**: Never request review with failing checks. Never merge without LGTM.
-
-The Stay Green workflow enforces iterative quality improvement through **3 sequential gates**. Each gate must pass before proceeding to the next.
-
-### 4.1 The Three Gates
-
-1. **Gate 1: Local Pre-Commit** (Iterate Until Green)
-   - Run `./scripts/check-all.sh`
-   - Fix all formatting, linting, types, complexity, security issues
-   - Fix tests and coverage (90%+ required)
-   - Only push when all local checks pass (exit code 0)
-
-2. **Gate 2: CI Pipeline** (Iterate Until Green)
-   - Push to branch: `git push origin feature-branch`
-   - Monitor CI: `gh pr checks --watch`
-   - If CI fails: fix locally, re-run Gate 1, push again
-   - Only proceed when all CI jobs show green
-
-3. **Gate 3: Code Review** (Iterate Until LGTM)
-   - Wait for code review (AI or human)
-   - If feedback provided: address ALL concerns
-   - Re-run Gate 1, push, wait for CI
-   - Only merge when review shows LGTM with no reservations
-
-### 4.2 Quick Checklist
-
-Before creating/updating a PR:
-
-- [ ] Gate 1: `./scripts/check-all.sh` passes locally (exit 0)
-- [ ] Push changes: `git push origin feature-branch`
-- [ ] Gate 2: All CI jobs show green
-- [ ] Gate 3: Code review shows LGTM
-- [ ] Ready to merge!
-
-### 4.3 Anti-Patterns (DO NOT DO)
-
-- Don't request review with failing CI
-- Don't skip local checks (`git commit --no-verify`)
-- Don't lower quality thresholds to pass
-- Don't ignore review feedback
-- Don't merge without LGTM
-
----
-
-## 5. Architecture
-
-### 5.1 Core Philosophy
-
-- **Maximum Quality**: No shortcuts, comprehensive tooling, strict enforcement
-- **Composable**: Modular components with clear interfaces
-- **Testable**: Every component designed for easy testing
-- **Maintainable**: Clear structure, excellent documentation
-- **Reproducible**: Consistent behavior across environments
-
-### 5.2 Component Structure
+## Layout
 
 ```
 grocery-butler/
-├── .github/
-│   ├── workflows/
-│   │   ├── ci.yml                     # CI/CD pipeline
-│   │   ├── claude.yml                 # Claude Code integration
-│   │   ├── claude-code-review.yml     # Claude code review plugin
-│   │   └── code-review.yml           # Manual code review template
-├── .claude/
-│   ├── agents/                        # AI subagent configurations
-│   └── skills/                        # Shared skill files
-├── scripts/
-│   ├── check-all.sh                   # Run all quality checks
-│   ├── test.sh                        # Test suite runner
-│   ├── lint.sh                        # Linting
-│   ├── format.sh                      # Code formatting (Ruff)
-│   ├── security.sh                    # Security scanning
-│   ├── typecheck.sh                   # Type checking (MyPy)
-│   ├── complexity.sh                  # Complexity analysis (Radon)
-│   └── coverage.sh                    # Coverage reporting
-├── grocery_butler/
-│   ├── __init__.py
-│   └── main.py
-├── tests/
-│   ├── __init__.py
-│   └── test_main.py
-├── pyproject.toml                     # Project configuration
-├── requirements.txt                   # Runtime dependencies
-├── requirements-dev.txt               # Development dependencies
-├── .pre-commit-config.yaml            # Git hooks
-├── CLAUDE.md                          # This file
-└── README.md                          # Project overview
+├── grocery_butler/         # The package
+│   ├── api.py              # /api/v1 blueprint (OpenClaw); HMAC bearer auth via auth_middleware.py
+│   ├── app.py              # Flask app factory and HTML dashboard
+│   ├── cli.py              # argparse CLI
+│   ├── bot.py              # Discord bot (local only; retired from production)
+│   ├── meal_parser.py, consolidator.py, pantry_manager.py,
+│   │   recipe_store.py, shopping_list_store.py, pending_actions.py   # Domain services
+│   ├── models.py, units.py, config.py, network_guard.py
+│   ├── claude_utils.py, prompt_loader.py, prompts/   # Anthropic wrapper and prompt templates
+│   ├── db/                 # adapter.py (SQLite/Postgres), migrate.py, migrations/
+│   ├── templates/          # Jinja2 templates
+│   └── static/             # Pico CSS and assets
+├── tests/                  # pytest suite; tests/e2e/ wires real components
+├── scripts/                # Quality gate scripts; graph/ for the code graph
+├── docs/adr/               # Architecture decision records
+├── docs/OPENCLAW_ERP_BACKLOG.md   # Product backlog
+├── plans/                  # Historical plans (superseded by ADR 0001)
+├── .claude/docs/           # Detailed dev guidance (principles, workflow, testing, tools)
+├── .claude/skills/         # Project skills (<name>/SKILL.md)
+├── .claude/agents/         # Subagent profiles
+├── .github/workflows/      # ci.yml, code-review.yml, claude.yml, graph-build.yml
+├── Dockerfile, docker-entrypoint.sh   # Railway image: migrate, then gunicorn
+├── pyproject.toml          # Tool configuration
+└── requirements*.txt       # Pinned runtime and dev dependencies
 ```
 
-### 5.3 Key Design Patterns
-
-**Data Processing Pipeline**:
-- Modular stages with clear inputs/outputs
-- Type-safe transformations with mypy validation
-- Comprehensive error handling at each stage
-- Logging and observability built-in
-
-**Validation Layer**:
-- Schema-based validation using Pydantic
-- Custom validators for domain-specific rules
-- Clear error messages for validation failures
+Business rules live in the domain services, never in `api.py`, `app.py`, `cli.py` or `bot.py`. Schema changes are numbered migrations in both dialects (`NNN_name.sql` and `NNN_name_pg.sql`).
 
 ---
 
-## 6. Quality Standards
+## Development Workflow
 
-### 6.1 Code Quality Requirements
+**Details: [.claude/docs/workflow.md](.claude/docs/workflow.md)** · commands: [.claude/docs/tools.md](.claude/docs/tools.md) · tests: [.claude/docs/testing.md](.claude/docs/testing.md)
 
-All code must meet these standards before merging to main:
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt -e .
+pre-commit install --install-hooks -t pre-commit -t commit-msg
 
-#### Test Coverage
-- **Code Coverage**: 90% minimum (branch coverage)
-- **Docstring Coverage**: 95% minimum (interrogate)
-- **Test Types**: Unit, Integration, and Property-based coverage required
+git checkout -b feature/<issue>-<slug>
+# TDD: failing test, minimum code, refactor
+./scripts/format.sh
+./scripts/check-all.sh          # must exit 0
+./scripts/precommit-changed.sh  # must pass
+git commit -m "feat(pantry): track observation provenance (#123)"
+gh pr create --fill
+```
 
-#### Type Checking
-- **MyPy**: Strict mode, no `# type: ignore` without justification
-- **Type Hints**: All function parameters and return types required
-- **Generic Types**: Use for collections (list, dict, etc.)
-
-#### Code Complexity
-- **Cyclomatic Complexity**: Max 10 per function
-- **Maintainability Index**: Minimum 20 (radon)
-- **Max Arguments**: 5 per function
-- **Max Branches**: 12 per function
-- **Max Lines per Function**: 50 lines
-
-#### Linting and Formatting
-- **Ruff**: Linting and formatting (replaces Black + isort)
-- **Bandit**: Security scanning with zero exceptions
-- **pip-audit**: Dependency vulnerability checking
-
-#### Documentation Standards
-- **Google-style Docstrings**: All public APIs
-- **Type Hints in Docstrings**: Args, Returns, Raises sections
-- **Code Examples**: For complex functions
-- **Architecture Decision Records**: For significant decisions
-- **README Sections**: Updated when adding new components
-
-### 6.2 Forbidden Patterns
-
-The following patterns are NEVER allowed without explicit justification and issue reference:
-
-1. **Type Ignore**
-   ```python
-   # FORBIDDEN
-   value = some_function()  # type: ignore
-
-   # ALLOWED (with issue reference)
-   value = some_function()  # type: ignore  # Issue #42: Third-party lib returns Any
-   ```
-
-2. **Suppressed Linting**
-   ```python
-   # FORBIDDEN
-   exec(user_input)  # noqa: S102
-
-   # ALLOWED (with justification)
-   exec(trusted_code)  # noqa: S102  # Issue #15: Plugin system requires dynamic execution
-   ```
-
-3. **Commented-Out Tests**
-   ```python
-   # FORBIDDEN
-   # def test_something():
-   #     assert True
-
-   # ALLOWED
-   @pytest.mark.skip(reason="Issue #23: Blocked by upstream bug")
-   def test_something():
-       assert True
-   ```
+Postgres-only tests skip unless `TEST_DATABASE_URL` points at a throwaway Postgres database. CI sets it.
 
 ---
 
-## 7. Development Workflow
+## Common Mistakes
 
-### 7.1 Feature Development
+**Details: [.claude/docs/troubleshooting.md](.claude/docs/troubleshooting.md)**
 
-1. Create feature branch from main
-2. Implement feature with TDD (Red-Green-Refactor)
-3. Run `./scripts/check-all.sh` until green
-4. Push and create PR
-5. Wait for CI green + code review LGTM
-6. Merge
-
-### 7.2 Bug Fixes
-
-1. Write failing test that reproduces the bug
-2. Fix the bug (make test pass)
-3. Run `./scripts/check-all.sh`
-4. Push, PR, review, merge
+1. Skipping local checks, or committing with `--no-verify`
+2. Lowering thresholds or adding coverage `omit` rules instead of writing tests
+3. Invoking tools directly instead of `./scripts/*`
+4. Commenting out, skipping or retrying a failing test
+5. Adding a suppression comment to get green
+6. **Domain-specific:** reintroducing retailer credentials, private retailer endpoints or checkout code (ADR 0001), letting a model inference mutate inventory without a proposal, or putting business rules in a channel adapter
 
 ---
 
-## 8. Testing Strategy
+## Skills
 
-### 8.1 Test Types
+Project skills live in `.claude/skills/<name>/SKILL.md`.
 
-- **Unit Tests**: Fast, isolated, mock external dependencies
-- **Integration Tests**: Test component interactions
-- **Property-based Tests**: Hypothesis for edge case discovery
+| Stage | Skills |
+|-------|--------|
+| Decide | [decide](.claude/skills/decide/SKILL.md) (interactive decision sheet), [architectural-decisions](.claude/skills/architectural-decisions/SKILL.md) (trade-offs, then an ADR) |
+| Plan | [spec-decomposition](.claude/skills/spec-decomposition/SKILL.md) (backlog or spec into epics and issues), [tracer-code](.claude/skills/tracer-code/SKILL.md), [backlog-grooming](.claude/skills/backlog-grooming/SKILL.md), [prompt-engineering](.claude/skills/prompt-engineering/SKILL.md), [file-naming-conventions](.claude/skills/file-naming-conventions/SKILL.md) |
+| Build | [stay-green](.claude/skills/stay-green/SKILL.md), [testing](.claude/skills/testing/SKILL.md), [mutation-testing](.claude/skills/mutation-testing/SKILL.md), [max-quality-no-shortcuts](.claude/skills/max-quality-no-shortcuts/SKILL.md), [bug-squashing-methodology](.claude/skills/bug-squashing-methodology/SKILL.md), [error-handling](.claude/skills/error-handling/SKILL.md), [concurrency](.claude/skills/concurrency/SKILL.md), [documentation](.claude/skills/documentation/SKILL.md), [vibe](.claude/skills/vibe/SKILL.md), [frontend-aesthetics](.claude/skills/frontend-aesthetics/SKILL.md), [user-facing-error-messages](.claude/skills/user-facing-error-messages/SKILL.md), [skill-craft](.claude/skills/skill-craft/SKILL.md) |
+| Secure | [security](.claude/skills/security/SKILL.md), [cve-remediation](.claude/skills/cve-remediation/SKILL.md) |
+| Ship | [git-workflow](.claude/skills/git-workflow/SKILL.md), [review-diff](.claude/skills/review-diff/SKILL.md) (self-review before the PR), [comprehensive-pr-review](.claude/skills/comprehensive-pr-review/SKILL.md), [await-claude-review](.claude/skills/await-claude-review/SKILL.md), [address-feedback](.claude/skills/address-feedback/SKILL.md), [ci-debugging](.claude/skills/ci-debugging/SKILL.md) |
 
-### 8.2 Test Conventions
+### Review Verdicts
 
-- File naming: `test_<module>.py`
-- Function naming: `test_<what>_<scenario>_<expected>`
-- Use fixtures for shared setup
-- AAA pattern: Arrange, Act, Assert
+`.github/workflows/code-review.yml` posts one comment per review as `github-actions[bot]`. The comment starts with `<!-- grocery-butler-review pr=N -->` and ends with `## Verdict: LGTM | CHANGES_REQUESTED | COMMENTS`. Trust a verdict only from that author, with that marker, unedited by anyone else, and posted after the current HEAD. A PR that edits `code-review.yml` gets no automated verdict (the action skips itself), so it needs a manual review.
 
----
+- `LGTM`: merge on green CI.
+- `CHANGES_REQUESTED`: fix with TDD, push once, then wait for the new verdict.
+- `COMMENTS`: **never iterate.** File each actionable finding as a follow-up issue labeled `P0` through `P3` by severity, then merge on green CI. `P0` covers security, data loss, crashes and privacy leaks. `P3` covers nits.
+- Any other value: don't merge; surface it to the user.
 
-## 9. Tool Usage & Code Standards
-
-### 9.1 Tool Invocation Patterns
-
-| Task | Command |
-|------|---------|
-| Format code | `./scripts/format.sh` |
-| Fix formatting | `./scripts/format.sh --fix` |
-| Check formatting | `./scripts/format.sh --check` |
-| Run tests | `./scripts/test.sh` |
-| Run specific test | `./scripts/test.sh tests/test_main.py` |
-| Type check | `./scripts/typecheck.sh` |
-| Lint code | `./scripts/lint.sh` |
-| Lint check only | `./scripts/lint.sh --check` |
-| Security scan | `./scripts/security.sh` |
-| Complexity check | `./scripts/complexity.sh` |
-| Coverage report | `./scripts/coverage.sh` |
-| All checks | `./scripts/check-all.sh` |
-
-### 9.2 Code Style
-
-- Line length: 88 characters (Ruff default)
-- Import sorting: Ruff isort rules (I)
-- Naming: PEP 8 conventions
-- Type hints: Required on all function signatures
+The procedure is in `address-feedback`. The workflow, `await-claude-review` and `address-feedback` must change together.
 
 ---
 
-## 10. Common Pitfalls & Troubleshooting
+## Knowledge Graph (graphify)
 
-### 10.1 No Shortcuts Policy
+A code graph of the repo. When `graphify-out/graph.json` exists, prefer it to broad grep and read sweeps:
 
-When a quality check fails, the ONLY acceptable response is to fix the underlying issue:
-
-| Problem | Wrong Response | Right Response |
-|---------|---------------|----------------|
-| Test fails | Comment out test | Fix the code or test |
-| Linting error | Add `# noqa` | Refactor the code |
-| Low coverage | Lower threshold | Write more tests |
-| Type error | Add `# type: ignore` | Fix the types |
-| Complex function | Ignore warning | Split into smaller functions |
-
-### 10.2 Common Issues
-
-**CI passes locally but fails in CI**:
-- Check Python version matrix (3.11, 3.12, 3.13)
-- Verify PYTHONPATH is set correctly
-- Check for OS-specific path issues
-
-**Coverage below threshold**:
-- Run `./scripts/coverage.sh --html` and review htmlcov/index.html
-- Focus on branch coverage, not just line coverage
-- Test error paths and edge cases
+- Get it with `./scripts/graph/restore.sh` (the published graph of `main`) or `./scripts/graph/build.sh`.
+- Ask `graphify query "<question>"` first; use `graphify path "A" "B"` for relationships, `graphify explain "X"` for a concept, and `graphify affected "X"` for change impact.
+- Quote each node's `source_location` when you cite it.
+- After changing code, refresh with `./scripts/graph/update.sh`.
+- If there's no graph, proceed without it.
 
 ---
 
-## Appendix A: AI Subagent Guidelines
+## Appendix: Delegating to Subagents
 
-### A.1 Subagent Architecture
+Give each subagent:
 
-The project uses a hierarchical agent architecture:
+1. **The task and why it matters.** Name the ADR, backlog item (for example P0.5) or issue it serves.
+2. **Context:** the files, related issues and ADRs, and the design rules above that apply.
+3. **Safety and privacy impact:** whether the change touches household data, inventory evidence or photos, approvals and `pending_actions`, `/api/v1` auth, or a retailer handoff, checked against the backlog's "Safety and product principles".
+4. **Acceptance criteria:** the gates above pass, public APIs have docstrings, and an ADR exists if an architectural decision was made.
+5. **Open questions:** any product decision the task depends on that the backlog or an ADR leaves open, flagged explicitly rather than silently picked.
 
-- **Level 0**: Chief Architect - strategic decisions, system-wide coordination
-- **Level 2**: Orchestrators - coordinate reviews and cross-cutting concerns
-- **Level 3**: Specialists - domain-specific expertise (testing, security, performance, etc.)
+**Run only parallelizable work at once.** A lane is a subagent or session that opens a PR.
 
-### A.2 Subagent Usage Rules
-
-1. Subagents must respect scope boundaries
-2. Escalate decisions outside scope to higher-level agents
-3. All reviews must be posted to GitHub PRs, never local files
-4. Follow the delegation pattern: plan -> delegate -> review
-
----
-
-## Appendix B: Key Files
-
-| File | Purpose |
-|------|---------|
-| `CLAUDE.md` | This file - project context for Claude Code |
-| `pyproject.toml` | Project configuration and tool settings |
-| `.pre-commit-config.yaml` | Git hook definitions |
-| `scripts/check-all.sh` | Master quality check script |
-| `.github/workflows/ci.yml` | CI/CD pipeline definition |
-
----
-
-## Appendix C: External References
-
-- [Ruff Documentation](https://docs.astral.sh/ruff/)
-- [MyPy Documentation](https://mypy.readthedocs.io/)
-- [Pytest Documentation](https://docs.pytest.org/)
-- [Bandit Documentation](https://bandit.readthedocs.io/)
+- Before giving a lane a task, list the files it will likely change: the issue's named files, plus a quick grep of the code it names.
+- Compare them with the files each unmerged branch changes, pushed or still local: `git diff --name-only $(git merge-base origin/main <head>) <head>`.
+- On any overlap, the task waits. Leave the lane empty instead: each conflict between in-flight PRs forces a re-push, and every push re-runs CI.
+- Shared files count as overlap: `grocery_butler/models.py`, `grocery_butler/api.py`, `grocery_butler/db/adapter.py`, and the next migration number in `grocery_butler/db/migrations/`.
+- If two in-flight branches overlap anyway, sequence them. The later one waits until the earlier one merges, then merges `main` locally and pushes once.

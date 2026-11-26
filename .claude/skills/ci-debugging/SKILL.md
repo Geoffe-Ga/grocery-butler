@@ -32,6 +32,8 @@ git diff <last-passing-commit> HEAD
 
 Ask: Did I modify config files? Add dependencies? Change imports or module structure?
 
+`main` runs the full CI nightly, not on each merge, so two earlier PRs that broke only together can first fail in your PR's CI. Don't assume it; prove it. Run the failing check on a clean checkout of `origin/main`, or read `main`'s latest nightly run: `gh run list --workflow ci.yml --branch main --event schedule --limit 1`. Only a failure on `main` itself is pre-existing.
+
 ### Step 2: Read the Actual Error (5 minutes)
 
 ```bash
@@ -43,12 +45,15 @@ Look for: path issues, configuration errors, dependency problems, file artifacts
 ### Step 3: Reproduce Locally (5 minutes)
 
 ```bash
-pytest tests/ --strict-markers --strict-config -v
-pytest --cov=<package> --cov-report=term --cov-fail-under=90
+./scripts/check-all.sh                       # what CI's Python gate runs
+./scripts/precommit-changed.sh               # what CI's pre-commit job runs
 pytest <failing-test-file>::<failing-test> -vv
 ```
 
-If it passes locally but fails in CI, check environment differences, test artifacts, coverage configuration, and absolute paths.
+If it passes locally but fails in CI, check environment differences, test artifacts, coverage configuration, and absolute paths. In this repo, check these first:
+
+- **Postgres:** CI sets `TEST_DATABASE_URL`, so the Postgres-only tests that skip on your machine run there. Point it at a throwaway Postgres database and re-run.
+- **Python version:** CI runs 3.11, 3.12 and 3.13. Reproduce with the version that failed.
 
 ### Step 4: Inspect Your Changes (10 minutes)
 
@@ -61,7 +66,7 @@ git diff HEAD~1 .github/workflows/
 find . -name "*project*" -o -name "MagicMock" -o -name "tmp*"
 
 # Import validation
-python -c "from my_package import main; print('OK')"
+python -c "from grocery_butler.app import create_app; print('OK')"
 ```
 
 ### Step 5: Fix and Verify
