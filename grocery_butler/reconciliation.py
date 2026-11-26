@@ -808,6 +808,9 @@ class Reconciliations:
         need = self._needs.open_need_for_item(item_id)
         if need is None:
             return
+        # An open need is suggested, deferred, approved, planned or ordered
+        # (OPEN_NEED_STATUSES in models.py). The walk below covers exactly
+        # those; a new open status must be added here too.
         if target is NeedStatus.APPROVED:
             if need.status in (NeedStatus.PLANNED, NeedStatus.ORDERED):
                 self._needs.transition(need.id, target, actor=actor, note=note)

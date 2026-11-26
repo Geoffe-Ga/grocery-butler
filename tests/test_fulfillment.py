@@ -61,6 +61,7 @@ CONTRACT_ADAPTER_IDS = [adapter.describe().name for adapter in CONTRACT_ADAPTERS
 # Domain modules that must never import a concrete adapter.
 CORE_MODULES = [
     "approvals",
+    "check_reminders",
     "consolidator",
     "constraints",
     "household_items",

@@ -1656,6 +1656,135 @@ class TestHandoffs:
         assert client.get("/api/v2/handoffs/attempts/1").status_code == 401
 
 
+class TestCheckReminders:
+    """Which items to ask about, and what members said about being asked."""
+
+    def _kept(self, api: Api, name: str) -> int:
+        """Create an always-keep item nobody has checked."""
+        item_id = _item(api, name)
+        api.call("PATCH", f"/items/{item_id}", {"staple_policy": "always_keep"})
+        return item_id
+
+    def _named(self, payload: dict[str, Any], key: str) -> list[str]:
+        """Return the display names under a key."""
+        return [entry["display_name"] for entry in payload[key]]
+
+    def test_overview_lists_candidates_and_the_allowance(self, api: Api) -> None:
+        """A kept item nobody has checked is first in line."""
+        item_id = self._kept(api, "aaa coffee")
+
+        response = api.call("GET", "/reminders/checks")
+        overview = response.get_json()
+
+        assert response.status_code == 200
+        assert overview["daily_limit"] == 3
+        assert (overview["issued_today"], overview["remaining_today"]) == (0, 3)
+        assert overview["suggested_hour_utc"] is None
+        first = next(c for c in overview["candidates"] if c["item_id"] == item_id)
+        assert first["reason"] == "never_checked"
+        assert first["policy"] == "always_keep"
+        assert first["priority"] == 2
+
+    def test_issue_respects_the_daily_limit(self, api: Api) -> None:
+        """Ask for more than the allowance and only the allowance goes out."""
+        for name in ("aaa one", "aaa two", "aaa three", "aaa four"):
+            self._kept(api, name)
+
+        first = api.call("POST", "/reminders/checks/issue", {"max": 2}).get_json()
+        second = api.call("POST", "/reminders/checks/issue", {"max": 20}).get_json()
+        third = api.call("POST", "/reminders/checks/issue").get_json()
+        overview = api.call("GET", "/reminders/checks").get_json()
+
+        assert (len(first["issued"]), len(second["issued"]), third["issued"]) == (
+            2,
+            1,
+            [],
+        )
+        assert (overview["issued_today"], overview["remaining_today"]) == (3, 0)
+        assert overview["candidates"] == []
+
+    def test_stop_asking_and_resume(self, api: Api) -> None:
+        """Stop holds the item back; resume brings it back; both are recorded."""
+        item_id = self._kept(api, "aaa coffee")
+
+        stopped = api.call(
+            "POST", f"/items/{item_id}/check-reminder", {"action": "stop"}
+        )
+        held = api.call("GET", "/reminders/checks").get_json()
+        api.call("POST", f"/items/{item_id}/check-reminder", {"action": "resume"})
+        back = api.call("GET", "/reminders/checks").get_json()
+        state = api.call("GET", f"/items/{item_id}/check-reminder").get_json()
+
+        assert stopped.status_code == 200
+        assert stopped.get_json()["stop_asking"] is True
+        assert item_id not in [c["item_id"] for c in held["candidates"]]
+        assert item_id in [c["item_id"] for c in back["candidates"]]
+        assert [(e["action"], e["actor"].split("@")[0]) for e in state["history"]] == [
+            ("stopped", "geoff"),
+            ("resumed", "geoff"),
+        ]
+
+    def test_snooze_and_dismiss(self, api: Api) -> None:
+        """Both hold the item back and say so in its state."""
+        snoozed_id = self._kept(api, "aaa coffee")
+        dismissed_id = self._kept(api, "aaa tea")
+
+        snoozed = api.call(
+            "POST",
+            f"/items/{snoozed_id}/check-reminder",
+            {"action": "snooze", "days": 7},
+        ).get_json()
+        dismissed = api.call(
+            "POST", f"/items/{dismissed_id}/check-reminder", {"action": "dismiss"}
+        ).get_json()
+        overview = api.call("GET", "/reminders/checks").get_json()
+
+        assert snoozed["snoozed_until"] is not None
+        assert dismissed["dismissed"] is True
+        assert {snoozed_id, dismissed_id}.isdisjoint(
+            c["item_id"] for c in overview["candidates"]
+        )
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"action": "snooze"},
+            {"action": "snooze", "days": 0},
+            {"action": "snooze", "days": 91},
+            {"action": "nag"},
+            {},
+            {"action": "stop", "extra": 1},
+        ],
+    )
+    def test_bad_choices_are_refused(self, api: Api, body: dict[str, Any]) -> None:
+        """A snooze needs a sensible number of days; an action must be real."""
+        item_id = self._kept(api, "aaa coffee")
+
+        response = api.call("POST", f"/items/{item_id}/check-reminder", body)
+
+        assert (response.status_code, _error(response)["code"]) == (
+            400,
+            "validation_failed",
+        )
+
+    def test_unknown_items_and_bad_issue_requests(self, api: Api) -> None:
+        """A missing item is a 404; a silly max is a 400."""
+        missing = api.call("POST", "/items/99999/check-reminder", {"action": "stop"})
+        missing_read = api.call("GET", "/items/99999/check-reminder")
+        bad = api.call("POST", "/reminders/checks/issue", {"max": -1})
+
+        assert (missing.status_code, _error(missing)["code"]) == (404, "item_not_found")
+        assert missing_read.status_code == 404
+        assert (bad.status_code, _error(bad)["code"]) == (400, "validation_failed")
+
+    def test_reminders_need_the_bearer(self, app: Flask) -> None:
+        """Nothing here is reachable without the token."""
+        client = app.test_client()
+
+        assert client.get("/api/v2/reminders/checks").status_code == 401
+        assert client.post("/api/v2/reminders/checks/issue").status_code == 401
+
+
 class TestReceipts:
     """What actually arrived, recorded on a member's confirmation (ADR 0018)."""
 
