@@ -381,7 +381,9 @@ class _ScriptedAdapter(FulfillmentAdapter):
             human_required=True,
         )
 
-    def create_handoff(self, plan: ShoppingPlan) -> HandoffResult:
+    def create_handoff(
+        self, plan: ShoppingPlan, *, constraints_acknowledged: bool = False
+    ) -> HandoffResult:
         """Return or raise the next scripted outcome."""
         self.calls += 1
         outcome = self._script.pop(0)

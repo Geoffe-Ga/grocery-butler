@@ -29,6 +29,7 @@ def create_handoff(
     adapter: FulfillmentAdapter,
     plan: ShoppingPlan,
     *,
+    constraints_acknowledged: bool = False,
     sleep: Callable[[float], None] = time.sleep,
 ) -> HandoffResult:
     """Ask an adapter for a handoff, recording how it went.
@@ -36,6 +37,8 @@ def create_handoff(
     Args:
         adapter: The adapter to use.
         plan: The plan version to hand off.
+        constraints_acknowledged: Whether a person has reviewed the hard
+            constraints the adapter can't enforce.
         sleep: Waits between tries; tests pass a recorder.
 
     Returns:
@@ -48,7 +51,11 @@ def create_handoff(
     name = adapter.describe().name
     try:
         result = call_with_retry(
-            lambda: adapter.create_handoff(plan), what=f"adapter.{name}", sleep=sleep
+            lambda: adapter.create_handoff(
+                plan, constraints_acknowledged=constraints_acknowledged
+            ),
+            what=f"adapter.{name}",
+            sleep=sleep,
         )
     except Exception as err:
         audit(

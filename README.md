@@ -274,6 +274,44 @@ The one adapter today is the **list export** (`fulfillment/export.py`): any
 plan version as a grouped checklist in text, JSON or CSV, for any store. It
 contacts nothing. Get it from `GET /api/v2/plans/{version}/export`.
 
+The **Instacart adapter** (`fulfillment/instacart/`) is a stub
+([ADR 0014](docs/adr/0014-instacart-developer-platform-as-first-handoff-adapter.md)).
+It is off unless `INSTACART_ENABLED=true`, and even then it runs on a stub
+transport: it returns a fake link on `example.invalid` and contacts nothing.
+It claims one capability, `shopping_list_link`. Real link creation behind an
+approval arrives with #148; no API offers an Instacart handoff yet.
+
+*Translation* (`fulfillment/instacart/translate.py`) turns each plan line
+into a documented line item, and reports everything it can't carry:
+
+| Plan | Sent to Instacart |
+|------|-------------------|
+| Item name | `name` (lowercased, the search term) and `display_text` |
+| One amount in a supported unit | One entry in `line_item_measurements` |
+| Preferred brand | `filters.brand_filters` |
+| Organic | `filters.health_filters: ["ORGANIC"]` |
+| Preferred size | In brackets in `display_text`; Instacart has no size field |
+| A UPC the household verified | `upcs`; Instacart then ignores the filters |
+| Any hard constraint | Never sent. Reported, and the handoff waits for a person |
+
+Units sent, from Instacart's published list: teaspoon, tablespoon, cup,
+fl oz, ml, liter, gallon, pint, quart, oz, lb, gram, kilogram, each, bunch,
+head, can, package. A dozen is sent as 12 each. Clove, slice, bag, box, jar,
+bottle, block, stick, pinch and dash have no Instacart unit: the item is
+sent with no amount and an issue says so.
+
+| Issue | Meaning |
+|-------|---------|
+| `unsupported_unit` | The amount's unit isn't on Instacart's list, so no amount was sent. |
+| `ambiguous_mapping` | Amounts in more than one unit, a non-positive amount, or a preference with no Instacart equivalent. Nothing was guessed. |
+| `hard_constraint_unrepresentable` | Instacart can't enforce this rule. The handoff is refused until a person acknowledges it. |
+| `filter_dropped_by_upc` | The line was sent by UPC, so its brand or organic filter is ignored. |
+| `invalid_upc` | The stored UPC isn't 12 or 14 digits, or another line already used it; the line was sent by name. |
+
+Issues travel with the handoff result, whether or not a link was created.
+The plan builder doesn't put a UPC or an organic preference on a line yet,
+so those two paths are exercised only by tests today.
+
 The live-API verification plans that used to live here (#31, #32, #60) are
 superseded by the ADR.
 

@@ -28,6 +28,8 @@ from grocery_butler.fulfillment.base import (
     unenforced_constraints,
 )
 from grocery_butler.fulfillment.export import EXPORT_FORMATS, ExportAdapter
+from grocery_butler.fulfillment.instacart.adapter import InstacartAdapter
+from grocery_butler.fulfillment.instacart.transport import FakeTransport
 from grocery_butler.fulfillment.registry import (
     AdapterNotFoundError,
     AdapterRegistry,
@@ -47,6 +49,14 @@ from grocery_butler.models import (
 
 GOLDEN = Path(__file__).parent / "golden"
 PACKAGE = Path(__file__).resolve().parent.parent / "grocery_butler"
+
+# Every adapter that exists, enabled in this deployment or not, must honour
+# the contract. The Instacart adapter runs on a fake transport.
+CONTRACT_ADAPTERS: list[FulfillmentAdapter] = [
+    ExportAdapter(),
+    InstacartAdapter(FakeTransport.ok("https://example.invalid/l/contract")),
+]
+CONTRACT_ADAPTER_IDS = [adapter.describe().name for adapter in CONTRACT_ADAPTERS]
 
 # Domain modules that must never import a concrete adapter.
 CORE_MODULES = [
@@ -327,9 +337,7 @@ class TestHardConstraintsInTheExport:
 class TestAdapterContract:
     """What every registered adapter must honour."""
 
-    @pytest.mark.parametrize(
-        "adapter", default_registry().adapters(), ids=default_registry().names()
-    )
+    @pytest.mark.parametrize("adapter", CONTRACT_ADAPTERS, ids=CONTRACT_ADAPTER_IDS)
     def test_adapter_enforces_or_reports_every_hard_constraint(
         self, adapter: FulfillmentAdapter, plan: ShoppingPlan
     ) -> None:
@@ -354,6 +362,25 @@ class TestAdapterContract:
             description, plan
         )
 
+    @pytest.mark.parametrize("adapter", CONTRACT_ADAPTERS, ids=CONTRACT_ADAPTER_IDS)
+    def test_a_plan_leaves_the_household_only_after_review(
+        self, adapter: FulfillmentAdapter, plan: ShoppingPlan
+    ) -> None:
+        """ADR 0012: no outside handoff with an unreviewed hard constraint.
+
+        An adapter that creates something outside the household (it returns
+        a URL) must refuse a plan with unenforced hard constraints until a
+        person has acknowledged them.
+        """
+        unreviewed = adapter.create_handoff(plan)
+        reviewed = adapter.create_handoff(plan, constraints_acknowledged=True)
+
+        assert unreviewed.unenforced_constraints
+        assert unreviewed.external_url is None
+        assert reviewed.status is HandoffStatus.CREATED
+        if reviewed.external_url is not None:
+            assert unreviewed.status is HandoffStatus.FAILED
+
     def test_an_adapter_that_enforces_a_kind_is_not_asked_to_report_it(
         self, plan: ShoppingPlan
     ) -> None:
@@ -374,9 +401,7 @@ class TestAdapterContract:
         assert kinds.count(HardConstraintKind.DIETARY_RULE) == 2
         assert kinds.count(HardConstraintKind.DO_NOT_SUBSTITUTE) == 1
 
-    @pytest.mark.parametrize(
-        "adapter", default_registry().adapters(), ids=default_registry().names()
-    )
+    @pytest.mark.parametrize("adapter", CONTRACT_ADAPTERS, ids=CONTRACT_ADAPTER_IDS)
     def test_adapter_honours_the_contract(
         self, adapter: FulfillmentAdapter, plan: ShoppingPlan
     ) -> None:
@@ -396,9 +421,7 @@ class TestAdapterContract:
         assert result.plan_content_hash == plan.content_hash
         assert result.human_action
 
-    @pytest.mark.parametrize(
-        "adapter", default_registry().adapters(), ids=default_registry().names()
-    )
+    @pytest.mark.parametrize("adapter", CONTRACT_ADAPTERS, ids=CONTRACT_ADAPTER_IDS)
     def test_adapter_refuses_capabilities_it_did_not_declare(
         self, adapter: FulfillmentAdapter
     ) -> None:

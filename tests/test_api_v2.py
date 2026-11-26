@@ -1328,8 +1328,26 @@ class TestHouseholdExport:
 class TestFulfillment:
     """Adapters are declared, and any plan can be exported for any store."""
 
-    def test_adapters_declare_what_they_do(self, api: Api) -> None:
+    def test_instacart_is_listed_only_when_enabled(
+        self, api: Api, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Turned on, Instacart declares one capability and reads nothing back."""
+        monkeypatch.setenv("INSTACART_ENABLED", "true")
+
+        adapters = api.call("GET", "/fulfillment/adapters").get_json()["adapters"]
+        by_name = {adapter["name"]: adapter for adapter in adapters}
+
+        assert sorted(by_name) == ["export", "instacart"]
+        assert by_name["instacart"]["capabilities"] == ["shopping_list_link"]
+        assert by_name["instacart"]["authorization"] == "provider_program"
+        assert by_name["instacart"]["human_required"] is True
+        assert by_name["instacart"]["enforces"] == []
+
+    def test_adapters_declare_what_they_do(
+        self, api: Api, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """OpenClaw can see what each adapter can and can't do."""
+        monkeypatch.delenv("INSTACART_ENABLED", raising=False)
         adapters = api.call("GET", "/fulfillment/adapters").get_json()["adapters"]
 
         assert adapters == [

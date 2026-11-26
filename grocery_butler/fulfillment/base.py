@@ -178,11 +178,19 @@ class FulfillmentAdapter(abc.ABC):
         """
 
     @abc.abstractmethod
-    def create_handoff(self, plan: ShoppingPlan) -> HandoffResult:
+    def create_handoff(
+        self, plan: ShoppingPlan, *, constraints_acknowledged: bool = False
+    ) -> HandoffResult:
         """Hand a stored plan version off.
 
         Args:
             plan: The stored plan version to hand off.
+            constraints_acknowledged: Whether a person has seen the hard
+                constraints this adapter can't enforce and chose to go on.
+                An adapter that sends the plan to an outside service must
+                refuse without it when any such constraint exists (ADR
+                0012). An adapter that puts the constraints in front of
+                the person itself, like a printed list, may ignore it.
 
         Returns:
             What was created, or how it failed. Never a purchase.
