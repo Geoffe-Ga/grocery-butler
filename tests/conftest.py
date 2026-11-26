@@ -10,6 +10,8 @@ the whole suite stays in sync with the ``RequestBinding`` contract in
 
 from __future__ import annotations
 
+import pytest
+
 from grocery_butler.auth_middleware import RequestBinding, mint_token
 
 
@@ -43,3 +45,33 @@ def bearer_header(
     binding = RequestBinding.of(method, path, body)
     token = mint_token(caller_id, binding)
     return {"Authorization": f"Bearer {token}"}
+
+
+class RealProviderContactedError(AssertionError):
+    """Raised when a test would have opened a connection to Instacart."""
+
+    def __init__(self, host: str) -> None:
+        """Name the host the test tried to reach.
+
+        Args:
+            host: The host that would have been contacted.
+        """
+        super().__init__(
+            f"A test tried to contact {host}. Tests use a fake transport or a"
+            " fake sender and never call Instacart."
+        )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_provider_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail any test that reaches the real HTTPS sender.
+
+    ``HttpTransport`` looks its default sender up when it is called, so
+    replacing it here covers every transport a test builds without a fake.
+    """
+    from grocery_butler.fulfillment.instacart import http_transport
+
+    def refuse(host: str, *_args: object) -> http_transport.ProviderResponse:
+        raise RealProviderContactedError(host)
+
+    monkeypatch.setattr(http_transport, "_send_https", refuse)

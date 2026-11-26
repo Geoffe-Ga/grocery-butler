@@ -31,19 +31,25 @@ class TransportError(Exception):
     """A request to the provider failed.
 
     ``code`` is a stable word for the failure. ``status_code`` is the HTTP
-    status when there was one; the retry helper reads it to decide whether
-    trying again could help.
+    status when there was one, and ``transient`` marks a failure with no
+    status that is still worth retrying (the provider could not be
+    reached). The retry helper reads both.
     """
 
-    def __init__(self, code: str, status_code: int | None = None) -> None:
+    def __init__(
+        self, code: str, status_code: int | None = None, *, transient: bool = False
+    ) -> None:
         """Describe the failure without any provider internals.
 
         Args:
             code: A stable failure code, e.g. ``rate_limited``.
             status_code: The HTTP status, if there was a response.
+            transient: Whether trying again could help although there was
+                no response.
         """
         self.code = code
         self.status_code = status_code
+        self.transient = transient
         super().__init__(f"The provider request failed: {code}.")
 
 
@@ -66,6 +72,28 @@ class Transport(Protocol):
                 refused the request.
         """
         ...  # pragma: no cover
+
+
+class NotConfiguredTransport:
+    """A transport for a deployment that enabled Instacart without a key.
+
+    It never sends anything. Every call fails with ``not_configured``, so
+    the household is told to use the list export.
+    """
+
+    def create_products_link(
+        self, request: ProductsLinkRequest
+    ) -> ProductsLinkResponse:
+        """Refuse, without contacting anything.
+
+        Args:
+            request: The typed request body. Not sent.
+
+        Raises:
+            TransportError: Always, with ``not_configured``.
+        """
+        del request
+        raise TransportError("not_configured")
 
 
 class FakeTransport:

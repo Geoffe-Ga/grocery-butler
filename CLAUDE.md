@@ -81,7 +81,7 @@ grocery-butler/
 │   │   constraints.py, data_lifecycle.py,
 │   │   recipe_store.py, shopping_list_store.py, pending_actions.py   # Domain services
 │   ├── fulfillment/        # Adapter interface (base.py), registry.py, runner.py, export.py (list export),
-│   │                       # instacart/ (stub adapter; only registry.py may import it)
+│   │                       # handoffs.py (draft, approve, execute), instacart/ (only registry.py may import it)
 │   ├── observability.py, metrics.py, retries.py   # Audit events, operational metrics, bounded retries
 │   ├── models.py, units.py, config.py, network_guard.py
 │   ├── claude_utils.py, prompt_loader.py, prompts/   # Anthropic wrapper and prompt templates

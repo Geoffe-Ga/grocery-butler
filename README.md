@@ -274,12 +274,39 @@ The one adapter today is the **list export** (`fulfillment/export.py`): any
 plan version as a grouped checklist in text, JSON or CSV, for any store. It
 contacts nothing. Get it from `GET /api/v2/plans/{version}/export`.
 
-The **Instacart adapter** (`fulfillment/instacart/`) is a stub
+The **Instacart adapter** (`fulfillment/instacart/`) creates a shopping
+list link through Instacart's documented developer API
 ([ADR 0014](docs/adr/0014-instacart-developer-platform-as-first-handoff-adapter.md)).
-It is off unless `INSTACART_ENABLED=true`, and even then it runs on a stub
-transport: it returns a fake link on `example.invalid` and contacts nothing.
-It claims one capability, `shopping_list_link`. Real link creation behind an
-approval arrives with #148; no API offers an Instacart handoff yet.
+It is off unless `INSTACART_ENABLED=true`, and by default it runs on a stub
+transport that returns a fake link on `example.invalid` and contacts nothing.
+It claims one capability, `shopping_list_link`.
+
+| Variable | Meaning |
+|----------|---------|
+| `INSTACART_ENABLED` | `true` registers the adapter. Unset, only the list export exists. |
+| `INSTACART_ENV` | `stub` (default): a fake link, nothing contacted. `development` or `production`: Instacart's real host. Anything else refuses every call. |
+| `INSTACART_API_KEY` | The deployment's key from Instacart's developer program, for the two real environments. Never a household member's login. Without it every call fails with `not_configured` and the household is pointed at the list export. |
+
+A production key waits on the conditions in ADR 0014. Until then, use
+`stub`, or `development` with a development key.
+
+*Handoffs* (`fulfillment/handoffs.py`,
+[ADR 0016](docs/adr/0016-approved-idempotent-handoff-attempts.md)). Sending
+a plan outside the household takes three steps. **Draft** stores exactly
+what a member will approve: the lines, every hard constraint the adapter
+can't enforce, and everything its translation leaves out. **Approve** is the
+member echoing that draft's hash. **Execute** claims the approval once,
+calls the adapter and records a `fulfillment_attempts` row: `created` with a
+link, or `failed` with a stable code. The request's idempotency key is the
+attempt's key, so repeating a request never sends twice; only an attempt
+that failed with a passing fault is tried again under the same key. If the
+plan's needs change, the approval is stale and nothing is sent. A created
+attempt is a link, not an order: it changes no need and no inventory.
+
+The API key is held by one module (`instacart/http_transport.py`), sent in
+one header to one of two fixed hosts, and appears in no `repr`, error or
+log. Tests never call Instacart: a suite-wide fixture fails any test that
+would.
 
 *Translation* (`fulfillment/instacart/translate.py`) turns each plan line
 into a documented line item, and reports everything it can't carry:
@@ -979,8 +1006,8 @@ process to deploy alongside the web service.
 
 ### Required environment variables
 
-No retailer credentials are needed, or supported. Set these in your Railway
-project settings. `APP_ENV=production` is baked
+No household retailer login is needed, or supported. Set these in your
+Railway project settings. `APP_ENV=production` is baked
 into the `Dockerfile` and doesn't need to be set separately — it's what
 arms the fail-fast checks below.
 
@@ -1108,6 +1135,9 @@ written: such fields are replaced with `[redacted]`.
 | `call.attempt` | Each try of a model or adapter call | `what`, `attempt`, `of`, `outcome`, `error`, `will_retry` |
 | `adapter.handoff_created` | A fulfillment handoff succeeded | `adapter`, `plan_version`, `unenforced_constraints` |
 | `adapter.failed` | A fulfillment handoff failed | `adapter`, `plan_version`, `error` |
+| `handoff.drafted` | A handoff was drafted for approval | `envelope_id`, `adapter`, `plan_version`, `actor` |
+| `handoff.approved`, `handoff.rejected` | A member approved or turned down a handoff | `envelope_id`, `actor` |
+| `handoff.attempt` | An approved handoff was carried out | `attempt_id`, `envelope_id`, `adapter`, `plan_version`, `status`, `error`, `retryable` |
 | `audit.count_failed` | A counter could not be advanced | `counted`, `error` |
 
 `capture_session` (`batch-<id>`) is the same on every event about one

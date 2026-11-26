@@ -70,11 +70,14 @@ def is_transient(error: BaseException) -> bool:
         error: The error a call raised.
 
     Returns:
-        True for timeouts, connection failures, and a provider's 408, 429
-        or 5xx. False for everything else, including a provider's other
-        4xx responses: asking again won't change the answer.
+        True for timeouts, connection failures, an error that marks
+        itself ``transient``, and a provider's 408, 429 or 5xx. False for
+        everything else, including a provider's other 4xx responses:
+        asking again won't change the answer.
     """
     if isinstance(error, TimeoutError | ConnectionError):
+        return True
+    if getattr(error, "transient", False) is True:
         return True
     status = getattr(error, "status_code", None)
     if isinstance(status, int):
