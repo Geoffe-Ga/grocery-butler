@@ -645,3 +645,452 @@ class TestV1IsUntouched:
 
         assert response.status_code == 401
         assert isinstance(response.get_json()["error"], str)
+
+
+def _item(api: Api, name: str) -> int:
+    """Create an item and return its id."""
+    response = api.call("POST", "/items", {"name": name})
+    assert response.status_code == 201
+    item_id: int = response.get_json()["id"]
+    return item_id
+
+
+class TestDirectObservations:
+    """What a member says directly is recorded directly, as theirs."""
+
+    def test_statement_is_recorded_and_raises_a_need(self, api: Api) -> None:
+        """A member's "we're out" is human evidence and suggests a need."""
+        item_id = _item(api, "oat milk")
+
+        response = api.call(
+            "POST",
+            f"/items/{item_id}/observations",
+            {"state": "out", "notes": "carton is empty"},
+        )
+        item = api.call("GET", f"/items/{item_id}").get_json()
+
+        stored = response.get_json()
+        assert response.status_code == 201
+        assert stored["source"] == "human"
+        assert stored["actor"] == "geoff@rubotpaul"
+        assert stored["confidence"] == 1.0
+        assert item["state"]["state"] == "out"
+        assert item["open_need"]["status"] == "suggested"
+        assert [r["kind"] for r in item["open_need"]["reasons"]] == ["out"]
+
+    def test_stated_quantity_is_kept(self, api: Api) -> None:
+        """A count a person states is stored with its unit."""
+        item_id = _item(api, "oat milk")
+
+        response = api.call(
+            "POST",
+            f"/items/{item_id}/observations",
+            {"state": "on_hand", "quantity": 2, "unit": "carton"},
+        )
+
+        assert (response.get_json()["quantity"], response.get_json()["unit"]) == (
+            2,
+            "carton",
+        )
+
+    @pytest.mark.parametrize(
+        "body",
+        [{"state": "unknown"}, {"state": "low", "quantity": 2}, {"state": "empty"}],
+        ids=["unknown-state", "quantity-without-unit", "not-a-state"],
+    )
+    def test_invalid_statements_are_validation_errors(
+        self, api: Api, body: dict[str, Any]
+    ) -> None:
+        """The ledger's rules surface as coded validation errors."""
+        item_id = _item(api, "oat milk")
+
+        response = api.call("POST", f"/items/{item_id}/observations", body)
+
+        assert response.status_code == 400
+        assert _error(response)["code"] == "validation_failed"
+
+    def test_observation_for_a_missing_item_is_not_found(self, api: Api) -> None:
+        """You can only observe an item that exists."""
+        response = api.call("POST", "/items/99999/observations", {"state": "low"})
+
+        assert _error(response)["code"] == "item_not_found"
+
+    def test_correct_and_retract_keep_history_and_resync_the_need(
+        self, api: Api
+    ) -> None:
+        """A correction replaces the state; a retraction withdraws it."""
+        item_id = _item(api, "oat milk")
+        wrong = api.call(
+            "POST", f"/items/{item_id}/observations", {"state": "out"}
+        ).get_json()
+
+        fixed = api.call(
+            "POST", f"/observations/{wrong['id']}/correct", {"state": "on_hand"}
+        )
+        after_fix = api.call("GET", f"/items/{item_id}").get_json()
+        retracted = api.call(
+            "POST", f"/observations/{fixed.get_json()['id']}/retract", {"notes": "oops"}
+        )
+        after_retract = api.call("GET", f"/items/{item_id}").get_json()
+        history = api.call("GET", f"/items/{item_id}/history").get_json()
+
+        assert fixed.status_code == 201
+        assert fixed.get_json()["supersedes_id"] == wrong["id"]
+        assert after_fix["state"]["state"] == "on_hand"
+        assert after_fix["open_need"] is None
+        assert retracted.status_code == 201
+        assert retracted.get_json()["kind"] == "retraction"
+        assert after_retract["state"]["state"] == "unknown"
+        assert len(history["observations"]) == 3
+
+    def test_correcting_twice_or_a_missing_observation_is_coded(self, api: Api) -> None:
+        """An already replaced or unknown observation has its own code."""
+        item_id = _item(api, "oat milk")
+        wrong = api.call(
+            "POST", f"/items/{item_id}/observations", {"state": "out"}
+        ).get_json()
+        api.call("POST", f"/observations/{wrong['id']}/correct", {"state": "low"})
+
+        again = api.call(
+            "POST", f"/observations/{wrong['id']}/correct", {"state": "on_hand"}
+        )
+        missing = api.call("POST", "/observations/99999/retract", {})
+        missing_fix = api.call("POST", "/observations/99999/correct", {"state": "low"})
+
+        assert (again.status_code, _error(again)["code"]) == (
+            409,
+            "observation_superseded",
+        )
+        assert (missing.status_code, _error(missing)["code"]) == (
+            404,
+            "observation_not_found",
+        )
+        assert _error(missing_fix)["code"] == "observation_not_found"
+
+
+class TestObservationBatches:
+    """A model's proposals wait for a member before anything is recorded."""
+
+    def _submit(self, api: Api, proposals: list[dict[str, Any]]) -> dict[str, Any]:
+        """Submit a photo batch and return its JSON."""
+        response = api.call(
+            "POST",
+            "/observation-batches",
+            {"source": "photo", "proposals": proposals, "evidence_ref": "photo:1"},
+        )
+        assert response.status_code == 201
+        batch: dict[str, Any] = response.get_json()
+        return batch
+
+    def test_submitting_changes_no_inventory_state(self, api: Api) -> None:
+        """Evidence before mutation: a proposal is not an observation."""
+        item_id = _item(api, "eggs")
+
+        batch = self._submit(
+            api, [{"name": "Eggs", "state": "out", "confidence": 0.95}]
+        )
+        item = api.call("GET", f"/items/{item_id}").get_json()
+
+        assert batch["status"] == "open"
+        assert batch["submitted_by"] == "geoff@rubotpaul"
+        assert batch["proposals"][0]["item_id"] == item_id
+        assert batch["proposals"][0]["needs_review"] is False
+        assert item["state"]["state"] == "unknown"
+        assert item["open_need"] is None
+
+    def test_review_flags_and_listing(self, api: Api) -> None:
+        """Unmatched and low-confidence proposals are flagged for review."""
+        _item(api, "eggs")
+
+        batch = self._submit(
+            api,
+            [
+                {"name": "eggs", "state": "low", "confidence": 0.5},
+                {"name": "dragonfruit", "state": "low", "confidence": 0.99},
+            ],
+        )
+        listed = api.call("GET", "/observation-batches", query="status=open")
+        fetched = api.call("GET", f"/observation-batches/{batch['id']}")
+
+        assert [p["needs_review"] for p in batch["proposals"]] == [True, True]
+        assert batch["proposals"][1]["item_id"] is None
+        assert [b["id"] for b in listed.get_json()["batches"]] == [batch["id"]]
+        assert fetched.get_json()["id"] == batch["id"]
+
+    def test_resolving_records_what_the_member_decided(self, api: Api) -> None:
+        """Confirm one, correct one, reject one: all applied together."""
+        eggs = _item(api, "eggs")
+        rice = _item(api, "rice")
+        batch = self._submit(
+            api,
+            [
+                {"name": "eggs", "state": "out", "confidence": 0.95},
+                {"name": "rise", "state": "low", "confidence": 0.9},
+                {"name": "ghost", "state": "low", "confidence": 0.9},
+            ],
+        )
+        first, second, third = (p["id"] for p in batch["proposals"])
+
+        response = api.call(
+            "POST",
+            f"/observation-batches/{batch['id']}/resolve",
+            {
+                "reviews": [
+                    {"proposal_id": first, "action": "confirm"},
+                    {"proposal_id": second, "action": "correct", "item_id": rice},
+                    {"proposal_id": third, "action": "reject"},
+                ]
+            },
+            member="geoff",
+        )
+
+        resolved = response.get_json()
+        eggs_state = api.call("GET", f"/items/{eggs}").get_json()["state"]
+        rice_state = api.call("GET", f"/items/{rice}").get_json()["state"]
+        assert response.status_code == 200
+        assert resolved["status"] == "confirmed"
+        assert resolved["resolved_by"] == "geoff@rubotpaul"
+        assert [p["decision"] for p in resolved["proposals"]] == [
+            "confirmed",
+            "corrected",
+            "rejected",
+        ]
+        assert eggs_state["state"] == "out"
+        assert eggs_state["observation"]["source"] == "photo"
+        assert eggs_state["observation"]["confidence"] == 0.95
+        assert eggs_state["observation"]["evidence_ref"] == "photo:1"
+        assert rice_state["state"] == "low"
+        assert rice_state["observation"]["source"] == "human"
+
+    def test_undecided_proposals_are_listed_and_nothing_is_written(
+        self, api: Api
+    ) -> None:
+        """Bulk accept never covers a proposal that needs review."""
+        eggs = _item(api, "eggs")
+        batch = self._submit(
+            api,
+            [
+                {"name": "eggs", "state": "out", "confidence": 0.95},
+                {"name": "ghost", "state": "low", "confidence": 0.99},
+            ],
+        )
+
+        response = api.call(
+            "POST",
+            f"/observation-batches/{batch['id']}/resolve",
+            {"accept_high_confidence": True},
+        )
+
+        error = _error(response)
+        assert response.status_code == 409
+        assert error["code"] == "reviews_missing"
+        assert error["details"]["proposal_ids"] == [batch["proposals"][1]["id"]]
+        assert (
+            api.call("GET", f"/items/{eggs}").get_json()["state"]["state"] == "unknown"
+        )
+
+    def test_retrying_a_resolve_does_not_record_twice(self, api: Api) -> None:
+        """Idempotency covers the one call where a double-apply would hurt most."""
+        eggs = _item(api, "eggs")
+        batch = self._submit(
+            api, [{"name": "eggs", "state": "out", "confidence": 0.95}]
+        )
+        body = {"accept_high_confidence": True}
+        path = f"/observation-batches/{batch['id']}/resolve"
+
+        first = api.call("POST", path, body, key="resolve-key-0001")
+        retry = api.call("POST", path, body, key="resolve-key-0001")
+        fresh_key = api.call("POST", path, body)
+        history = api.call("GET", f"/items/{eggs}/history").get_json()
+
+        assert first.status_code == 200
+        assert retry.get_json() == first.get_json()
+        assert retry.headers[REPLAY_HEADER] == "true"
+        assert (fresh_key.status_code, _error(fresh_key)["code"]) == (
+            409,
+            "batch_not_open",
+        )
+        assert len(history["observations"]) == 1
+
+    def test_reject_closes_the_batch(self, api: Api) -> None:
+        """A rejected batch records nothing."""
+        eggs = _item(api, "eggs")
+        batch = self._submit(
+            api, [{"name": "eggs", "state": "out", "confidence": 0.95}]
+        )
+
+        response = api.call("POST", f"/observation-batches/{batch['id']}/reject")
+
+        assert response.get_json()["status"] == "rejected"
+        assert (
+            api.call("GET", f"/items/{eggs}").get_json()["state"]["state"] == "unknown"
+        )
+
+    @pytest.mark.parametrize(
+        ("body", "status", "code"),
+        [
+            ({"source": "photo", "proposals": []}, 400, "batch_invalid"),
+            (
+                {
+                    "source": "system",
+                    "proposals": [{"name": "x", "state": "low", "confidence": 1}],
+                },
+                400,
+                "batch_invalid",
+            ),
+            (
+                {
+                    "source": "photo",
+                    "proposals": [{"name": "x", "state": "low", "confidence": 2}],
+                },
+                400,
+                "validation_failed",
+            ),
+            (
+                {
+                    "source": "photo",
+                    "proposals": [{"name": "x", "state": "unknown", "confidence": 1}],
+                },
+                400,
+                "validation_failed",
+            ),
+        ],
+        ids=["empty", "system-source", "bad-confidence", "unknown-state"],
+    )
+    def test_bad_batches_are_refused(
+        self, api: Api, body: dict[str, Any], status: int, code: str
+    ) -> None:
+        """Each kind of bad batch has its code."""
+        response = api.call("POST", "/observation-batches", body)
+
+        assert (response.status_code, _error(response)["code"]) == (status, code)
+
+    def test_bad_reviews_and_missing_batches_are_coded(self, api: Api) -> None:
+        """A review that can't apply, an unknown batch, a bad status filter."""
+        _item(api, "eggs")
+        batch = self._submit(
+            api, [{"name": "ghost", "state": "low", "confidence": 0.9}]
+        )
+        proposal_id = batch["proposals"][0]["id"]
+
+        unmatched = api.call(
+            "POST",
+            f"/observation-batches/{batch['id']}/resolve",
+            {"reviews": [{"proposal_id": proposal_id, "action": "confirm"}]},
+        )
+        missing = api.call("GET", "/observation-batches/99999")
+        bad_filter = api.call("GET", "/observation-batches", query="status=nope")
+
+        assert (unmatched.status_code, _error(unmatched)["code"]) == (
+            409,
+            "review_invalid",
+        )
+        assert (missing.status_code, _error(missing)["code"]) == (
+            404,
+            "batch_not_found",
+        )
+        assert (bad_filter.status_code, _error(bad_filter)["code"]) == (
+            400,
+            "validation_failed",
+        )
+
+
+class TestNeeds:
+    """A member's decisions about what to buy."""
+
+    def _suggested(self, api: Api, name: str = "eggs") -> dict[str, Any]:
+        """Make an item low and return its suggested need."""
+        item_id = _item(api, name)
+        api.call("POST", f"/items/{item_id}/observations", {"state": "low"})
+        need: dict[str, Any] = api.call("GET", f"/items/{item_id}").get_json()[
+            "open_need"
+        ]
+        return need
+
+    def test_manual_request_starts_approved_with_its_reason(self, api: Api) -> None:
+        """A member asking for something has already decided."""
+        item_id = _item(api, "birthday candles")
+
+        response = api.call(
+            "POST", "/needs", {"item_id": item_id, "note": "for Saturday"}
+        )
+
+        need = response.get_json()
+        assert response.status_code == 201
+        assert need["status"] == "approved"
+        assert need["reasons"][0]["kind"] == "manual_request"
+        assert need["reasons"][0]["detail"] == {"note": "for Saturday"}
+        assert need["history"][0]["actor"] == "geoff@rubotpaul"
+
+    def test_approve_records_who_and_why(self, api: Api) -> None:
+        """Approval is a member's decision, with a note."""
+        need = self._suggested(api)
+
+        response = api.call(
+            "POST", f"/needs/{need['id']}/approve", {"note": "yes please"}
+        )
+
+        approved = response.get_json()
+        assert approved["status"] == "approved"
+        assert approved["history"][-1]["actor"] == "geoff@rubotpaul"
+        assert approved["history"][-1]["note"] == "yes please"
+        assert approved["history"][-1]["from_status"] == "suggested"
+
+    def test_decisions_work_without_a_body(self, api: Api) -> None:
+        """A note is optional, so is the body."""
+        need = self._suggested(api)
+
+        response = api.call("POST", f"/needs/{need['id']}/dismiss")
+
+        assert response.status_code == 200
+        assert response.get_json()["status"] == "dismissed"
+
+    def test_defer_until_a_date_then_reopen(self, api: Api) -> None:
+        """A snooze has an optional end, and can be ended early."""
+        need = self._suggested(api)
+
+        deferred = api.call(
+            "POST",
+            f"/needs/{need['id']}/defer",
+            {"until": "2026-12-05T09:00:00+00:00", "note": "after the trip"},
+        )
+        reopened = api.call("POST", f"/needs/{need['id']}/reopen")
+
+        assert deferred.get_json()["status"] == "deferred"
+        assert deferred.get_json()["deferred_until"].startswith("2026-12-05T09:00:00")
+        assert reopened.get_json()["status"] == "suggested"
+        assert reopened.get_json()["deferred_until"] is None
+
+    def test_cancel_and_listing_by_status(self, api: Api) -> None:
+        """The default list is open needs; statuses can be chosen."""
+        kept = self._suggested(api, "eggs")
+        gone = self._suggested(api, "rice")
+        api.call("POST", f"/needs/{gone['id']}/cancel")
+
+        open_needs = api.call("GET", "/needs").get_json()["needs"]
+        chosen = api.call("GET", "/needs", query="status=cancelled&status=dismissed")
+        bad = api.call("GET", "/needs", query="status=nope")
+
+        assert [n["id"] for n in open_needs] == [kept["id"]]
+        assert [n["id"] for n in chosen.get_json()["needs"]] == [gone["id"]]
+        assert _error(bad)["code"] == "validation_failed"
+
+    def test_a_move_the_state_machine_forbids_is_coded(self, api: Api) -> None:
+        """A closed need can't be approved; the message lists what can happen."""
+        need = self._suggested(api)
+        api.call("POST", f"/needs/{need['id']}/dismiss")
+
+        response = api.call("POST", f"/needs/{need['id']}/approve")
+
+        assert response.status_code == 409
+        assert _error(response)["code"] == "need_move_not_allowed"
+
+    def test_missing_need_and_missing_item_are_coded(self, api: Api) -> None:
+        """Unknown ids have their own codes."""
+        need = api.call("GET", "/needs/99999")
+        move = api.call("POST", "/needs/99999/approve")
+        request_for = api.call("POST", "/needs", {"item_id": 99999})
+
+        assert _error(need)["code"] == "need_not_found"
+        assert _error(move)["code"] == "need_not_found"
+        assert _error(request_for)["code"] == "item_not_found"

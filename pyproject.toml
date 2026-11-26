@@ -151,6 +151,11 @@ select = [
 ]
 ignore = []
 
+[tool.ruff.lint.flake8-type-checking]
+# Pydantic resolves a model's annotations at runtime, so an import used only
+# in a model's field annotations is a runtime import, not a typing-only one.
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*" = ["S101"]  # Allow assert in tests
 
