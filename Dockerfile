@@ -9,11 +9,21 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # --- Runtime stage ---
 FROM python:3.13-slim
 
-# Non-root user for security
-RUN groupadd --system butler && useradd --system --gid butler butler
+# Take Debian's security fixes now rather than when the base image is next
+# rebuilt, and create the non-root user the app runs as.
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system butler \
+    && useradd --system --gid butler butler
 
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
+
+# Nothing is installed at run time, so the image ships no installer. pip also
+# vendors its own copies of urllib3, msgpack and setuptools, which no pin in
+# requirements.txt can upgrade (see README "Container scanning").
+RUN python -m pip uninstall --yes pip --root-user-action=ignore
 
 # Copy application code
 WORKDIR /app

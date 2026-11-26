@@ -24,7 +24,7 @@ cd "$(dirname "$SCRIPT_DIR")"
 
 # Pinned like every other tool here. Upgrade deliberately: change the tag,
 # run this script, commit.
-TRIVY_IMAGE="ghcr.io/aquasecurity/trivy:0.76.1"
+TRIVY_IMAGE="ghcr.io/aquasecurity/trivy:0.76.2"
 IMAGE="grocery-butler:container-scan"
 SEVERITIES="HIGH,CRITICAL"
 

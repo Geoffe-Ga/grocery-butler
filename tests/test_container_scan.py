@@ -189,3 +189,35 @@ class TestWorkflow:
         assert "scan" not in ci["jobs"]
         assert "container-scan" not in CI.read_text(encoding="utf-8")
         assert ci["jobs"]["gate"]["needs"] == ["python", "pre-commit"]
+
+
+class TestImageHardening:
+    """The runtime stage ships no installer and no stale OS packages.
+
+    The first scan found HIGH findings in two places: a Debian package with
+    a fix newer than the base image, and libraries that pip vendors inside
+    itself. The image never installs anything at run time, so pip goes.
+    """
+
+    @pytest.fixture()
+    def runtime_stage(self) -> str:
+        """Return the Dockerfile text from the last ``FROM`` onwards."""
+        text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        return text[text.rindex("\nFROM ") :]
+
+    def test_os_packages_are_upgraded(self, runtime_stage: str) -> None:
+        """Debian security fixes land without waiting for a new base image."""
+        assert "apt-get upgrade -y" in runtime_stage
+        assert "rm -rf /var/lib/apt/lists/*" in runtime_stage
+
+    def test_pip_is_removed(self, runtime_stage: str) -> None:
+        """No package installer, and none of its vendored libraries."""
+        assert "pip uninstall --yes pip" in runtime_stage
+
+    def test_pip_is_removed_after_the_packages_are_copied_in(
+        self, runtime_stage: str
+    ) -> None:
+        """The copy from the builder must not bring an installer back."""
+        assert runtime_stage.index("COPY --from=builder") < runtime_stage.index(
+            "pip uninstall --yes pip"
+        )

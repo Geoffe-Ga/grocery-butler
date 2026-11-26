@@ -1234,6 +1234,14 @@ When it fails, rebuild first: most findings are fixed by a newer base image.
 If a finding remains, upgrade the package that carries it (see the
 `cve-remediation` skill). Don't suppress it.
 
+The runtime stage runs `apt-get upgrade` and removes pip, for two reasons the
+first scan showed. A Debian fix can be newer than the `python:3.13-slim`
+image it applies to. And pip carries private copies of `urllib3`, `msgpack`
+and `setuptools` under `pip/_vendor`, which a pin in `requirements.txt`
+cannot reach; the app never installs anything at run time, so the installer
+goes. A finding in a package that is not in `requirements.txt` is usually one
+of these two.
+
 ### Browser security baseline
 
 `grocery_butler/web_security.py` protects the HTML dashboard, on top of the
