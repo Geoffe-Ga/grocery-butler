@@ -321,7 +321,8 @@ class MealParser:
         if parsed is not None:
             return parsed
 
-        # Retry once on parse failure
+        # Retry once on parse failure. This is separate from create_message's
+        # own retries, which cover only a passing transport fault.
         retry_text = self._retry_claude(prompt, response_text)
         if retry_text is None:
             extraction_failed(_EXTRACTION_STAGE, "call_failed")

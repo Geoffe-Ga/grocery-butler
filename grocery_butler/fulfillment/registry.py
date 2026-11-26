@@ -7,12 +7,20 @@ touches core modules.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from grocery_butler.fulfillment.export import ExportAdapter
+from grocery_butler.fulfillment.instacart.adapter import InstacartAdapter
+from grocery_butler.fulfillment.instacart.transport import StubTransport
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from grocery_butler.fulfillment.base import FulfillmentAdapter
+
+INSTACART_ENABLED_ENV = "INSTACART_ENABLED"
+_TRUTHY = frozenset({"1", "true", "yes"})
 
 
 class AdapterNotFoundError(LookupError):
@@ -87,13 +95,34 @@ class AdapterRegistry:
         return [self._adapters[name] for name in self.names()]
 
 
-def default_registry() -> AdapterRegistry:
-    """Build the registry of adapters this deployment offers.
+def instacart_enabled(environ: Mapping[str, str]) -> bool:
+    """Say whether this deployment turned the Instacart adapter on.
+
+    Args:
+        environ: The environment to read.
 
     Returns:
-        A registry holding the universal list export. Retailer adapters are
-        added here once their terms review is recorded (ADR 0001).
+        True only when ``INSTACART_ENABLED`` is ``1``, ``true`` or ``yes``.
+    """
+    return environ.get(INSTACART_ENABLED_ENV, "").strip().lower() in _TRUTHY
+
+
+def default_registry(environ: Mapping[str, str] | None = None) -> AdapterRegistry:
+    """Build the registry of adapters this deployment offers.
+
+    The universal list export is always there. The Instacart adapter
+    (ADR 0014) is off unless ``INSTACART_ENABLED`` is set, and today it
+    runs on a stub transport that returns a fake link and reaches no
+    network.
+
+    Args:
+        environ: The environment to read. Defaults to the process's own.
+
+    Returns:
+        The registry.
     """
     registry = AdapterRegistry()
     registry.register(ExportAdapter())
+    if instacart_enabled(os.environ if environ is None else environ):
+        registry.register(InstacartAdapter(StubTransport()))
     return registry

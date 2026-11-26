@@ -24,7 +24,8 @@ Do these once. Each is a checkbox in the week 1 log.
    ([runbook](data-lifecycle.md#back-up)).
 5. **Run the restore drill**: restore that backup into a scratch database
    and look at it ([runbook](data-lifecycle.md#restore)).
-6. **Run the deletion test** on the scratch database:
+6. **Run the deletion test** on the scratch database. The `--confirm` flag
+   takes the exact phrase:
    `python -m grocery_butler data delete --confirm "delete all household data"`,
    then export and confirm every table is empty. Never on the live database.
 
