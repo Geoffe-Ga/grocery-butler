@@ -421,7 +421,7 @@ class ApprovalEnvelopes:
             )
             conn.commit()
             current = self._require(conn, envelope_id)
-        if not claimed.rowcount:  # pragma: no cover - lost a concurrent approval
+        if not claimed.rowcount:
             raise EnvelopeNotActionableError(envelope_id, current.status, "approved")
         return current
 
@@ -468,7 +468,7 @@ class ApprovalEnvelopes:
             )
             conn.commit()
             current = self._require(conn, envelope_id)
-        if not claimed.rowcount:  # pragma: no cover - lost a concurrent execution
+        if not claimed.rowcount:
             raise EnvelopeNotActionableError(envelope_id, current.status, "executed")
         return current
 
@@ -494,7 +494,12 @@ class ApprovalEnvelopes:
             raise EnvelopeNotFoundError(envelope_id)
         if envelope.status not in _LIVE:
             raise EnvelopeNotActionableError(envelope_id, envelope.status, "rejected")
-        return self._close(envelope_id, EnvelopeStatus.REJECTED, actor, note)
+        closed = self._close(envelope_id, EnvelopeStatus.REJECTED, actor, note)
+        if closed.status is not EnvelopeStatus.REJECTED:
+            # Another caller executed or closed it between the read and the
+            # conditional update, which then matched nothing.
+            raise EnvelopeNotActionableError(envelope_id, closed.status, "rejected")
+        return closed
 
     # -- internals -----------------------------------------------------
 

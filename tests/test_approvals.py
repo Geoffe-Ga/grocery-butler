@@ -10,6 +10,7 @@ import datetime as dt
 import os
 from contextlib import closing
 from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
 
@@ -166,10 +167,11 @@ class TestDraft:
 
     def test_stored_payload_is_a_copy(self, envelopes: ApprovalEnvelopes) -> None:
         """Changing the caller's dict afterwards changes nothing stored."""
-        payload = {"plan_id": 1, "lines": [{"item_id": 5}]}
+        lines = [{"item_id": 5}]
+        payload: dict[str, Any] = {"plan_id": 1, "lines": lines}
         draft = _draft(envelopes, payload=payload)
 
-        payload["lines"].append({"item_id": 99})
+        lines.append({"item_id": 99})
 
         stored = envelopes.get(draft.id)
         assert stored is not None
@@ -458,6 +460,80 @@ class TestReject:
 
         with pytest.raises(EnvelopeNotActionableError, match="executed"):
             envelopes.reject(approved.id, actor=MEMBER)
+
+
+class TestConcurrentCallers:
+    """Of two callers that both read an envelope as live, one wins."""
+
+    def test_second_approval_racing_the_first_is_refused(
+        self, envelopes: ApprovalEnvelopes
+    ) -> None:
+        """The first approver stays the approver."""
+        draft = _draft(envelopes)
+        _ = envelopes.approve(
+            draft.id,
+            payload_hash=draft.payload_hash,
+            actor=MEMBER,
+            current_fingerprint=FINGERPRINT,
+        )
+
+        with (
+            patch.object(ApprovalEnvelopes, "_require_status", return_value=draft),
+            pytest.raises(EnvelopeNotActionableError, match="approved"),
+        ):
+            envelopes.approve(
+                draft.id,
+                payload_hash=draft.payload_hash,
+                actor="jess@rubotpaul",
+                current_fingerprint=FINGERPRINT,
+            )
+
+        after = envelopes.get(draft.id)
+        assert after is not None
+        assert after.approved_by == MEMBER
+
+    def test_second_execution_racing_the_first_is_refused(
+        self, envelopes: ApprovalEnvelopes
+    ) -> None:
+        """A handoff can't be claimed twice."""
+        approved = _approved(envelopes)
+        envelopes.execute(
+            approved.id, actor="worker-1", current_fingerprint=FINGERPRINT
+        )
+
+        with (
+            patch.object(ApprovalEnvelopes, "_require_status", return_value=approved),
+            pytest.raises(EnvelopeNotActionableError, match="executed"),
+        ):
+            envelopes.execute(
+                approved.id, actor="worker-2", current_fingerprint=FINGERPRINT
+            )
+
+        after = envelopes.get(approved.id)
+        assert after is not None
+        assert after.resolved_by == "worker-1"
+
+    def test_reject_racing_an_execution_is_refused(
+        self, envelopes: ApprovalEnvelopes
+    ) -> None:
+        """A late reject can't claim to have stopped what already ran."""
+        approved = _approved(envelopes)
+        envelopes.execute(
+            approved.id, actor="worker-1", current_fingerprint=FINGERPRINT
+        )
+
+        with (
+            patch.object(ApprovalEnvelopes, "get", return_value=approved),
+            pytest.raises(EnvelopeNotActionableError, match="executed"),
+        ):
+            envelopes.reject(approved.id, actor=MEMBER)
+
+    def test_reject_of_a_missing_envelope_raises(
+        self, envelopes: ApprovalEnvelopes
+    ) -> None:
+        """You can only reject what exists."""
+        with pytest.raises(EnvelopeNotFoundError):
+            envelopes.reject(99999, actor=MEMBER)
 
 
 class TestListing:
