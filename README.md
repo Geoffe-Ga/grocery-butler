@@ -40,6 +40,10 @@ The product direction, epics, and delivery sequence live in
 [`docs/OPENCLAW_ERP_BACKLOG.md`](docs/OPENCLAW_ERP_BACKLOG.md). Architecture
 decisions are recorded in [`docs/adr/`](docs/adr/README.md).
 
+The next step on that sequence is a four-week dogfood in one household. How
+it runs and what it records are in
+[`docs/operations/dogfood-protocol.md`](docs/operations/dogfood-protocol.md).
+
 ## Table of Contents
 
 - [What It Does](#what-it-does)
