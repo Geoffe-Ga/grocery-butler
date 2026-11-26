@@ -1249,6 +1249,12 @@ network boundary guard:
   bearer token and never reads the session cookie. A new form needs
   `<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">`;
   a test fails if one is missing.
+- **Session cookie.** `HttpOnly` and `SameSite=Lax` everywhere, and
+  `Secure` in production (`APP_ENV=production`), where people reach the
+  dashboard only over the HTTPS address `tailscale serve` gives it. A
+  browser on plain HTTP does not send that cookie back, so its forms are
+  refused. Open the dashboard at its tailnet address, not through an SSH
+  tunnel to `http://127.0.0.1:8000`.
 - **Security headers** on every response: a same-origin-only Content
   Security Policy (no inline script or style, no framing),
   `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and

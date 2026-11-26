@@ -257,7 +257,7 @@ def create_app(db_path: str | None = None) -> Flask:
     _register_error_handlers(app)
     _register_context_processors(app)
     _register_network_guard(app)
-    register_web_security(app)
+    register_web_security(app, production=_is_production())
     _register_routes(app)
     _register_api(app)
 

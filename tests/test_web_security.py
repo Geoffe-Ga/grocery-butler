@@ -40,6 +40,17 @@ def app(tmp_path: Path) -> Flask:
 
 
 @pytest.fixture()
+def production_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Flask:
+    """Create the app the way the production image does."""
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("FLASK_SECRET_KEY", "test-session-key")
+    monkeypatch.setenv("RUBOTPAUL_SHARED_SECRET", "test-shared-secret")
+    application = create_app(db_path=str(tmp_path / "production.db"))
+    application.config["TESTING"] = True
+    return application
+
+
+@pytest.fixture()
 def client(app: Flask) -> FlaskClient:
     """Return a test client that keeps its session cookie between requests."""
     return app.test_client()
@@ -184,6 +195,38 @@ class TestSessionCookie:
         """Lax keeps the cookie off cross-site form posts."""
         assert app.config["SESSION_COOKIE_SAMESITE"] == "Lax"
         assert app.config["SESSION_COOKIE_HTTPONLY"] is True
+
+    def test_development_cookie_is_not_secure(self, client: FlaskClient) -> None:
+        """Local HTTP keeps working: the browser would drop a Secure cookie."""
+        response = client.get("/pantry")
+
+        assert "Secure" not in response.headers["Set-Cookie"]
+
+    def test_production_cookie_is_secure(self, production_app: Flask) -> None:
+        """People reach production only over HTTPS (ADR 0021, issue #196)."""
+        response = production_app.test_client().get("/pantry")
+
+        assert production_app.config["SESSION_COOKIE_SECURE"] is True
+        assert "; Secure" in response.headers["Set-Cookie"]
+
+    def test_production_forms_work_over_https(self, production_app: Flask) -> None:
+        """Over HTTPS the Secure cookie comes back, so the CSRF check passes."""
+        client = production_app.test_client()
+        page = client.get("/pantry", base_url="https://butler.example")
+        token = re.search(r'name="csrf_token" value="([^"]+)"', page.text)
+        assert token is not None
+
+        response = client.post(
+            "/pantry/add",
+            data={
+                "ingredient": "cumin",
+                "category": "pantry_dry",
+                "csrf_token": token.group(1),
+            },
+            base_url="https://butler.example",
+        )
+
+        assert response.status_code == 302
 
 
 class TestSecurityHeaders:
