@@ -12,9 +12,10 @@ Three protections, registered once by ``create_app()``:
 - **A request size limit**, so an oversized body is refused before a view
   reads it.
 
-``/api/v1`` is exempt from the CSRF check: it authenticates each request
-with an HMAC bearer token and never reads the session cookie, so a browser
-can't be tricked into making an authenticated call to it.
+The JSON APIs under ``/api/`` are exempt from the CSRF check: they
+authenticate each request with an HMAC bearer token and never read the
+session cookie, so a browser can't be tricked into making an authenticated
+call to them.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ CSRF_HEADER = "X-CSRF-Token"
 CSRF_CONFIG_KEY = "WEB_CSRF_ENABLED"
 _SESSION_KEY = "_csrf_token"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
-_API_PREFIX = "/api/v1/"
+_API_PREFIX = "/api/"
 
 # Forms and JSON only. Photo uploads (Epic 3) get their own, larger limit on
 # their own route when they arrive.

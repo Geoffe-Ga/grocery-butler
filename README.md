@@ -51,6 +51,7 @@ decisions are recorded in [`docs/adr/`](docs/adr/README.md).
 - [API Documentation](#api-documentation)
   - [HTTP / Web API](#http--web-api)
   - [OpenClaw Integration (/api/v1)](#openclaw-integration-apiv1)
+  - [OpenClaw Capability API (/api/v2)](#openclaw-capability-api-apiv2)
   - [Discord Bot Commands](#discord-bot-commands)
   - [Command-Line Interface](#command-line-interface)
   - [Python Module API](#python-module-api)
@@ -497,6 +498,24 @@ unchanged. The blueprint lives in `grocery_butler/api.py` and is registered by
   Resolved actions record a terminal status of `approved`, `denied`,
   `expired`, or `failed` (a claimed action whose execution failed). Rows
   from the retired Safeway order flow remain in the audit table as history.
+
+### OpenClaw Capability API (/api/v2)
+
+The successor to `/api/v1`, served beside it from `grocery_butler/api_v2.py`.
+The contract is [`docs/api/v2.md`](docs/api/v2.md); the reasons are in
+[ADR 0009](docs/adr/0009-capability-api-v2-contract.md). In short:
+
+- **Same token, same tailnet guard** as `/api/v1`.
+- **Every change names a household member** in `X-Household-Member`
+  ([ADR 0002](docs/adr/0002-single-household-pilot-with-named-members.md)).
+  The audit trail records `member@channel`, for example `geoff@rubotpaul`.
+- **Every change carries an `Idempotency-Key`.** A retry returns the first
+  response and changes nothing.
+- **Every error has a stable code**:
+  `{"error": {"code", "message", "details"}}`.
+- **Live today:** household members, and household items with their aliases,
+  merges, current state and history. Observation batches and replenishment
+  needs come next; plans, handoffs and receipts arrive with their own work.
 
 ### Discord Bot Commands
 

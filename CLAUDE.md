@@ -72,6 +72,7 @@ Read before designing anything:
 grocery-butler/
 ├── grocery_butler/         # The package
 │   ├── api.py              # /api/v1 blueprint (OpenClaw); HMAC bearer auth via auth_middleware.py
+│   ├── api_v2.py           # /api/v2 capability blueprint (contract: docs/api/v2.md); members.py, idempotency.py
 │   ├── app.py              # Flask app factory and HTML dashboard
 │   ├── cli.py              # argparse CLI
 │   ├── bot.py              # Discord bot (local only; retired from production)
