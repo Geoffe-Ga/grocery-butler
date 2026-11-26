@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from grocery_butler.db import init_db
 from grocery_butler.models import IngredientCategory, ShoppingListItem
 from grocery_butler.shopping_list_store import ShoppingListStore
 
@@ -40,7 +41,9 @@ def db_path(tmp_path: Path) -> str:
     Returns:
         Path string for a fresh database.
     """
-    return str(tmp_path / "test.db")
+    path = str(tmp_path / "test.db")
+    init_db(path)
+    return path
 
 
 @pytest.fixture()
@@ -331,3 +334,17 @@ class TestGetList:
 
         assert all(item.ingredient.startswith("second-") for item in result)
         assert len(result) == 3
+
+
+class TestConstructorDoesNotMigrate:
+    """Issue #78: opening a store never runs the migration runner."""
+
+    def test_constructor_leaves_a_fresh_database_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """A store on a path nobody migrated creates no database file."""
+        fresh = tmp_path / "never_migrated.db"
+
+        ShoppingListStore(str(fresh))
+
+        assert not fresh.exists()

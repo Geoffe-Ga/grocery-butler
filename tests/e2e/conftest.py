@@ -26,6 +26,7 @@ import pytest
 
 from grocery_butler.app import create_app
 from grocery_butler.auth_middleware import SECRET_ENV_VAR, RequestBinding, mint_token
+from grocery_butler.db import init_db
 from grocery_butler.models import Ingredient, IngredientCategory, ParsedMeal
 from grocery_butler.recipe_store import RecipeStore
 
@@ -62,7 +63,9 @@ def db_path(tmp_path: Path) -> str:
     Returns:
         Absolute path string for a database file that does not yet exist.
     """
-    return str(tmp_path / "e2e.db")
+    path = str(tmp_path / "e2e.db")
+    init_db(path)
+    return path
 
 
 @pytest.fixture(autouse=True)

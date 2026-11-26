@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from grocery_butler.claude_utils import extract_json_text
+from grocery_butler.db import init_db
 from grocery_butler.meal_parser import (
     MealParser,
     _build_stub_meal,
@@ -38,7 +39,9 @@ def db_path(tmp_path: Path) -> str:
     Returns:
         Path string for a fresh database.
     """
-    return str(tmp_path / "test.db")
+    path = str(tmp_path / "test.db")
+    init_db(path)
+    return path
 
 
 @pytest.fixture()

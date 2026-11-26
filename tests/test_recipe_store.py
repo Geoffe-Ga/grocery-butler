@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from grocery_butler.db import get_connection
+from grocery_butler.db import get_connection, init_db
 from grocery_butler.db.migrate import migrate
 from grocery_butler.models import (
     BrandMatchType,
@@ -41,7 +41,9 @@ def db_path(tmp_path: Path) -> str:
     Returns:
         Path string for a fresh database.
     """
-    return str(tmp_path / "test.db")
+    path = str(tmp_path / "test.db")
+    init_db(path)
+    return path
 
 
 @pytest.fixture()
@@ -762,3 +764,17 @@ class TestRecipeStorePostgres:
             key: value for key, value in all_prefs.items() if key.startswith("pg-test-")
         }
         assert pg_test_prefs == {"pg-test-theme": "dark"}
+
+
+class TestConstructorDoesNotMigrate:
+    """Issue #78: opening a store never runs the migration runner."""
+
+    def test_constructor_leaves_a_fresh_database_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """A store on a path nobody migrated creates no database file."""
+        fresh = tmp_path / "never_migrated.db"
+
+        RecipeStore(str(fresh))
+
+        assert not fresh.exists()

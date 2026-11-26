@@ -2,23 +2,30 @@
 
 from __future__ import annotations
 
+import fcntl
 import importlib
-from contextlib import closing
+import multiprocessing
+import os
+from contextlib import closing, contextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 from grocery_butler.db import get_connection
 from grocery_butler.db.migrate import (
+    MIGRATION_LOCK_KEY,
     MIGRATIONS_DIR,
     _discover_hook,
     _discover_migrations,
     _ensure_schema_migrations_table,
     _get_applied_versions,
+    _lock_file_path,
+    _migration_lock,
     _record_migration,
     _run_python_hook,
     main,
@@ -639,3 +646,138 @@ class TestCLI:
             assert cursor.fetchone() is not None
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Cross-process serialization (issue #78)
+# ---------------------------------------------------------------------------
+
+
+def _migrate_in_child(db_path: str) -> None:
+    """Run the migration runner; the target of a spawned worker process.
+
+    Args:
+        db_path: Database file the worker migrates.
+    """
+    migrate(db_path)
+
+
+def _existing_lock_path(db_path: str) -> Path:
+    """Return the lock file path of a file-backed database.
+
+    Args:
+        db_path: A SQLite file path (never ``:memory:``).
+
+    Returns:
+        The lock file path, narrowed from ``Path | None``.
+    """
+    lock_path = _lock_file_path(db_path)
+    assert lock_path is not None
+    return lock_path
+
+
+class TestMigrationLock:
+    """The runner's check-then-apply runs under a cross-process lock."""
+
+    def test_file_lock_is_held_inside_the_context(self, db_path: str) -> None:
+        """A second holder cannot take the lock while the context is open."""
+        with (
+            _migration_lock(db_path),
+            _existing_lock_path(db_path).open("w") as other,
+            pytest.raises(BlockingIOError),
+        ):
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_file_lock_is_released_on_exit(self, db_path: str) -> None:
+        """Leaving the context lets another holder take the lock."""
+        with _migration_lock(db_path):
+            pass
+
+        with _existing_lock_path(db_path).open("w") as other:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(other, fcntl.LOCK_UN)
+
+    def test_file_lock_is_released_when_the_body_raises(self, db_path: str) -> None:
+        """A failed migration must not leave the lock held."""
+        with pytest.raises(RuntimeError, match="boom"), _migration_lock(db_path):
+            raise RuntimeError("boom")
+
+        with _existing_lock_path(db_path).open("w") as other:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_memory_database_needs_no_lock_file(self) -> None:
+        """An in-memory database has no file to lock beside."""
+        assert _lock_file_path(":memory:") is None
+        with _migration_lock(":memory:"):
+            pass
+
+    def test_applied_versions_are_read_inside_the_lock(self, db_path: str) -> None:
+        """The check half of check-then-apply happens after the lock is taken."""
+        events: list[str] = []
+
+        @contextmanager
+        def recording_lock(_db_path: str) -> Iterator[None]:
+            events.append("lock")
+            yield
+            events.append("unlock")
+
+        def recording_read(_conn: object) -> set[int]:
+            events.append("read")
+            return set(range(1000))
+
+        with (
+            patch("grocery_butler.db.migrate._migration_lock", recording_lock),
+            patch("grocery_butler.db.migrate._get_applied_versions", recording_read),
+        ):
+            assert migrate(db_path) == 0
+
+        assert events == ["lock", "read", "unlock"]
+
+    def test_concurrent_processes_apply_each_migration_once(self, db_path: str) -> None:
+        """Workers booting together all succeed and record each version once."""
+        ctx = multiprocessing.get_context("spawn")
+        workers = [
+            ctx.Process(target=_migrate_in_child, args=(db_path,)) for _ in range(4)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=60)
+
+        assert [worker.exitcode for worker in workers] == [0, 0, 0, 0]
+        with closing(get_connection(db_path)) as conn:
+            versions = [
+                row["version"]
+                for row in conn.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                ).fetchall()
+            ]
+        expected = [version for version, _, _ in _discover_migrations(is_pg=False)]
+        assert versions == expected
+
+
+_PG_URL = os.environ.get("TEST_DATABASE_URL", "")
+
+
+@pytest.mark.skipif(not _PG_URL, reason="TEST_DATABASE_URL not set")
+class TestPostgresMigrationLock:
+    """On Postgres the lock is a session advisory lock."""
+
+    def _try_lock(self) -> bool:
+        """Try the migration advisory lock from a separate session.
+
+        Returns:
+            True if this session got the lock (and released it again).
+        """
+        with closing(get_connection(_PG_URL)) as conn:
+            row = conn.execute(
+                "SELECT pg_try_advisory_lock(?) AS locked", (MIGRATION_LOCK_KEY,)
+            ).fetchone()
+            return bool(row["locked"])
+
+    def test_advisory_lock_is_held_then_released(self) -> None:
+        """Another session can't take the lock until the context exits."""
+        with _migration_lock(_PG_URL):
+            assert self._try_lock() is False
+
+        assert self._try_lock() is True

@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from grocery_butler.claude_utils import extract_json_text
-from grocery_butler.db import get_connection, init_db
+from grocery_butler.db import get_connection
 from grocery_butler.models import (
     InventoryItem,
     InventoryStatus,
@@ -90,7 +90,6 @@ class PantryManager:
         """
         self._db_path = db_path
         self._client = anthropic_client
-        init_db(db_path)
 
     def get_inventory(self) -> list[InventoryItem]:
         """Return all tracked inventory items.

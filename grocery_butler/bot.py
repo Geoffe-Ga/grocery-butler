@@ -274,6 +274,7 @@ def create_bot(config: Config) -> GroceryBot:
         Configured Discord client ready to run.
     """
     from grocery_butler.consolidator import Consolidator
+    from grocery_butler.db import init_db
     from grocery_butler.meal_parser import MealParser
     from grocery_butler.pantry_manager import PantryManager
     from grocery_butler.recipe_store import RecipeStore
@@ -286,6 +287,7 @@ def create_bot(config: Config) -> GroceryBot:
 
     # Initialize backend services
     db_path = config.database_path
+    init_db(db_path)
     recipe_store = RecipeStore(db_path)
     pantry_manager = PantryManager(db_path)
     meal_parser = MealParser(recipe_store)
