@@ -11,6 +11,7 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
+from grocery_butler.db import init_db
 from grocery_butler.models import (
     IngredientCategory,
     InventoryItem,
@@ -31,7 +32,9 @@ from grocery_butler.pantry_manager import (
 @pytest.fixture()
 def db_path(tmp_path: Path) -> str:
     """Return a temporary database path for test isolation."""
-    return str(tmp_path / "test_pantry.db")
+    path = str(tmp_path / "test_pantry.db")
+    init_db(path)
+    return path
 
 
 @pytest.fixture()
@@ -980,3 +983,17 @@ class TestParseClaudeResponse:
         """Test empty array returns empty list."""
         result = _parse_claude_response("[]")
         assert result == []
+
+
+class TestConstructorDoesNotMigrate:
+    """Issue #78: opening a manager never runs the migration runner."""
+
+    def test_constructor_leaves_a_fresh_database_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """A manager on a path nobody migrated creates no database file."""
+        fresh = tmp_path / "never_migrated.db"
+
+        PantryManager(str(fresh))
+
+        assert not fresh.exists()

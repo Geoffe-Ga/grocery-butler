@@ -14,6 +14,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from grocery_butler.consolidator import Consolidator
+from grocery_butler.db import init_db
 from grocery_butler.meal_parser import MealParser
 from grocery_butler.models import (
     IngredientCategory,
@@ -51,6 +52,23 @@ def _load_config_safe() -> Config | None:
         return None
     else:
         return config
+
+
+def _ready_database(cfg: Config | None) -> str:
+    """Resolve the database path and migrate it before any store opens it.
+
+    Stores no longer migrate in their constructors (issue #78), so each
+    command migrates once here, at its entry.
+
+    Args:
+        cfg: Loaded config, or None when config loading failed.
+
+    Returns:
+        The database path the command should use.
+    """
+    db_path = cfg.database_path if cfg else "mealbot.db"
+    init_db(db_path)
+    return db_path
 
 
 def _make_anthropic_client(api_key: str) -> object | None:
@@ -250,8 +268,9 @@ def _handle_plan(args: argparse.Namespace) -> int:
         return 1
 
     client = _make_anthropic_client(cfg.anthropic_api_key)
-    store = RecipeStore(cfg.database_path)
-    pantry_mgr = PantryManager(cfg.database_path, anthropic_client=client)
+    db_path = _ready_database(cfg)
+    store = RecipeStore(db_path)
+    pantry_mgr = PantryManager(db_path, anthropic_client=client)
     parser = MealParser(store, anthropic_client=client, config=cfg)
     consolidator = Consolidator(anthropic_client=client, config=cfg)
 
@@ -327,7 +346,7 @@ def _handle_stock(args: argparse.Namespace) -> int:
         Exit code (0 for success, 1 for failure).
     """
     cfg = _load_config_safe()
-    db_path = cfg.database_path if cfg else "mealbot.db"
+    db_path = _ready_database(cfg)
     pantry_mgr = PantryManager(db_path)
 
     action: str | None = args.action
@@ -396,7 +415,7 @@ def _handle_restock(args: argparse.Namespace) -> int:
         Exit code (0 for success, 1 for failure).
     """
     cfg = _load_config_safe()
-    db_path = cfg.database_path if cfg else "mealbot.db"
+    db_path = _ready_database(cfg)
     pantry_mgr = PantryManager(db_path)
 
     action: str | None = args.action
@@ -426,7 +445,7 @@ def _handle_recipes(args: argparse.Namespace) -> int:
         Exit code (0 for success, 1 for failure).
     """
     cfg = _load_config_safe()
-    db_path = cfg.database_path if cfg else "mealbot.db"
+    db_path = _ready_database(cfg)
     store = RecipeStore(db_path)
 
     action: str | None = args.action
@@ -505,7 +524,7 @@ def _handle_pantry(args: argparse.Namespace) -> int:
         Exit code (0 for success, 1 for failure).
     """
     cfg = _load_config_safe()
-    db_path = cfg.database_path if cfg else "mealbot.db"
+    db_path = _ready_database(cfg)
     store = RecipeStore(db_path)
 
     action: str | None = args.action

@@ -10,7 +10,7 @@ import json
 import re
 from typing import TYPE_CHECKING
 
-from grocery_butler.db import get_connection, init_db
+from grocery_butler.db import get_connection
 from grocery_butler.models import (
     BrandMatchType,
     BrandPreference,
@@ -92,13 +92,12 @@ class RecipeStore:
     """SQLite data access layer for recipes and pantry data."""
 
     def __init__(self, db_path: str) -> None:
-        """Initialize store and ensure schema exists.
+        """Initialize the store. The schema must already be migrated.
 
         Args:
             db_path: Path to the SQLite database file.
         """
         self._db_path = db_path
-        init_db(db_path)
 
     def _connect(self) -> DatabaseConnection:
         """Create a new database connection.

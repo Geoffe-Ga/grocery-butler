@@ -16,18 +16,21 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import fcntl
 import importlib
 import logging
 import os
 import re
 import sys
+import threading
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from grocery_butler.db import get_connection
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from grocery_butler.db.adapter import DatabaseConnection
 
@@ -36,6 +39,16 @@ logger = logging.getLogger(__name__)
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 _MIGRATION_RE = re.compile(r"^(\d{3})_(.+?)(?:_pg)?\.sql$")
+
+# Key of the Postgres session advisory lock every migration runner takes.
+# An arbitrary constant: it only has to be the same in every process that
+# migrates this database, and different from any other advisory lock the
+# application takes (it takes no others).
+MIGRATION_LOCK_KEY = 7_824_078
+
+# Serializes runners inside one process (threads, and ``:memory:``
+# databases that have no file to lock beside).
+_PROCESS_LOCK = threading.Lock()
 
 
 def _is_postgres(db_path: str) -> bool:
@@ -48,6 +61,89 @@ def _is_postgres(db_path: str) -> bool:
         True if the path is a PostgreSQL URL.
     """
     return db_path.startswith(("postgresql://", "postgres://"))
+
+
+def _lock_file_path(db_path: str) -> Path | None:
+    """Return the lock file that guards a SQLite database's migrations.
+
+    Args:
+        db_path: SQLite database path, or ``:memory:``.
+
+    Returns:
+        ``<db_path>.migratelock``, or None for an in-memory database, which
+        only this process can reach.
+    """
+    if db_path == ":memory:":
+        return None
+    return Path(f"{db_path}.migratelock")
+
+
+@contextmanager
+def _sqlite_file_lock(db_path: str) -> Iterator[None]:
+    """Hold an exclusive ``flock`` beside a SQLite database file.
+
+    The lock is on a sibling file, not the database, so it doesn't fight
+    the migration's own writes. The kernel drops it if the process dies.
+
+    Args:
+        db_path: SQLite database path, or ``:memory:`` (no file lock).
+
+    Yields:
+        None, while the lock is held.
+    """
+    lock_path = _lock_file_path(db_path)
+    if lock_path is None:
+        yield
+        return
+    with lock_path.open("w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _postgres_advisory_lock(db_path: str) -> Iterator[None]:
+    """Hold the migration advisory lock on a dedicated Postgres session.
+
+    The lock lives on its own connection, so a failed migration (which
+    leaves the migrating connection's transaction aborted) can't stop it
+    being released: closing the session releases it, as does a crash.
+
+    Args:
+        db_path: PostgreSQL URL.
+
+    Yields:
+        None, while the lock is held.
+    """
+    with closing(get_connection(db_path)) as lock_conn:
+        lock_conn.execute(
+            "SELECT pg_advisory_lock(?)", (MIGRATION_LOCK_KEY,)
+        ).fetchall()
+        yield
+
+
+@contextmanager
+def _migration_lock(db_path: str) -> Iterator[None]:
+    """Serialize migration runners against one database (issue #78).
+
+    Gunicorn workers and one-off commands can start together. Without a
+    lock, two runners both see a migration as pending and both apply it.
+    Whoever waits here re-reads the applied versions after it gets the
+    lock, so it finds nothing left to do.
+
+    Args:
+        db_path: Database file path or PostgreSQL URL.
+
+    Yields:
+        None, while this runner is the only one.
+    """
+    backend_lock = (
+        _postgres_advisory_lock if _is_postgres(db_path) else _sqlite_file_lock
+    )
+    with _PROCESS_LOCK, backend_lock(db_path):
+        yield
 
 
 def _ensure_schema_migrations_table(conn: DatabaseConnection) -> None:
@@ -189,12 +285,44 @@ def _run_python_hook(version: int, name: str, db_path: str) -> None:
     hook(db_path)
 
 
+def _apply_pending(conn: DatabaseConnection, db_path: str) -> int:
+    """Apply every migration the database has not recorded yet.
+
+    The caller holds the migration lock, so the set read here can't go
+    stale before the last migration is recorded.
+
+    Args:
+        conn: Active database connection.
+        db_path: Database file path or PostgreSQL URL.
+
+    Returns:
+        Number of migrations applied.
+    """
+    _ensure_schema_migrations_table(conn)
+    applied = _get_applied_versions(conn)
+
+    count = 0
+    for version, name, path in _discover_migrations(_is_postgres(db_path)):
+        if version in applied:
+            logger.debug("Skipping migration %03d_%s (already applied)", version, name)
+            continue
+
+        logger.info("Applying migration %03d_%s ...", version, name)
+        conn.executescript(path.read_text())
+        _run_python_hook(version, name, db_path)
+        _record_migration(conn, version, name)
+        count += 1
+    return count
+
+
 def migrate(db_path: str) -> int:
     """Apply all pending migrations to the database.
 
     Creates the schema_migrations tracking table if needed, discovers
     SQL migration files for the appropriate dialect, and applies any
-    that haven't been run yet in version order.
+    that haven't been run yet in version order. The whole check-then-apply
+    runs under :func:`_migration_lock`, so concurrent runners apply each
+    migration exactly once.
 
     Args:
         db_path: Database file path or PostgreSQL URL.
@@ -202,38 +330,14 @@ def migrate(db_path: str) -> int:
     Returns:
         Number of migrations applied.
     """
-    is_pg = _is_postgres(db_path)
-    conn = get_connection(db_path)
-    try:
-        _ensure_schema_migrations_table(conn)
-        applied = _get_applied_versions(conn)
-        migrations = _discover_migrations(is_pg)
+    with _migration_lock(db_path), closing(get_connection(db_path)) as conn:
+        count = _apply_pending(conn, db_path)
 
-        count = 0
-        for version, name, path in migrations:
-            if version in applied:
-                logger.debug(
-                    "Skipping migration %03d_%s (already applied)",
-                    version,
-                    name,
-                )
-                continue
-
-            logger.info("Applying migration %03d_%s ...", version, name)
-            sql = path.read_text()
-            conn.executescript(sql)
-            _run_python_hook(version, name, db_path)
-            _record_migration(conn, version, name)
-            count += 1
-
-        if count == 0:
-            logger.info("Database is up to date.")
-        else:
-            logger.info("Applied %d migration(s).", count)
-
-        return count
-    finally:
-        conn.close()
+    if count == 0:
+        logger.info("Database is up to date.")
+    else:
+        logger.info("Applied %d migration(s).", count)
+    return count
 
 
 def _build_parser() -> argparse.ArgumentParser:

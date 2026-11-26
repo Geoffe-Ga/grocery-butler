@@ -25,3 +25,4 @@ htmlcov/
 
 # graphify output (scripts/graph/): a local or restored code graph.
 graphify-out/
+*.migratelock

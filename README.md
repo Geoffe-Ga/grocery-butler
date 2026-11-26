@@ -171,6 +171,22 @@ straight into gunicorn (`grocery_butler.app:create_app()`), which becomes
 the container's only long-lived process, serving both the kitchen-phone HTML
 UI and the HMAC-authenticated `/api/v1` blueprint.
 
+**Who migrates.** Only process entry points run the migration runner: the
+container entrypoint, `create_app()`, each CLI command, and the local Discord
+bot. Stores and managers never do; they assume a migrated schema. The runner
+serializes itself across processes, with a session advisory lock on Postgres
+and a `flock` on `<database>.migratelock` beside a SQLite file, so gunicorn
+workers that boot together apply each migration exactly once. A runner that
+waited for the lock re-reads what has been applied and finds nothing to do.
+
+**If a migration fails.** The boot stops and the previous deploy keeps
+serving. Migrations are forward-only: there is no downgrade. Each one is
+recorded in `schema_migrations` only after its SQL and any Python hook
+succeed, so a failed migration is retried from its start on the next boot.
+To recover, fix the migration and redeploy, or restore the database from a
+backup taken before the deploy and redeploy the previous commit. Never edit
+`schema_migrations` by hand to skip a version.
+
 There is no separate worker process in production. The Discord bot
 (`python -m grocery_butler.bot`) is retired from deployment: RubotPaul is
 the household's Discord interface now, and it drives grocery-butler through

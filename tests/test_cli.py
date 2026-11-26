@@ -20,6 +20,7 @@ from grocery_butler.cli import (
     _remove_pantry_staple,
     main,
 )
+from grocery_butler.db import init_db
 from grocery_butler.models import (
     IngredientCategory,
     InventoryItem,
@@ -49,7 +50,9 @@ def db_path(tmp_path: Path) -> str:
     Returns:
         Path string for a fresh database.
     """
-    return str(tmp_path / "test_cli.db")
+    path = str(tmp_path / "test_cli.db")
+    init_db(path)
+    return path
 
 
 @pytest.fixture()
@@ -614,6 +617,7 @@ class TestHandleStock:
         with (
             patch("grocery_butler.cli._load_config_safe") as mock_cfg,
             patch("grocery_butler.cli.PantryManager") as mock_pm_cls,
+            patch("grocery_butler.cli.init_db") as mock_init_db,
         ):
             mock_cfg.return_value = None
             mock_pm = MagicMock()
@@ -625,6 +629,7 @@ class TestHandleStock:
             args = parser.parse_args(["stock"])
             code = _handle_stock(args)
 
+        mock_init_db.assert_called_once_with("mealbot.db")
         mock_pm_cls.assert_called_once_with("mealbot.db")
         assert code == 0
 
@@ -1376,3 +1381,20 @@ class TestMakeAnthropicClient:
             with caplog.at_level(logging.WARNING, logger="grocery_butler.cli"):
                 _make_anthropic_client("fake-key")
             assert "Anthropic client unavailable" in caplog.text
+
+
+class TestCommandsMigrateBeforeUse:
+    """Issue #78: a command migrates the database itself, once, on entry."""
+
+    def test_stock_on_a_never_migrated_database_succeeds(self, tmp_path, capsys):
+        """A fresh database gets its schema from the command, not a store."""
+        fresh = str(tmp_path / "fresh.db")
+
+        with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
+            mock_cfg.return_value = MagicMock(database_path=fresh)
+            from grocery_butler.cli import _handle_stock
+
+            code = _handle_stock(_build_parser().parse_args(["stock"]))
+
+        assert code == 0
+        assert PantryManager(fresh).get_inventory() == []

@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
 from grocery_butler.app import create_app
 from grocery_butler.auth_middleware import SECRET_ENV_VAR
+from grocery_butler.db import init_db
 from grocery_butler.models import IngredientCategory, InventoryItem, InventoryStatus
 from grocery_butler.pantry_manager import PantryManager
 from tests.conftest import bearer_header
@@ -79,7 +80,9 @@ def db_path(tmp_path: Path) -> str:
     Returns:
         Absolute path string for a database file that does not yet exist.
     """
-    return str(tmp_path / "test_boundary.db")
+    path = str(tmp_path / "test_boundary.db")
+    init_db(path)
+    return path
 
 
 @pytest.fixture()
