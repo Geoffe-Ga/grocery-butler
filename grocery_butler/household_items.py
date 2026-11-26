@@ -23,6 +23,7 @@ from grocery_butler.models import (
     ItemEvent,
     ItemEventType,
     StaplePolicy,
+    Unit,
     coerce_category_optional,
 )
 
@@ -31,16 +32,12 @@ if TYPE_CHECKING:
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
-_SELECT_ITEM_BY_ID = (
-    "SELECT id, name, display_name, category, preferred_unit, staple_policy,"
-    " preferred_brand, preferred_size, active, merged_into_id"
-    " FROM household_items WHERE id = ?"
-)
-_SELECT_ALL_ITEMS = (
-    "SELECT id, name, display_name, category, preferred_unit, staple_policy,"
-    " preferred_brand, preferred_size, active, merged_into_id"
-    " FROM household_items ORDER BY name"
-)
+# These two select every column, not a named list, on purpose. Migration hooks
+# for versions before 020 read items through this store while the newer
+# columns don't exist yet (a fresh install, or a backup being restored), so
+# the reader below treats those columns as optional.
+_SELECT_ITEM_BY_ID = "SELECT * FROM household_items WHERE id = ?"
+_SELECT_ALL_ITEMS = "SELECT * FROM household_items ORDER BY name"
 
 # Statements for the tables that link to an item. Written out, not built
 # from table names, so no SQL is ever assembled from a variable.
@@ -80,6 +77,16 @@ class ItemNotFoundError(LookupError):
         """
         super().__init__(f"No household item has id {item_id}.")
         self.item_id = item_id
+
+
+class TargetIncompleteError(ValueError):
+    """Raised when a target amount would be left without half of itself."""
+
+    def __init__(self) -> None:
+        """Use the one message this error carries."""
+        super().__init__(
+            "A target amount needs both a quantity and a unit. Set both, or clear both."
+        )
 
 
 class AliasConflictError(ValueError):
@@ -131,6 +138,19 @@ def normalize_item_name(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", text).strip().lower()
 
 
+def _optional(row: Any, column: str) -> Any:
+    """Read a column that an older schema may not have yet.
+
+    Args:
+        row: A ``household_items`` row.
+        column: A column added after migration 010.
+
+    Returns:
+        The value, or None when the schema predates the column.
+    """
+    return dict(row).get(column)
+
+
 def _row_to_item(row: Any) -> HouseholdItem:
     """Build a HouseholdItem from a database row.
 
@@ -141,6 +161,7 @@ def _row_to_item(row: Any) -> HouseholdItem:
         The item.
     """
     policy = row["staple_policy"]
+    unit = _optional(row, "target_unit")
     return HouseholdItem(
         id=row["id"],
         name=row["name"],
@@ -150,6 +171,9 @@ def _row_to_item(row: Any) -> HouseholdItem:
         staple_policy=StaplePolicy(policy) if policy else None,
         preferred_brand=row["preferred_brand"],
         preferred_size=row["preferred_size"],
+        target_quantity=_optional(row, "target_quantity"),
+        target_unit=Unit(unit) if unit else None,
+        cadence_days=_optional(row, "cadence_days"),
         active=bool(row["active"]),
         merged_into_id=row["merged_into_id"],
     )
@@ -164,7 +188,7 @@ def _stored_value(value: object) -> object:
     Returns:
         The enum's string value for enums, otherwise the value unchanged.
     """
-    if isinstance(value, (IngredientCategory, StaplePolicy)):
+    if isinstance(value, (IngredientCategory, StaplePolicy, Unit)):
         return value.value
     return value
 
@@ -428,6 +452,8 @@ class HouseholdItemStore:
 
         Raises:
             ItemNotFoundError: If no item has this id.
+            TargetIncompleteError: If the change would leave a target
+                quantity without a unit, or a unit without a quantity.
         """
         fields = {
             name: _stored_value(getattr(changes, name))
@@ -437,6 +463,7 @@ class HouseholdItemStore:
             item = self._require(conn, item_id)
             if not fields:
                 return item
+            _require_whole_target(item, fields)
             for column, statement in _UPDATE_STATEMENTS.items():
                 if column in fields:
                     conn.execute(statement, (fields[column], item_id))
@@ -689,6 +716,25 @@ class HouseholdItemStore:
         )
 
 
+def _require_whole_target(item: HouseholdItem, fields: dict[str, Any]) -> None:
+    """Refuse a change that leaves half a target amount.
+
+    Args:
+        item: The item before the change.
+        fields: The stored values being applied, by column.
+
+    Raises:
+        TargetIncompleteError: If, after the change, exactly one of the
+            target quantity and target unit would be set.
+    """
+    quantity = fields.get("target_quantity", item.target_quantity)
+    unit = fields.get(
+        "target_unit", item.target_unit.value if item.target_unit else None
+    )
+    if (quantity is None) != (unit is None):
+        raise TargetIncompleteError
+
+
 _UPDATE_STATEMENTS: dict[str, str] = {
     "display_name": "UPDATE household_items SET display_name = ?,"
     " updated_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -701,6 +747,12 @@ _UPDATE_STATEMENTS: dict[str, str] = {
     "preferred_brand": "UPDATE household_items SET preferred_brand = ?,"
     " updated_at = CURRENT_TIMESTAMP WHERE id = ?",
     "preferred_size": "UPDATE household_items SET preferred_size = ?,"
+    " updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    "target_quantity": "UPDATE household_items SET target_quantity = ?,"
+    " updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    "target_unit": "UPDATE household_items SET target_unit = ?,"
+    " updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    "cadence_days": "UPDATE household_items SET cadence_days = ?,"
     " updated_at = CURRENT_TIMESTAMP WHERE id = ?",
 }
 

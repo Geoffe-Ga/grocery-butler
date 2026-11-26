@@ -59,7 +59,14 @@ class BrandMatchType(StrEnum):
 
 
 class StaplePolicy(StrEnum):
-    """How the household wants an item replenished (backlog P1.7)."""
+    """How the household wants an item replenished (ADR 0017).
+
+    ``ALWAYS_KEEP``: when it runs low or out it goes straight onto the next
+    plan, with no separate approval. ``REPLENISH_WHEN_LOW``: when it runs
+    low or out it is suggested, and a member approves. ``MEALS_ONLY``: it
+    is bought only when a planned meal needs it. ``NEVER_SUGGEST``: nothing
+    automatic ever proposes it; a member asks for it by name.
+    """
 
     ALWAYS_KEEP = "always_keep"
     REPLENISH_WHEN_LOW = "replenish_when_low"
@@ -573,6 +580,9 @@ class HouseholdItem(BaseModel):
     staple_policy: StaplePolicy | None = None
     preferred_brand: str | None = None
     preferred_size: str | None = None
+    target_quantity: float | None = None
+    target_unit: Unit | None = None
+    cadence_days: int | None = None
     active: bool = True
     merged_into_id: int | None = None
 
@@ -590,6 +600,9 @@ class HouseholdItemUpdate(BaseModel):
     staple_policy: StaplePolicy | None = None
     preferred_brand: str | None = None
     preferred_size: str | None = None
+    target_quantity: float | None = Field(default=None, gt=0)
+    target_unit: Unit | None = None
+    cadence_days: int | None = Field(default=None, ge=1, le=365)
 
 
 class ItemEvent(BaseModel):

@@ -31,6 +31,7 @@ from grocery_butler.models import (
     PlanMeal,
     PlanReason,
     ShoppingPlan,
+    StaplePolicy,
     UnplannedIngredient,
     parse_unit,
 )
@@ -52,6 +53,11 @@ _PLANNABLE = frozenset({NeedStatus.APPROVED, NeedStatus.PLANNED})
 # (2 cups plus a pint is 3.9999999958 cups) can't reach a plan or its hash.
 AMOUNT_DECIMALS = 4
 
+NEVER_SUGGEST_PROBLEM = (
+    "This item's policy is never to suggest it, so the recipe did not add it."
+    " Ask for it by name if you want it on the plan."
+)
+_KEPT_POLICIES = frozenset({StaplePolicy.ALWAYS_KEEP, StaplePolicy.REPLENISH_WHEN_LOW})
 NO_ITEM_PROBLEM = (
     "This recipe ingredient is not linked to a household item, so it can't be "
     "planned. Save the recipe again to link it."
@@ -137,6 +143,39 @@ class _Demand:
     reasons: list[PlanReason] = field(default_factory=list)
     amounts: list[PlanAmount] = field(default_factory=list)
     need_id: int | None = None
+
+
+def _kept_in_stock(item: HouseholdItem, legacy_staples: set[int]) -> bool:
+    """Say whether an item is kept on hand, so a meal needn't buy it.
+
+    The item's policy decides (ADR 0017). Only an item with no policy falls
+    back to the older flat staple list.
+
+    Args:
+        item: The canonical item.
+        legacy_staples: Canonical ids on the flat pantry staple list.
+
+    Returns:
+        True when a recipe's use of the item should not add it to a plan.
+    """
+    if item.staple_policy is None:
+        return item.id in legacy_staples
+    return item.staple_policy in _KEPT_POLICIES
+
+
+def _target_amounts(item: HouseholdItem) -> list[PlanAmount]:
+    """Return the amount to suggest for an item nothing stated an amount for.
+
+    Args:
+        item: The canonical item.
+
+    Returns:
+        The item's target amount, if it has one; otherwise nothing, which
+        means "buy the usual".
+    """
+    if item.target_quantity is None or item.target_unit is None:
+        return []
+    return [PlanAmount(quantity=item.target_quantity, unit=item.target_unit)]
 
 
 def _dump(value: object) -> str:
@@ -449,7 +488,16 @@ class ShoppingPlans:
                 )
                 continue
             entry = self._entry(demand, row["item_id"])
-            if entry.item.id in staples:
+            if _kept_in_stock(entry.item, staples):
+                continue
+            if entry.item.staple_policy is StaplePolicy.NEVER_SUGGEST:
+                unplanned.append(
+                    UnplannedIngredient(
+                        recipe_id=meal.recipe_id,
+                        ingredient=row["ingredient"],
+                        problem=NEVER_SUGGEST_PROBLEM,
+                    )
+                )
                 continue
             unit = parse_unit(row["unit"])
             quantity = round(
@@ -511,7 +559,7 @@ class ShoppingPlans:
                         quantity=round(amount.quantity, AMOUNT_DECIMALS),
                         unit=amount.unit,
                     )
-                    for amount in entry.amounts
+                    for amount in entry.amounts or _target_amounts(item)
                 ),
                 key=lambda amount: amount.unit.value,
             ),
