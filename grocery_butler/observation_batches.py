@@ -28,6 +28,7 @@ from grocery_butler.models import (
     ProposalReview,
     StockState,
 )
+from grocery_butler.observability import audit
 from grocery_butler.replenishment import ReplenishmentNeeds
 
 if TYPE_CHECKING:
@@ -109,6 +110,21 @@ class ReviewsMissingError(ValueError):
 
 class InvalidReviewError(ValueError):
     """Raised when a review can't be applied as written."""
+
+
+def capture_session(batch_id: int) -> str:
+    """Name the capture session a batch belongs to, for the audit trail.
+
+    A batch is submitted in one request and reviewed in another. This id is
+    on every audit event about it, so the whole session can be followed.
+
+    Args:
+        batch_id: The batch.
+
+    Returns:
+        The capture session id, e.g. ``batch-12``.
+    """
+    return f"batch-{batch_id}"
 
 
 def _row_to_proposal(row: Any) -> ObservationProposal:
@@ -304,7 +320,16 @@ class ObservationBatches:
                     ),
                 )
             conn.commit()
-            return self._require(conn, batch_id)
+            batch = self._require(conn, batch_id)
+        audit(
+            "capture.batch_submitted",
+            capture_session=capture_session(batch.id),
+            batch_id=batch.id,
+            source=batch.source.value,
+            proposals=len(batch.proposals),
+            actor=submitted_by,
+        )
+        return batch
 
     def resolve(
         self,
@@ -359,6 +384,17 @@ class ObservationBatches:
             resolved = self._require(conn, batch_id)
         for item_id in sorted({new.item_id for new in accepted}):
             self._needs.sync_item(item_id)
+        actions = [review.action for _, review in decisions]
+        audit(
+            "capture.batch_resolved",
+            capture_session=capture_session(batch_id),
+            batch_id=batch_id,
+            status=status.value,
+            confirmed=actions.count(DecisionAction.CONFIRM),
+            corrected=actions.count(DecisionAction.CORRECT),
+            rejected=actions.count(DecisionAction.REJECT),
+            actor=actor,
+        )
         return resolved
 
     def reject(self, batch_id: int, *, actor: str) -> ObservationBatch:
@@ -385,7 +421,15 @@ class ObservationBatches:
                 (ProposalDecision.REJECTED.value, batch_id),
             )
             conn.commit()
-            return self._require(conn, batch_id)
+            rejected = self._require(conn, batch_id)
+        audit(
+            "capture.batch_rejected",
+            capture_session=capture_session(batch_id),
+            batch_id=batch_id,
+            proposals=len(rejected.proposals),
+            actor=actor,
+        )
+        return rejected
 
     # -- internals -----------------------------------------------------
 

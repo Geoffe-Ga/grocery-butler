@@ -489,12 +489,11 @@ class HouseholdRules:
 def import_dietary_preference(db_path: str) -> None:
     """Copy the old dietary restrictions text into one dietary rule.
 
-    Migration 017's hook. The text is carried, lowercased but not
-    reworded, as a single household ``dietary_rule``; nothing is parsed out
-    of it, because a guess at an allergen would be worse than none. The
-    original preference
-    stays, since the recipe parser still reads it. Running it again changes
-    nothing.
+    Migration 017's hook. The text is carried, lowercased but not reworded,
+    as a single household ``dietary_rule``; nothing is parsed out of it,
+    because a guess at an allergen would be worse than none. The original
+    preference stays, since the recipe parser still reads it. Running it
+    again changes nothing.
 
     Args:
         db_path: SQLite file path or PostgreSQL URL.

@@ -567,6 +567,9 @@ class HouseholdData:
                 )
                 raise BackupFormatError(msg)
             order, self_refs = self._load_order(conn, present)
+            # Not redundant: the migrations just run seeded rows (default
+            # staples and preferences, and items made from them). They go, so
+            # the backup's rows are the only rows.
             self._remove_rows(conn)
             for table in order:
                 self._insert_rows(conn, table, tables[table], self_refs.get(table, []))
