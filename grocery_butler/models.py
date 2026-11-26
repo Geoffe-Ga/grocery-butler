@@ -157,6 +157,24 @@ class DecisionAction(StrEnum):
     REJECT = "reject"
 
 
+class HardConstraintKind(StrEnum):
+    """Something that must hold for what the household buys (ADR 0012)."""
+
+    ALLERGEN_EXCLUSION = "allergen_exclusion"
+    DIETARY_RULE = "dietary_rule"
+    DO_NOT_SUBSTITUTE = "do_not_substitute"
+
+
+class SoftPreferenceKind(StrEnum):
+    """Something the household would like, where it is available."""
+
+    BRAND = "brand"
+    AVOID_BRAND = "avoid_brand"
+    SIZE = "size"
+    ORGANIC = "organic"
+    GENERIC = "generic"
+
+
 class Unit(StrEnum):
     """Standardized grocery measurement units."""
 
@@ -960,12 +978,26 @@ class PlanReason(BaseModel):
     detail: dict[str, Any]
 
 
+class PlanHardConstraint(BaseModel):
+    """A hard constraint as it applies to one plan line.
+
+    ``scope`` says whether it holds for the whole household or was set on
+    this item.
+    """
+
+    kind: HardConstraintKind
+    value: str
+    scope: str
+
+
 class PlanLine(BaseModel):
     """One household item on a plan, with every reason it is there.
 
     ``amounts`` is empty when nothing stated an amount; the line then means
     "buy the usual". ``need_id`` is the approved need behind the line, if
-    there is one.
+    there is one. ``constraints`` holds soft preferences (a preferred brand
+    or size). ``hard_constraints`` holds what must hold; the two are kept
+    apart so a hard constraint can never be read as a preference (ADR 0012).
     """
 
     item_id: int
@@ -975,6 +1007,7 @@ class PlanLine(BaseModel):
     reasons: list[PlanReason]
     constraints: dict[str, Any]
     need_id: int | None
+    hard_constraints: list[PlanHardConstraint] = Field(default_factory=list)
 
 
 class UnplannedIngredient(BaseModel):
@@ -996,3 +1029,53 @@ class ShoppingPlan(BaseModel):
     unplanned: list[UnplannedIngredient]
     created_by: str
     created_at: dt.datetime
+
+
+# ---------------------------------------------------------------------------
+# Hard constraints and soft preferences (ADR 0012)
+# ---------------------------------------------------------------------------
+
+HOUSEHOLD_SCOPE = "household"
+ITEM_SCOPE = "item"
+
+
+class HardConstraint(BaseModel):
+    """Something that must hold: an allergen, a dietary rule, no substitutes.
+
+    ``item_id`` is None for a household-wide constraint. There is no way to
+    turn this into a :class:`SoftPreference`; the types share no base and
+    no conversion.
+    """
+
+    id: int
+    kind: HardConstraintKind
+    value: str
+    item_id: int | None
+    note: str
+    active: bool
+    created_by: str
+    created_at: dt.datetime
+    deactivated_by: str | None
+    deactivated_at: dt.datetime | None
+
+    @property
+    def scope(self) -> str:
+        """Say whether the constraint is household-wide or about one item.
+
+        Returns:
+            ``household`` or ``item``.
+        """
+        return HOUSEHOLD_SCOPE if self.item_id is None else ITEM_SCOPE
+
+
+class SoftPreference(BaseModel):
+    """Something the household would like, where it is available.
+
+    ``source`` names where the preference is stored: the item, a brand
+    rule, or the preferences table.
+    """
+
+    kind: SoftPreferenceKind
+    value: str
+    item_id: int | None
+    source: str

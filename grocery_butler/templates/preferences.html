@@ -29,7 +29,14 @@
                 <label for="dietary_restrictions">Dietary Restrictions</label>
                 <input type="text" id="dietary_restrictions" name="dietary_restrictions"
                        value="{{ prefs.get('dietary_restrictions', '') }}"
-                       placeholder="e.g. vegetarian, gluten-free">
+                       placeholder="e.g. vegetarian, gluten-free"
+                       aria-describedby="dietary_restrictions_help">
+                <small id="dietary_restrictions_help">
+                    This guides how recipes are broken down. It does not block
+                    anything from a shopping plan. For an allergy, ask your
+                    assistant to add an allergen exclusion, which is checked
+                    on every plan.
+                </small>
             </div>
         </div>
         <div class="page-actions">
