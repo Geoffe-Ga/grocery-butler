@@ -391,7 +391,7 @@ class TestSoftPreferences:
 class TestDietaryMigration:
     """The old free-text dietary preference is carried over, not parsed."""
 
-    def test_text_becomes_one_household_dietary_rule_verbatim(
+    def test_text_becomes_one_household_dietary_rule_not_reworded(
         self, db_path: str
     ) -> None:
         """Nothing is guessed from the text, and the original stays."""
