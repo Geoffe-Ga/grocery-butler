@@ -33,6 +33,10 @@ mutmut==2.5.1
 build==1.6.1
 twine==7.0.0
 
+# Browser tests (tests/browser, ADR 0022). It downloads the Chromium build it
+# was released with: ./scripts/install-browser.sh
+playwright==1.65.2
+
 # Hooks
 pre-commit==4.7.0
 

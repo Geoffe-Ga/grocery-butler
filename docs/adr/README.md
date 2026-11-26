@@ -27,6 +27,7 @@ ADR that supersedes the old one, rather than an edit.
 | [0019](0019-check-reminders-are-rate-limited-suggestions.md) | Check reminders are rate-limited suggestions about kept items we no longer know about | Accepted |
 | [0020](0020-handoff-wording-and-the-opened-state.md) | One module words every handoff, and "opened" is the only thing we learn after a link is made | Accepted |
 | [0021](0021-self-host-the-dogfood-on-the-openclaw-server.md) | Self-host the dogfood on the server OpenClaw already runs on | Accepted |
+| [0022](0022-browser-tests-in-the-gate.md) | The dashboard's JavaScript is tested in a real browser, in the gate | Accepted |
 
 A status of "Accepted, with conditions" means the decision stands and work
 may start, but the ADR names something a person must still do before part

@@ -69,6 +69,11 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -e .
 
+      # The browser tests are part of check-all (ADR 0022). They fail, not
+      # skip, without a browser, so it is installed before the gate runs.
+      - name: ./scripts/install-browser.sh
+        run: ./scripts/install-browser.sh --with-deps
+
       - name: ./scripts/check-all.sh
         env:
           # The throwaway database the Postgres service above creates; the

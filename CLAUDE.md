@@ -88,7 +88,7 @@ grocery-butler/
 │   ├── db/                 # adapter.py (SQLite/Postgres), migrate.py, migrations/
 │   ├── templates/          # Jinja2 templates
 │   └── static/             # Pico CSS and assets
-├── tests/                  # pytest suite; tests/e2e/ wires real components
+├── tests/                  # pytest suite; tests/e2e/ wires real components; tests/browser/ drives the dashboard in Chromium
 ├── scripts/                # Quality gate scripts; graph/ for the code graph
 ├── docs/adr/               # Architecture decision records
 ├── docs/OPENCLAW_ERP_BACKLOG.md   # Product backlog
@@ -114,6 +114,7 @@ Business rules live in the domain services, never in `api.py`, `app.py`, `cli.py
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt -e .
+./scripts/install-browser.sh    # Chromium for tests/browser (ADR 0022)
 pre-commit install --install-hooks -t pre-commit -t commit-msg
 
 git checkout -b feature/<issue>-<slug>
