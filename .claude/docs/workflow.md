@@ -71,7 +71,7 @@ Run `./scripts/mutation.sh` (or dispatch CI by hand, which runs the mutation job
 
 ## 9. Branches
 
-- `main`: always deployable. Railway deploys each push to it from the `Dockerfile`, and the entrypoint migrates the database before gunicorn starts.
+- `main`: always deployable. A person deploys it to the household's server (`docs/operations/vps-deployment.md`); the entrypoint migrates the database before gunicorn starts.
 - `feature/*`, `bugfix/*`: branched from `main`, merged by PR.
 
 ---

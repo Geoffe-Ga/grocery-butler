@@ -14,13 +14,14 @@ history.
 
 Do these once. Each is a checkbox in the week 1 log.
 
-1. **Deploy** and confirm the tailnet boundary on the live service (#110).
+1. **Deploy** with the [deployment runbook](vps-deployment.md) and confirm
+   the boundary on the live service (#110; steps 5 and 7 there).
 2. **Add the household's members** (`POST /api/v2/members`), so every change
    is attributed to a person.
 3. **Enter the hard constraints**: allergens and dietary rules
    (`POST /api/v2/constraints`). Check that the one imported from the old
    dietary text says what you mean.
-4. **Take a first backup** and store it off Railway
+4. **Take a first backup** and store it off the server
    ([runbook](data-lifecycle.md#back-up)).
 5. **Run the restore drill**: restore that backup into a scratch database
    and look at it ([runbook](data-lifecycle.md#restore)).

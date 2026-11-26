@@ -97,7 +97,8 @@ grocery-butler/
 ├── .claude/skills/         # Project skills (<name>/SKILL.md)
 ├── .claude/agents/         # Subagent profiles
 ├── .github/workflows/      # ci.yml, code-review.yml, claude.yml, graph-build.yml
-├── Dockerfile, docker-entrypoint.sh   # Railway image: migrate, then gunicorn
+├── Dockerfile, docker-entrypoint.sh   # Production image: migrate, then gunicorn
+├── deploy/vps/             # compose.yaml for the household's server (ADR 0021)
 ├── pyproject.toml          # Tool configuration
 └── requirements*.txt       # Pinned runtime and dev dependencies
 ```

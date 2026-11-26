@@ -235,7 +235,7 @@ def create_app(db_path: str | None = None) -> Flask:
             environment variable, then ``DATABASE_PATH``, then finally the
             ``"mealbot.db"`` local SQLite default. This lets the production
             gunicorn invocation, which calls ``create_app()`` with no
-            arguments, pick up the Railway-provisioned Postgres URL.
+            arguments, pick up the production Postgres URL.
 
     Returns:
         Configured Flask application instance.

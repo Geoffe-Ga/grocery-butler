@@ -15,3 +15,4 @@ plans/
 *.egg-info
 coverage.xml
 satan-butler.png
+deploy/

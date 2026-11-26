@@ -2,10 +2,10 @@
 
 Grocery Butler is designed to be reached only over the Tailscale tailnet
 (or from loopback, for local development). Historically nothing enforced
-that assumption at the application layer -- Railway's public edge would
-happily forward any request straight through to Flask, so a stray public
-DNS record or a Railway domain guess was enough to reach every
-state-mutating route. This module closes that hole with a single
+that assumption at the application layer -- a hosting platform's public
+edge would happily forward any request straight through to Flask, so a
+stray public DNS record was enough to reach every state-mutating route.
+This module closes that hole with a single
 ``app.before_request`` hook that rejects requests whose *socket peer
 address* falls outside an explicit allow-list of CIDR ranges.
 
@@ -13,8 +13,8 @@ SECURITY-CRITICAL: admission is keyed **only** on ``request.remote_addr``
 (the actual TCP peer address Werkzeug sees), never on
 ``X-Forwarded-For`` or any other client-supplied header, and this module
 does not install (and must never install) Werkzeug's ``ProxyFix``.
-Railway's edge is a shared, multi-tenant proxy: any header it forwards
-from the original client is attacker-controlled input. If a future
+A forwarded header is whatever the original client chose to send: it is
+attacker-controlled input. If a future
 change trusts ``X-Forwarded-For`` (directly, or indirectly via
 ``ProxyFix`` rewriting ``remote_addr`` from that header) *without* also
 verifying the request arrived through a proxy hop that itself
@@ -36,8 +36,12 @@ Configuration (read once, at ``register_network_guard`` call time):
   *replaces* the default list entirely; it does not extend it.
 
 ``/health`` and ``/healthz`` are always exempt (matched by Flask
-endpoint name, not path) so Railway's own health checks -- which arrive
-from Railway's infrastructure, not the tailnet -- keep working.
+endpoint name, not path) so a platform's or Docker's health check keeps
+working wherever it comes from.
+
+On the self-hosted deployment (ADR 0021) requests reach the app from the
+compose network's gateway, and ``deploy/vps/compose.yaml`` sets the
+allow-list to loopback plus that one address.
 """
 
 from __future__ import annotations
