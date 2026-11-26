@@ -16,6 +16,7 @@ secrets) and locally.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import time
@@ -24,6 +25,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from grocery_butler.api_v2 import IDEMPOTENCY_HEADER, MEMBER_HEADER
 from grocery_butler.app import create_app
 from grocery_butler.auth_middleware import SECRET_ENV_VAR, RequestBinding, mint_token
 from grocery_butler.db import init_db
@@ -264,17 +266,93 @@ def signed_request(
         method: str,
         path: str,
         json_body: Any = None,
+        *,
+        extra_headers: dict[str, str] | None = None,
         **header_kwargs: Any,
     ) -> Any:
         """Mint a token bound to this exact request, then send it."""
         body = b"" if json_body is None else json.dumps(json_body).encode()
         headers = signed_headers(method=method, path=path, body=body, **header_kwargs)
+        headers.update(extra_headers or {})
         call = getattr(client, method.lower())
         if json_body is None:
             return call(path, headers=headers)
         return call(path, data=body, content_type="application/json", headers=headers)
 
     return _send
+
+
+class V2:
+    """Calls ``/api/v2`` the way OpenClaw does, as one household member.
+
+    Every request is signed for exactly its method, path and body. Each
+    mutation names the member and carries a fresh idempotency key.
+    """
+
+    def __init__(self, send: Callable[..., Any], member: str) -> None:
+        """Wrap the signing sender.
+
+        Args:
+            send: The ``signed_request`` helper.
+            member: The member key every mutation is attributed to.
+        """
+        self._send = send
+        self._member = member
+        self._keys = itertools.count(1)
+
+    def get(self, path: str) -> Any:
+        """GET a path under ``/api/v2`` and return the response."""
+        return self._send("GET", f"/api/v2{path}")
+
+    def post(self, path: str, body: dict[str, Any] | None = None) -> Any:
+        """POST to a path under ``/api/v2`` and return the response."""
+        return self._send(
+            "POST",
+            f"/api/v2{path}",
+            body,
+            extra_headers={
+                MEMBER_HEADER: self._member,
+                IDEMPOTENCY_HEADER: f"journey-{next(self._keys):06d}",
+            },
+        )
+
+    def ok(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+        """Send a request that must succeed and return its JSON.
+
+        Args:
+            method: ``GET`` or ``POST``.
+            path: Path under ``/api/v2``.
+            body: JSON body for a POST.
+
+        Returns:
+            The decoded response body.
+        """
+        response = self.get(path) if method == "GET" else self.post(path, body)
+        assert response.status_code in {200, 201}, response.get_data(as_text=True)
+        return response.get_json()
+
+
+@pytest.fixture()
+def v2(signed_request: Callable[..., Any]) -> V2:
+    """Return a v2 client acting as the household's first member.
+
+    The member is created through the API itself, which is how a new
+    deployment is bootstrapped.
+
+    Args:
+        signed_request: The signing sender.
+
+    Returns:
+        A client whose mutations are attributed to ``geoff``.
+    """
+    created = signed_request(
+        "POST",
+        "/api/v2/members",
+        {"key": "geoff", "display_name": "Geoff"},
+        extra_headers={IDEMPOTENCY_HEADER: "journey-bootstrap"},
+    )
+    assert created.status_code == 201, created.get_data(as_text=True)
+    return V2(signed_request, "geoff")
 
 
 # ---------------------------------------------------------------------------
