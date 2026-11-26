@@ -16,6 +16,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from grocery_butler.constraints import HouseholdRules
 from grocery_butler.db import get_connection
 from grocery_butler.db.adapter import IntegrityError
 from grocery_butler.household_items import HouseholdItemStore
@@ -25,6 +26,7 @@ from grocery_butler.models import (
     NeedReasonKind,
     NeedStatus,
     PlanAmount,
+    PlanHardConstraint,
     PlanLine,
     PlanMeal,
     PlanReason,
@@ -64,7 +66,8 @@ _SELECT_ALL_PLANS = (
     " FROM shopping_plans ORDER BY version"
 )
 _SELECT_LINES = (
-    "SELECT item_id, display_name, category, amounts, reasons, constraints, need_id"
+    "SELECT item_id, display_name, category, amounts, reasons, constraints,"
+    " need_id, hard_constraints"
     " FROM shopping_plan_lines WHERE plan_id = ? ORDER BY position"
 )
 
@@ -193,6 +196,7 @@ def _row_to_line(row: Any) -> PlanLine:
             "reasons": json.loads(row["reasons"]),
             "constraints": json.loads(row["constraints"]),
             "need_id": row["need_id"],
+            "hard_constraints": json.loads(row["hard_constraints"]),
         }
     )
 
@@ -220,6 +224,7 @@ class ShoppingPlans:
         self._clock = clock
         self._items = HouseholdItemStore(db_path)
         self._needs = ReplenishmentNeeds(db_path, clock=clock)
+        self._rules = HouseholdRules(db_path, clock=clock)
 
     # -- reads ---------------------------------------------------------
 
@@ -477,15 +482,15 @@ class ShoppingPlans:
             ).fetchall()
         return {self._items.canonical(row["item_id"]).id for row in rows}
 
-    @staticmethod
-    def _line(entry: _Demand) -> PlanLine:
+    def _line(self, entry: _Demand) -> PlanLine:
         """Turn an item's gathered demand into a plan line.
 
         Args:
             entry: The item's demand.
 
         Returns:
-            The line, with reasons and amounts in a stable order.
+            The line, with reasons and amounts in a stable order and every
+            hard constraint that applies to the item (ADR 0012).
         """
         item = entry.item
         constraints = {
@@ -513,6 +518,14 @@ class ShoppingPlans:
             reasons=sorted(entry.reasons, key=lambda r: (r.kind.value, r.source_key)),
             constraints=constraints,
             need_id=entry.need_id,
+            hard_constraints=[
+                PlanHardConstraint(
+                    kind=constraint.kind,
+                    value=constraint.value,
+                    scope=constraint.scope,
+                )
+                for constraint in self._rules.hard_for_item(item.id)
+            ],
         )
 
     # -- storage -------------------------------------------------------
@@ -551,8 +564,8 @@ class ShoppingPlans:
                     conn.execute(
                         "INSERT INTO shopping_plan_lines"
                         " (plan_id, position, item_id, display_name, category,"
-                        "  amounts, reasons, constraints, need_id)"
-                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "  amounts, reasons, constraints, need_id, hard_constraints)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             cursor.lastrowid,
                             position,
@@ -563,6 +576,7 @@ class ShoppingPlans:
                             _dump(line["reasons"]),
                             _dump(line["constraints"]),
                             line["need_id"],
+                            _dump(line["hard_constraints"]),
                         ),
                     )
                 conn.commit()

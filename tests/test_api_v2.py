@@ -1257,6 +1257,7 @@ class TestFulfillment:
                 "authorization": "none",
                 "data_freshness": adapters[0]["data_freshness"],
                 "human_required": True,
+                "enforces": [],
             }
         ]
 
@@ -1321,3 +1322,141 @@ class TestFulfillment:
         )
         assert "csv, json, text" in _error(bad_format)["message"]
         assert (missing.status_code, _error(missing)["code"]) == (404, "plan_not_found")
+
+
+class TestConstraints:
+    """What must hold, and what the household would merely like."""
+
+    def test_allergen_exclusion_reaches_every_plan_line_and_the_export(
+        self, api: Api
+    ) -> None:
+        """The whole path: constraint, plan line, export, unenforced report."""
+        item_id = _item(api, "oat milk")
+        api.call("POST", "/needs", {"item_id": item_id})
+
+        added = api.call(
+            "POST",
+            "/constraints",
+            {"kind": "allergen_exclusion", "value": " Peanut ", "note": "anaphylaxis"},
+        )
+        plan = api.call("POST", "/plans").get_json()
+        export = api.call("GET", "/plans/1/export").get_json()
+
+        constraint = added.get_json()
+        assert added.status_code == 201
+        assert (constraint["value"], constraint["scope"]) == ("peanut", "household")
+        assert constraint["created_by"] == "geoff@rubotpaul"
+        assert plan["lines"][0]["hard_constraints"] == [
+            {"kind": "allergen_exclusion", "value": "peanut", "scope": "household"}
+        ]
+        assert plan["lines"][0]["constraints"] == {}
+        assert "{MUST: no peanut}" in export["content"]
+        assert export["unenforced_constraints"] == [
+            {
+                "item_id": item_id,
+                "display_name": "Oat Milk",
+                "kind": "allergen_exclusion",
+                "value": "peanut",
+            }
+        ]
+        assert "marked MUST" in export["human_action"]
+
+    def test_adding_a_constraint_makes_the_current_plan_stale(self, api: Api) -> None:
+        """An approval built on the old plan can't survive a new allergen."""
+        item_id = _item(api, "oat milk")
+        api.call("POST", "/needs", {"item_id": item_id})
+        api.call("POST", "/plans")
+
+        api.call("POST", "/constraints", {"kind": "dietary_rule", "value": "kosher"})
+
+        assert api.call("GET", "/plans/1").get_json()["is_current"] is False
+
+    def test_item_constraint_listing_and_removal(self, api: Api) -> None:
+        """Do-not-substitute is about one item; removal keeps the record."""
+        item_id = _item(api, "oat milk")
+        api.call("POST", "/constraints", {"kind": "allergen_exclusion", "value": "soy"})
+        added = api.call(
+            "POST", "/constraints", {"kind": "do_not_substitute", "item_id": item_id}
+        ).get_json()
+
+        for_item = api.call("GET", "/constraints", query=f"item_id={item_id}")
+        removed = api.call("POST", f"/constraints/{added['id']}/deactivate")
+        active = api.call("GET", "/constraints").get_json()
+        everything = api.call("GET", "/constraints", query="include_inactive=true")
+
+        assert [c["kind"] for c in for_item.get_json()["constraints"]] == [
+            "allergen_exclusion",
+            "do_not_substitute",
+        ]
+        assert removed.get_json()["active"] is False
+        assert removed.get_json()["deactivated_by"] == "geoff@rubotpaul"
+        assert [c["kind"] for c in active["constraints"]] == ["allergen_exclusion"]
+        assert len(everything.get_json()["constraints"]) == 2
+        assert "peanut" in active["common_allergens"]
+
+    @pytest.mark.parametrize(
+        ("body", "status", "code"),
+        [
+            ({"kind": "allergen_exclusion", "value": " "}, 400, "constraint_invalid"),
+            ({"kind": "do_not_substitute"}, 400, "constraint_invalid"),
+            ({"kind": "do_not_substitute", "item_id": 99999}, 404, "item_not_found"),
+            ({"kind": "brand", "value": "Clover"}, 400, "validation_failed"),
+            (
+                {"kind": "allergen_exclusion", "value": "x", "strength": "soft"},
+                400,
+                "validation_failed",
+            ),
+        ],
+        ids=["no-value", "no-item", "unknown-item", "soft-kind", "unknown-field"],
+    )
+    def test_bad_constraints_are_refused(
+        self, api: Api, body: dict[str, Any], status: int, code: str
+    ) -> None:
+        """Each failure has its code, and nothing is stored."""
+        response = api.call("POST", "/constraints", body)
+
+        assert (response.status_code, _error(response)["code"]) == (status, code)
+        assert api.call("GET", "/constraints").get_json()["constraints"] == []
+
+    def test_a_hard_kind_cannot_be_stored_as_a_soft_preference(self, api: Api) -> None:
+        """ADR 0012: there is no route from an allergen to a preference."""
+        response = api.call(
+            "POST",
+            "/soft-preferences",
+            {"kind": "allergen_exclusion", "value": "peanut"},
+        )
+
+        assert (response.status_code, _error(response)["code"]) == (
+            400,
+            "validation_failed",
+        )
+        assert api.call("GET", "/soft-preferences").get_json() == {"preferences": []}
+        assert api.call("GET", "/constraints").get_json()["constraints"] == []
+
+    def test_soft_preferences_for_an_item_combine_every_source(self, api: Api) -> None:
+        """The item's own brand, plus stored household and item preferences."""
+        item_id = _item(api, "oat milk")
+        api.call("PATCH", f"/items/{item_id}", {"preferred_brand": "Oatly"})
+        api.call("POST", "/soft-preferences", {"kind": "organic"})
+
+        added = api.call(
+            "POST", "/soft-preferences", {"kind": "generic", "item_id": item_id}
+        )
+        household = api.call("GET", "/soft-preferences").get_json()["preferences"]
+
+        assert added.status_code == 201
+        assert [(p["kind"], p["source"]) for p in added.get_json()["preferences"]] == [
+            ("brand", "item"),
+            ("generic", "preference"),
+            ("organic", "preference"),
+        ]
+        assert [p["kind"] for p in household] == ["organic"]
+
+    def test_removing_a_missing_constraint_is_not_found(self, api: Api) -> None:
+        """You can only remove what exists."""
+        response = api.call("POST", "/constraints/99999/deactivate")
+
+        assert (response.status_code, _error(response)["code"]) == (
+            404,
+            "constraint_not_found",
+        )

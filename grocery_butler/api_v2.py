@@ -23,6 +23,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from werkzeug.exceptions import HTTPException
 
 from grocery_butler.auth_middleware import require_bearer
+from grocery_butler.constraints import (
+    COMMON_ALLERGENS,
+    ConstraintNotFoundError,
+    HouseholdRules,
+)
 from grocery_butler.fulfillment.base import Capability
 from grocery_butler.fulfillment.registry import default_registry
 from grocery_butler.household_items import (
@@ -50,6 +55,7 @@ from grocery_butler.members import (
 )
 from grocery_butler.models import (
     BatchStatus,
+    HardConstraintKind,
     HouseholdItemUpdate,
     IngredientCategory,
     NeedReasonKind,
@@ -59,6 +65,7 @@ from grocery_butler.models import (
     ObservationSource,
     PlanMeal,
     ProposalReview,
+    SoftPreferenceKind,
     StockState,
 )
 from grocery_butler.observation_batches import (
@@ -123,6 +130,7 @@ _DOMAIN_ERRORS: dict[type[Exception], tuple[int, str]] = {
     InvalidNeedMoveError: (409, "need_move_not_allowed"),
     PlanNotFoundError: (404, "plan_not_found"),
     RecipeNotFoundError: (404, "recipe_not_found"),
+    ConstraintNotFoundError: (404, "constraint_not_found"),
 }
 
 
@@ -1396,6 +1404,7 @@ def list_adapters() -> Response:
             "authorization": description.authorization.value,
             "data_freshness": description.data_freshness,
             "human_required": description.human_required,
+            "enforces": sorted(kind.value for kind in description.enforces),
         }
         for description in (a.describe() for a in default_registry().adapters())
     ]
@@ -1441,6 +1450,158 @@ def export_plan(version: int) -> Response:
             "format": wanted,
             "content": result.artifacts[wanted],
             "human_action": result.human_action,
+            "unenforced_constraints": [
+                {
+                    "item_id": entry.item_id,
+                    "display_name": entry.display_name,
+                    "kind": entry.kind.value,
+                    "value": entry.value,
+                }
+                for entry in result.unenforced_constraints
+            ],
         },
         200,
     )
+
+
+# ---------------------------------------------------------------------------
+# Hard constraints and soft preferences
+# ---------------------------------------------------------------------------
+
+
+class _NewHardConstraint(BaseModel):
+    """Body of ``POST /constraints``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: HardConstraintKind
+    value: str = ""
+    item_id: int | None = None
+    note: str = ""
+
+
+class _NewSoftPreference(BaseModel):
+    """Body of ``POST /soft-preferences``.
+
+    ``kind`` is a soft preference kind. A hard constraint kind fails
+    validation here: it can only be added through ``POST /constraints``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: SoftPreferenceKind
+    value: str = ""
+    item_id: int | None = None
+
+
+@api_v2.get("/constraints")
+def list_constraints() -> Response:
+    """List the household's hard constraints, oldest first.
+
+    Query: ``include_inactive=true`` also returns removed constraints;
+    ``item_id`` returns only those that apply to that item.
+
+    Returns:
+        ``{"constraints": [...], "common_allergens": [...]}``.
+    """
+    rules = HouseholdRules(_db_path())
+    item_id = request.args.get("item_id", type=int)
+    if item_id is not None:
+        constraints = rules.hard_for_item(item_id)
+    else:
+        include = request.args.get("include_inactive") == "true"
+        constraints = rules.list_hard(include_inactive=include)
+    return _json(
+        {
+            "constraints": [
+                {**c.model_dump(mode="json"), "scope": c.scope} for c in constraints
+            ],
+            "common_allergens": list(COMMON_ALLERGENS),
+        },
+        200,
+    )
+
+
+@api_v2.post("/constraints")
+@mutation()
+def add_constraint() -> JsonResult:
+    """Add a hard constraint: something that must hold.
+
+    Returns:
+        The active constraint, with 201.
+
+    Raises:
+        ApiError: 400 ``constraint_invalid`` when an allergen or dietary
+            rule has no value, or do-not-substitute names no item.
+    """
+    body = _NewHardConstraint.model_validate(_body())
+    try:
+        constraint = HouseholdRules(_db_path()).add_hard(
+            body.kind,
+            body.value,
+            actor=g.actor,
+            item_id=body.item_id,
+            note=body.note,
+        )
+    except ItemNotFoundError:
+        raise
+    except ValueError as err:
+        raise ApiError(400, "constraint_invalid", str(err)) from err
+    return {**constraint.model_dump(mode="json"), "scope": constraint.scope}, 201
+
+
+@api_v2.post("/constraints/<int:constraint_id>/deactivate")
+@mutation()
+def deactivate_constraint(constraint_id: int) -> JsonResult:
+    """Stop a hard constraint applying. Its record is kept.
+
+    Args:
+        constraint_id: The constraint's id.
+
+    Returns:
+        The deactivated constraint.
+    """
+    constraint = HouseholdRules(_db_path()).deactivate_hard(
+        constraint_id, actor=g.actor
+    )
+    return {**constraint.model_dump(mode="json"), "scope": constraint.scope}, 200
+
+
+@api_v2.get("/soft-preferences")
+def list_soft_preferences() -> Response:
+    """List soft preferences: what the household would like.
+
+    Query: ``item_id`` returns everything that applies to that item (its
+    own brand and size, matching brand rules, and stored preferences).
+    Without it, the household-wide stored preferences are returned.
+
+    Returns:
+        ``{"preferences": [...]}``.
+    """
+    rules = HouseholdRules(_db_path())
+    item_id = request.args.get("item_id", type=int)
+    preferences = (
+        rules.soft_for_item(item_id)
+        if item_id is not None
+        else rules.soft_for_household()
+    )
+    return _json({"preferences": [p.model_dump(mode="json") for p in preferences]}, 200)
+
+
+@api_v2.post("/soft-preferences")
+@mutation()
+def add_soft_preference() -> JsonResult:
+    """Store a soft preference: organic, generic, a brand or a size.
+
+    Returns:
+        What applies to the item (or the household) afterwards, with 201.
+    """
+    body = _NewSoftPreference.model_validate(_body())
+    rules = HouseholdRules(_db_path())
+    rules.add_soft(body.kind, body.value, actor=g.actor, item_id=body.item_id)
+    preferences = (
+        rules.soft_for_item(body.item_id)
+        if body.item_id is not None
+        else rules.soft_for_household()
+    )
+    return {"preferences": [p.model_dump(mode="json") for p in preferences]}, 201
