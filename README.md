@@ -513,9 +513,14 @@ The contract is [`docs/api/v2.md`](docs/api/v2.md); the reasons are in
   response and changes nothing.
 - **Every error has a stable code**:
   `{"error": {"code", "message", "details"}}`.
-- **Live today:** household members, and household items with their aliases,
-  merges, current state and history. Observation batches and replenishment
-  needs come next; plans, handoffs and receipts arrive with their own work.
+- **A model's inference is a proposal.** What OpenClaw reads off a photo or
+  parses with any doubt goes in as an observation batch. Nothing is recorded
+  until a member confirms, corrects or rejects each proposal, and a review is
+  applied all at once or not at all.
+- **Live today:** household members; household items with their aliases,
+  merges, current state and history; observations a member states directly;
+  observation batches; and replenishment needs. Plans, handoffs and receipts
+  arrive with their own work.
 
 ### Discord Bot Commands
 

@@ -224,7 +224,7 @@ class InventoryLedger:
         Raises:
             ItemNotFoundError: If the observation's item does not exist.
         """
-        return self._append(observation, ObservationKind.OBSERVATION, None)
+        return self._append(observation, None)
 
     def correct(
         self, observation_id: int, replacement: NewObservation
@@ -248,7 +248,7 @@ class InventoryLedger:
             ItemNotFoundError: If the replacement's item does not exist.
         """
         self._require_current(observation_id)
-        return self._append(replacement, ObservationKind.OBSERVATION, observation_id)
+        return self._append(replacement, observation_id)
 
     def retract(
         self, observation_id: int, *, actor: str, notes: str = ""
@@ -401,17 +401,61 @@ class InventoryLedger:
             observation=latest,
         )
 
-    def _append(
+    def insert_into(
         self,
+        conn: DatabaseConnection,
         observation: NewObservation,
-        kind: ObservationKind,
-        supersedes_id: int | None,
+        supersedes_id: int | None = None,
+    ) -> int:
+        """Insert a stated observation on a caller's connection, uncommitted.
+
+        For callers that must write several rows, or rows in other tables,
+        in one transaction. The caller commits, and must have checked that
+        the item exists.
+
+        Args:
+            conn: The caller's open connection.
+            observation: The validated observation.
+            supersedes_id: The row this one replaces, if any.
+
+        Returns:
+            The new row's id.
+
+        Raises:
+            ObservationNotFoundError: If the database returns no id.
+        """
+        now = self._clock()
+        observed_at = (observation.observed_at or now).astimezone(dt.UTC)
+        cursor = conn.execute(
+            _INSERT_OBSERVATION,
+            (
+                observation.item_id,
+                ObservationKind.OBSERVATION.value,
+                observation.state.value,
+                observation.quantity,
+                observation.unit,
+                observation.source.value,
+                observation.confidence,
+                observation.actor,
+                observed_at.isoformat(),
+                now.isoformat(),
+                observation.evidence_ref,
+                observation.notes,
+                supersedes_id,
+            ),
+        )
+        row_id = cursor.lastrowid
+        if row_id is None:  # pragma: no cover - both backends return the id
+            raise ObservationNotFoundError(0)
+        return row_id
+
+    def _append(
+        self, observation: NewObservation, supersedes_id: int | None
     ) -> InventoryObservation:
-        """Insert one stated observation.
+        """Insert one stated observation and commit it.
 
         Args:
             observation: The validated observation.
-            kind: The row kind.
             supersedes_id: The row this one replaces, if any.
 
         Returns:
@@ -422,29 +466,10 @@ class InventoryLedger:
         """
         if self._items.get(observation.item_id) is None:
             raise ItemNotFoundError(observation.item_id)
-        now = self._clock()
-        observed_at = (observation.observed_at or now).astimezone(dt.UTC)
         with closing(get_connection(self._db_path)) as conn:
-            cursor = conn.execute(
-                _INSERT_OBSERVATION,
-                (
-                    observation.item_id,
-                    kind.value,
-                    observation.state.value,
-                    observation.quantity,
-                    observation.unit,
-                    observation.source.value,
-                    observation.confidence,
-                    observation.actor,
-                    observed_at.isoformat(),
-                    now.isoformat(),
-                    observation.evidence_ref,
-                    observation.notes,
-                    supersedes_id,
-                ),
-            )
+            row_id = self.insert_into(conn, observation, supersedes_id)
             conn.commit()
-            return self._require(conn, cursor.lastrowid)
+            return self._require(conn, row_id)
 
     def _require(
         self, conn: DatabaseConnection, observation_id: int | None
