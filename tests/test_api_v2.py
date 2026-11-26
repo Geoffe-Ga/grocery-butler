@@ -371,6 +371,19 @@ class TestMembers:
         assert response.get_json()["key"] == "geoff"
         assert response.get_json()["created_by"] == "rubotpaul"
 
+    def test_bootstrap_reopens_when_every_member_is_deactivated(
+        self, api: Api, db_path: str
+    ) -> None:
+        """With nobody active there is nobody to name, so the door reopens."""
+        MemberStore(db_path).set_active("geoff", active=False)
+
+        response = api.call(
+            "POST", "/members", {"key": "jess", "display_name": "Jess"}, member=None
+        )
+
+        assert response.status_code == 201
+        assert response.get_json()["created_by"] == "rubotpaul"
+
     def test_once_a_member_exists_the_header_is_required(self, api: Api) -> None:
         """Bootstrap ends with the first member."""
         response = api.call(
