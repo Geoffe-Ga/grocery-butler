@@ -1,6 +1,15 @@
 /* Grocery Butler — vanilla JS */
 
 /**
+ * Read this session's CSRF token from the page's meta tag.
+ * @returns {string} The token, or an empty string if the tag is missing.
+ */
+function csrfToken() {
+    var meta = document.querySelector('meta[name="csrf-token"]');
+    return meta ? meta.getAttribute("content") : "";
+}
+
+/**
  * Update an inventory item's status via AJAX POST.
  * @param {string} ingredient - The ingredient identifier.
  * @param {string} newStatus - The new status value (on_hand, low, out).
@@ -9,7 +18,7 @@
 function updateInventoryStatus(ingredient, newStatus) {
     return fetch("/inventory/update", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken() },
         body: JSON.stringify({ ingredient: ingredient, status: newStatus }),
     })
         .then(function (response) {
@@ -195,6 +204,21 @@ function initAddIngredientRow() {
     });
 }
 
+/**
+ * Ask before submitting any form that carries a data-confirm message.
+ * Replaces inline onsubmit handlers, which the Content Security Policy blocks.
+ */
+function initConfirmForms() {
+    var forms = document.querySelectorAll("form[data-confirm]");
+    forms.forEach(function (form) {
+        form.addEventListener("submit", function (event) {
+            if (!window.confirm(form.getAttribute("data-confirm"))) {
+                event.preventDefault();
+            }
+        });
+    });
+}
+
 /* Initialize on DOMContentLoaded */
 document.addEventListener("DOMContentLoaded", function () {
     initStatusButtons();
@@ -203,4 +227,5 @@ document.addEventListener("DOMContentLoaded", function () {
     initNavToggle();
     initRecipeSearch();
     initAddIngredientRow();
+    initConfirmForms();
 });

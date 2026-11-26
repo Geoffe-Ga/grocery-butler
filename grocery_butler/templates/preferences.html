@@ -7,6 +7,7 @@
 
 <section class="add-item-section">
     <form action="/preferences" method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-row">
             <div class="form-group">
                 <label for="default_servings">Default Servings</label>

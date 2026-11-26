@@ -228,3 +228,22 @@ class TestLoadConfig:
         cfg = load_config()
         assert cfg.anthropic_api_key == "sk-test"
         assert not any("safeway" in f.name for f in dataclasses.fields(cfg))
+
+
+class TestConfigReprHidesSecrets:
+    """Issue #89: a logged Config must not leak credentials."""
+
+    def test_repr_omits_secret_values(self) -> None:
+        """Keys, tokens and the database URL stay out of repr()."""
+        config = Config(
+            anthropic_api_key="sk-ant-secret-value",
+            discord_bot_token="discord-secret-value",
+            database_url="postgresql://user:db-secret-value@host/db",
+        )
+
+        text = repr(config)
+
+        assert "sk-ant-secret-value" not in text
+        assert "discord-secret-value" not in text
+        assert "db-secret-value" not in text
+        assert "default_servings=4" in text

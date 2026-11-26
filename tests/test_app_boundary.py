@@ -114,6 +114,9 @@ def make_app(
             monkeypatch.setenv(key, value)
         application = create_app(db_path=db_path)
         application.config["TESTING"] = True
+        # CSRF has its own tests (tests/test_web_security.py); off here so these
+        # tests can post forms directly.
+        application.config["WEB_CSRF_ENABLED"] = False
         return application
 
     return _make

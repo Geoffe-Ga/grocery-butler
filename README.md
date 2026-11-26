@@ -886,6 +886,30 @@ a live gap — and a naive in-memory limiter is ineffective across
 per-gunicorn-worker processes without a shared store (no Redis is
 provisioned). Revisit if multi-tenant tailnet access is ever introduced.
 
+### Browser security baseline
+
+`grocery_butler/web_security.py` protects the HTML dashboard, on top of the
+network boundary guard:
+
+- **CSRF tokens.** Every dashboard form and the inventory toggle send a
+  token bound to the visitor's session; a state-changing request without it
+  gets a 400 and changes nothing. This stops a public web page, open in a
+  household member's browser, from posting at the dashboard's tailnet
+  address. `/api/v1` is exempt: it authenticates each request with its HMAC
+  bearer token and never reads the session cookie. A new form needs
+  `<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">`;
+  a test fails if one is missing.
+- **Security headers** on every response: a same-origin-only Content
+  Security Policy (no inline script or style, no framing),
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and
+  `Referrer-Policy: same-origin`. Templates therefore use no inline event
+  handlers or styles.
+- **No third-party fetches.** The dashboard loads nothing from outside its
+  own origin, so browsing it leaks nothing off the tailnet.
+- **Request size limit.** Bodies over 1 MiB get a 413.
+- **Secret-safe config.** `Config`'s repr leaves out the API key, bot token
+  and database URL.
+
 ### Fail-fast startup checks
 
 The Docker image sets `APP_ENV=production` (see the `Dockerfile`), which

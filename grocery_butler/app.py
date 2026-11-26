@@ -35,6 +35,7 @@ from grocery_butler.models import (
 )
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
+from grocery_butler.web_security import register_web_security
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +253,7 @@ def create_app(db_path: str | None = None) -> Flask:
     _register_error_handlers(app)
     _register_context_processors(app)
     _register_network_guard(app)
+    register_web_security(app)
     _register_routes(app)
     _register_api(app)
 
@@ -422,6 +424,23 @@ def _register_error_handlers(app: Flask) -> None:
             ``/api/v1`` requests, rendered HTML otherwise.
         """
         return _api_or_html_error(405, "method not allowed", "Method Not Allowed")
+
+    @app.errorhandler(413)
+    def request_too_large(_error: Exception) -> tuple[Response, int] | tuple[str, int]:
+        """Handle 413 Request Entity Too Large errors.
+
+        Args:
+            _error: The exception that triggered the error.
+
+        Returns:
+            Tuple of (response, status code): terse JSON for
+            ``/api/v1`` requests, rendered HTML otherwise.
+        """
+        return _api_or_html_error(
+            413,
+            "request too large",
+            "That request was too large to accept. Shorten it and try again.",
+        )
 
     @app.errorhandler(500)
     def server_error(_error: Exception) -> tuple[Response, int] | tuple[str, int]:

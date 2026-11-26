@@ -7,7 +7,7 @@ at import time so the app fails fast with a clear error.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
@@ -24,15 +24,17 @@ class ConfigError(Exception):
 class Config:
     """Typed, validated application configuration."""
 
+    # Secrets are kept out of repr(), so logging a Config can't leak them.
+
     # Required for Claude API calls
-    anthropic_api_key: str
+    anthropic_api_key: str = field(repr=False)
 
     # Required for Discord bot (optional if only running web/CLI)
-    discord_bot_token: str = ""
+    discord_bot_token: str = field(default="", repr=False)
 
-    # Database
+    # Database. The URL can embed a password.
     database_path: str = "mealbot.db"
-    database_url: str = ""
+    database_url: str = field(default="", repr=False)
 
     # Flask
     flask_port: int = 5000
