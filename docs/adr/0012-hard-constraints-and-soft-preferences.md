@@ -42,7 +42,7 @@ reviews whenever one can't be satisfied.
 7. **Removing a hard constraint is recorded, not erased.** A constraint is
    deactivated with the actor and time, and stays in the table.
 8. **Existing data is kept where it is and read through the new types.**
-   - The free-text dietary preference is copied, verbatim, into one
+   - The free-text dietary preference is copied, normalized but not reworded, into one
      household `dietary_rule` by the migration. The original stays, because
      the recipe parser still reads it.
    - An item's preferred brand and size, and the brand rules table, are

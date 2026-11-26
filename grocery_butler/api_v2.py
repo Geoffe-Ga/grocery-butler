@@ -28,6 +28,7 @@ from grocery_butler.constraints import (
     ConstraintNotFoundError,
     HouseholdRules,
 )
+from grocery_butler.data_lifecycle import HouseholdData
 from grocery_butler.fulfillment.base import Capability
 from grocery_butler.fulfillment.registry import default_registry
 from grocery_butler.household_items import (
@@ -736,8 +737,6 @@ def remove_alias(item_id: int) -> JsonResult:
     body = _Alias.model_validate(_body())
     try:
         HouseholdItemStore(_db_path()).remove_alias(item_id, body.alias, actor=g.actor)
-    except ItemNotFoundError:
-        raise
     except ValueError as err:
         raise ApiError(409, "alias_not_removable", str(err)) from err
     return _item_payload(_require_item(item_id), detailed=True), 200
@@ -1384,6 +1383,26 @@ def get_plan(version: int) -> Response:
 
 
 # ---------------------------------------------------------------------------
+# Household data: the full export
+# ---------------------------------------------------------------------------
+
+
+@api_v2.get("/household/export")
+def export_household() -> Response:
+    """Export every household table as one document (ADR 0013).
+
+    The same document the ``data export`` command writes, and the format a
+    restore reads. Reading it changes nothing. Deleting and restoring are
+    not offered over HTTP: they are operator commands.
+
+    Returns:
+        The export: format, dialect, schema version, when it was taken,
+        and every row of every household table.
+    """
+    return _json(HouseholdData(_db_path()).export(), 200)
+
+
+# ---------------------------------------------------------------------------
 # Fulfillment: adapters and the universal list export
 # ---------------------------------------------------------------------------
 
@@ -1543,8 +1562,6 @@ def add_constraint() -> JsonResult:
             item_id=body.item_id,
             note=body.note,
         )
-    except ItemNotFoundError:
-        raise
     except ValueError as err:
         raise ApiError(400, "constraint_invalid", str(err)) from err
     return {**constraint.model_dump(mode="json"), "scope": constraint.scope}, 201

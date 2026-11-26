@@ -1,0 +1,598 @@
+{
+ "dialect": "sqlite",
+ "exported_at": "2026-11-26T12:00:00+00:00",
+ "format": 1,
+ "schema_version": 17,
+ "tables": {
+  "api_idempotency_keys": [],
+  "approval_envelopes": [],
+  "archived_order_submissions": [],
+  "archived_product_mapping": [],
+  "brand_preferences": [],
+  "hard_constraints": [
+   {
+    "active": 1,
+    "created_at": "2026-11-26T16:26:08.895054+00:00",
+    "created_by": "lifecycle-test",
+    "deactivated_at": null,
+    "deactivated_by": null,
+    "id": 1,
+    "item_id": null,
+    "kind": "allergen_exclusion",
+    "note": "",
+    "value": "sesame"
+   }
+  ],
+  "household_inventory": [],
+  "household_item_aliases": [
+   {
+    "alias": "salt",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 1,
+    "item_id": 1
+   },
+   {
+    "alias": "black pepper",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 2,
+    "item_id": 2
+   },
+   {
+    "alias": "olive oil",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 3,
+    "item_id": 3
+   },
+   {
+    "alias": "vegetable oil",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 4,
+    "item_id": 4
+   },
+   {
+    "alias": "butter",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 5,
+    "item_id": 5
+   },
+   {
+    "alias": "garlic",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 6,
+    "item_id": 6
+   },
+   {
+    "alias": "onion",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 7,
+    "item_id": 7
+   },
+   {
+    "alias": "sugar",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 8,
+    "item_id": 8
+   },
+   {
+    "alias": "flour",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 9,
+    "item_id": 9
+   },
+   {
+    "alias": "soy sauce",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 10,
+    "item_id": 10
+   },
+   {
+    "alias": "oat milk",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 11,
+    "item_id": 11
+   },
+   {
+    "alias": "oatmilk",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 12,
+    "item_id": 12
+   },
+   {
+    "alias": "oat drink",
+    "created_at": "2026-11-26 16:26:08",
+    "id": 13,
+    "item_id": 13
+   }
+  ],
+  "household_item_events": [
+   {
+    "actor": "migration",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"salt\"}",
+    "event_type": "created",
+    "id": 1,
+    "item_id": 1
+   },
+   {
+    "actor": "migration",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"black pepper\"}",
+    "event_type": "created",
+    "id": 2,
+    "item_id": 2
+   },
+   {
+    "actor": "migration",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"olive oil\"}",
+    "event_type": "created",
+    "id": 3,
+    "item_id": 3
+   },
+   {
+    "actor": "migration",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"vegetable oil\"}",
+    "event_type": "created",
+    "id": 4,
+    "item_id": 4
+   },
+   {
+    "actor": "migration",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"butter\"}",
+    "event_type": "created",
+    "id": 5,
+    "item_id": 5
+   },
+   {
+    "actor": "migration",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"garlic\"}",
+    "event_type": "created",
+    "id": 6,
+    "item_id": 6
+   },
+   {
+    "actor": "migration",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"onion\"}",
+    "event_type": "created",
+    "id": 7,
+    "item_id": 7
+   },
+   {
+    "actor": "migration",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"sugar\"}",
+    "event_type": "created",
+    "id": 8,
+    "item_id": 8
+   },
+   {
+    "actor": "migration",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"flour\"}",
+    "event_type": "created",
+    "id": 9,
+    "item_id": 9
+   },
+   {
+    "actor": "migration",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"soy sauce\"}",
+    "event_type": "created",
+    "id": 10,
+    "item_id": 10
+   },
+   {
+    "actor": "lifecycle-test",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"oat milk\"}",
+    "event_type": "created",
+    "id": 11,
+    "item_id": 11
+   },
+   {
+    "actor": "lifecycle-test",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"oatmilk\"}",
+    "event_type": "created",
+    "id": 12,
+    "item_id": 12
+   },
+   {
+    "actor": "lifecycle-test",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"name\": \"oat drink\"}",
+    "event_type": "created",
+    "id": 13,
+    "item_id": 13
+   },
+   {
+    "actor": "lifecycle-test",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"into\": 11}",
+    "event_type": "merged",
+    "id": 14,
+    "item_id": 13
+   },
+   {
+    "actor": "lifecycle-test",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"absorbed\": 13}",
+    "event_type": "merged",
+    "id": 15,
+    "item_id": 11
+   },
+   {
+    "actor": "lifecycle-test",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"into\": 11}",
+    "event_type": "merged",
+    "id": 16,
+    "item_id": 12
+   },
+   {
+    "actor": "lifecycle-test",
+    "created_at": "2026-11-26 16:26:08",
+    "detail": "{\"absorbed\": 12}",
+    "event_type": "merged",
+    "id": 17,
+    "item_id": 11
+   }
+  ],
+  "household_items": [
+   {
+    "active": 1,
+    "category": "pantry_dry",
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Salt",
+    "id": 1,
+    "merged_into_id": null,
+    "name": "salt",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   },
+   {
+    "active": 1,
+    "category": "pantry_dry",
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Black Pepper",
+    "id": 2,
+    "merged_into_id": null,
+    "name": "black pepper",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   },
+   {
+    "active": 1,
+    "category": "pantry_dry",
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Olive Oil",
+    "id": 3,
+    "merged_into_id": null,
+    "name": "olive oil",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   },
+   {
+    "active": 1,
+    "category": "pantry_dry",
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Vegetable Oil",
+    "id": 4,
+    "merged_into_id": null,
+    "name": "vegetable oil",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   },
+   {
+    "active": 1,
+    "category": "dairy",
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Butter",
+    "id": 5,
+    "merged_into_id": null,
+    "name": "butter",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   },
+   {
+    "active": 1,
+    "category": "produce",
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Garlic",
+    "id": 6,
+    "merged_into_id": null,
+    "name": "garlic",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   },
+   {
+    "active": 1,
+    "category": "produce",
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Onion",
+    "id": 7,
+    "merged_into_id": null,
+    "name": "onion",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   },
+   {
+    "active": 1,
+    "category": "pantry_dry",
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Sugar",
+    "id": 8,
+    "merged_into_id": null,
+    "name": "sugar",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   },
+   {
+    "active": 1,
+    "category": "pantry_dry",
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Flour",
+    "id": 9,
+    "merged_into_id": null,
+    "name": "flour",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   },
+   {
+    "active": 1,
+    "category": "pantry_dry",
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Soy Sauce",
+    "id": 10,
+    "merged_into_id": null,
+    "name": "soy sauce",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   },
+   {
+    "active": 1,
+    "category": null,
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Oat Milk",
+    "id": 11,
+    "merged_into_id": null,
+    "name": "oat milk",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   },
+   {
+    "active": 0,
+    "category": null,
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Oatmilk",
+    "id": 12,
+    "merged_into_id": 11,
+    "name": "oatmilk",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   },
+   {
+    "active": 0,
+    "category": null,
+    "created_at": "2026-11-26 16:26:08",
+    "display_name": "Oat Drink",
+    "id": 13,
+    "merged_into_id": 11,
+    "name": "oat drink",
+    "preferred_brand": null,
+    "preferred_size": null,
+    "preferred_unit": null,
+    "staple_policy": null,
+    "updated_at": "2026-11-26 16:26:08"
+   }
+  ],
+  "household_members": [
+   {
+    "active": 1,
+    "created_at": "2026-11-26T16:26:08.873139+00:00",
+    "created_by": "lifecycle-test",
+    "display_name": "Geoff",
+    "id": 1,
+    "member_key": "geoff"
+   }
+  ],
+  "inventory_observations": [
+   {
+    "actor": "lifecycle-test",
+    "confidence": 1.0,
+    "evidence_ref": null,
+    "id": 1,
+    "item_id": 11,
+    "kind": "observation",
+    "notes": "",
+    "observed_at": "2026-11-26T16:26:08.883330+00:00",
+    "quantity": 1.5,
+    "recorded_at": "2026-11-26T16:26:08.883330+00:00",
+    "source": "human",
+    "state": "on_hand",
+    "supersedes_id": null,
+    "unit": "carton"
+   },
+   {
+    "actor": "lifecycle-test",
+    "confidence": 1.0,
+    "evidence_ref": null,
+    "id": 2,
+    "item_id": 11,
+    "kind": "observation",
+    "notes": "",
+    "observed_at": "2026-11-26T16:26:08.885477+00:00",
+    "quantity": null,
+    "recorded_at": "2026-11-26T16:26:08.885477+00:00",
+    "source": "human",
+    "state": "low",
+    "supersedes_id": 1,
+    "unit": null
+   }
+  ],
+  "observation_batches": [],
+  "observation_proposals": [],
+  "pantry_staples": [
+   {
+    "category": "pantry_dry",
+    "display_name": "Salt",
+    "id": 1,
+    "ingredient": "salt",
+    "item_id": 1
+   },
+   {
+    "category": "pantry_dry",
+    "display_name": "Black Pepper",
+    "id": 2,
+    "ingredient": "black pepper",
+    "item_id": 2
+   },
+   {
+    "category": "pantry_dry",
+    "display_name": "Olive Oil",
+    "id": 3,
+    "ingredient": "olive oil",
+    "item_id": 3
+   },
+   {
+    "category": "pantry_dry",
+    "display_name": "Vegetable Oil",
+    "id": 4,
+    "ingredient": "vegetable oil",
+    "item_id": 4
+   },
+   {
+    "category": "dairy",
+    "display_name": "Butter",
+    "id": 5,
+    "ingredient": "butter",
+    "item_id": 5
+   },
+   {
+    "category": "produce",
+    "display_name": "Garlic",
+    "id": 6,
+    "ingredient": "garlic",
+    "item_id": 6
+   },
+   {
+    "category": "produce",
+    "display_name": "Onion",
+    "id": 7,
+    "ingredient": "onion",
+    "item_id": 7
+   },
+   {
+    "category": "pantry_dry",
+    "display_name": "Sugar",
+    "id": 8,
+    "ingredient": "sugar",
+    "item_id": 8
+   },
+   {
+    "category": "pantry_dry",
+    "display_name": "Flour",
+    "id": 9,
+    "ingredient": "flour",
+    "item_id": 9
+   },
+   {
+    "category": "pantry_dry",
+    "display_name": "Soy Sauce",
+    "id": 10,
+    "ingredient": "soy sauce",
+    "item_id": 10
+   }
+  ],
+  "pending_actions": [],
+  "preferences": [
+   {
+    "key": "default_servings",
+    "value": "4"
+   },
+   {
+    "key": "default_units",
+    "value": "imperial"
+   }
+  ],
+  "recipe_ingredients": [],
+  "recipes": [],
+  "replenishment_need_events": [
+   {
+    "actor": "system",
+    "created_at": "2026-11-26T16:26:08.888691+00:00",
+    "from_status": null,
+    "id": 1,
+    "need_id": 1,
+    "note": "",
+    "to_status": "suggested"
+   }
+  ],
+  "replenishment_need_reasons": [
+   {
+    "active": 1,
+    "created_at": "2026-11-26T16:26:08.888691+00:00",
+    "detail": "{\"observation_id\": 2}",
+    "id": 1,
+    "kind": "low_stock",
+    "need_id": 1,
+    "source_key": "inventory"
+   }
+  ],
+  "replenishment_needs": [
+   {
+    "created_at": "2026-11-26T16:26:08.888691+00:00",
+    "deferred_until": null,
+    "id": 1,
+    "item_id": 11,
+    "status": "suggested",
+    "updated_at": "2026-11-26T16:26:08.888691+00:00"
+   }
+  ],
+  "shopping_list_items": [],
+  "shopping_lists": [],
+  "shopping_plan_lines": [],
+  "shopping_plans": [],
+  "soft_preferences": []
+ }
+}

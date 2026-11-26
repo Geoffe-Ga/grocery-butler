@@ -185,7 +185,8 @@ serving. Migrations are forward-only: there is no downgrade. Each one is
 recorded in `schema_migrations` only after its SQL and any Python hook
 succeed, so a failed migration is retried from its start on the next boot.
 To recover, fix the migration and redeploy, or restore the database from a
-backup taken before the deploy and redeploy the previous commit. Never edit
+backup taken before the deploy
+([runbook](docs/operations/data-lifecycle.md)) and redeploy the previous commit. Never edit
 `schema_migrations` by hand to skip a version.
 
 There is no separate worker process in production. The Discord bot
@@ -544,8 +545,8 @@ The contract is [`docs/api/v2.md`](docs/api/v2.md); the reasons are in
   applied all at once or not at all.
 - **Live today:** household members; household items with their aliases,
   merges, current state and history; observations a member states directly;
-  observation batches; replenishment needs; and shopping plans. Handoffs
-  and receipts arrive with their own work.
+  observation batches; replenishment needs; shopping plans; and the full
+  household export. Handoffs and receipts arrive with their own work.
 
 ### Discord Bot Commands
 
@@ -619,6 +620,21 @@ records applied to `household_inventory`).
 
 Invoked via `python -m grocery_butler <subcommand>`. All subcommands share the
 same database path and config (`load_config()` reads `.env`).
+
+#### `data`
+
+```
+python -m grocery_butler data export [--output FILE]
+python -m grocery_butler data delete --confirm "delete all household data"
+python -m grocery_butler data restore FILE --confirm "replace all household data"
+```
+
+Export every household table as one JSON document, delete every household
+row, or rebuild the database from an export. Delete and restore change
+nothing without their exact phrase. These need no Anthropic key, and read the
+database from `--database`, then `DATABASE_URL`, then `DATABASE_PATH`.
+Encrypted backups and the restore runbook:
+[`docs/operations/data-lifecycle.md`](docs/operations/data-lifecycle.md).
 
 #### `plan`
 
@@ -776,6 +792,16 @@ earlier approval. The only scope is a handoff; approving a purchase belongs
 in the retailer's own checkout. Shopping plans and handoffs start using
 envelopes as they are built.
 
+**Household data lifecycle ([ADR 0013](docs/adr/0013-household-data-lifecycle.md)).**
+`grocery_butler/data_lifecycle.py` treats everything the household stored as
+one unit. An export is one JSON document holding every table, found from the
+database's own catalogue so a new table is never missed. The same document is
+the backup: `scripts/backup.sh` encrypts it, and a restore rebuilds the
+schema the backup was taken at, loads it, and applies the migrations written
+since. Delete removes every row and needs a typed phrase. The runbook, what
+is retained and who else handles the data are in
+[`docs/operations/data-lifecycle.md`](docs/operations/data-lifecycle.md).
+
 **Shopping plans ([ADR 0011](docs/adr/0011-versioned-deterministic-shopping-plans.md)).**
 `grocery_butler/shopping_plans.py` builds the plan: one line per household
 item, with every reason it is there. It is built by plain code from the needs
@@ -854,6 +880,7 @@ grocery-butler/
 │   ├── pantry_manager.py       # Inventory CRUD + NL parsing
 │   ├── consolidator.py         # Multi-meal -> shopping list
 │   ├── pending_actions.py      # Draft -> confirm -> execute audit trail
+│   ├── data_lifecycle.py       # Export, delete and restore all household data
 │   ├── api.py                  # /api/v1 blueprint (OpenClaw)
 │   ├── db/
 │   │   ├── adapter.py          # SQLite/Postgres adapter

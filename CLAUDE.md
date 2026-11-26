@@ -78,7 +78,7 @@ grocery-butler/
 │   ├── bot.py              # Discord bot (local only; retired from production)
 │   ├── meal_parser.py, consolidator.py, pantry_manager.py, household_items.py, inventory_ledger.py,
 │   │   replenishment.py, observation_batches.py, approvals.py, shopping_plans.py,
-│   │   constraints.py,
+│   │   constraints.py, data_lifecycle.py,
 │   │   recipe_store.py, shopping_list_store.py, pending_actions.py   # Domain services
 │   ├── fulfillment/        # Adapter interface (base.py), registry.py, export.py (list export)
 │   ├── models.py, units.py, config.py, network_guard.py

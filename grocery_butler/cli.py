@@ -9,11 +9,14 @@ into a fully functional terminal-based meal planning tool.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import sys
 from typing import TYPE_CHECKING
 
 from grocery_butler.consolidator import Consolidator
+from grocery_butler.data_lifecycle import HouseholdData, LifecycleError
 from grocery_butler.db import init_db
 from grocery_butler.meal_parser import MealParser
 from grocery_butler.models import (
@@ -26,6 +29,8 @@ from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from grocery_butler.config import Config
     from grocery_butler.models import ParsedMeal
 
@@ -611,6 +616,105 @@ def _handle_bot() -> int:
 # ------------------------------------------------------------------
 
 
+def _data_export(args: argparse.Namespace, db_path: str) -> int:
+    """Write every household table as one JSON document.
+
+    Args:
+        args: Parsed command-line arguments.
+        db_path: Database path or URL.
+
+    Returns:
+        Exit code.
+    """
+    init_db(db_path)
+    text = json.dumps(HouseholdData(db_path).export(), indent=2, sort_keys=True)
+    if args.output is None:
+        print(text)
+        return 0
+    # The export is the whole household, so only its owner may read the file.
+    descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(text + "\n")
+    print(f"Exported every household table to {args.output}.")
+    return 0
+
+
+def _data_delete(args: argparse.Namespace, db_path: str) -> int:
+    """Remove every household row, once confirmed.
+
+    Args:
+        args: Parsed command-line arguments.
+        db_path: Database path or URL.
+
+    Returns:
+        Exit code.
+    """
+    init_db(db_path)
+    removed = HouseholdData(db_path).delete(args.confirm)
+    print(
+        f"Deleted {sum(removed.values())} rows from {len(removed)} tables."
+        " The household's data is gone."
+    )
+    return 0
+
+
+def _data_restore(args: argparse.Namespace, db_path: str) -> int:
+    """Rebuild the database from an export, once confirmed.
+
+    Args:
+        args: Parsed command-line arguments.
+        db_path: Database path or URL.
+
+    Returns:
+        Exit code.
+    """
+    if args.file is None:
+        print("Error: Name the export file to restore.", file=sys.stderr)
+        return 1
+    with open(args.file, encoding="utf-8") as handle:
+        document = json.load(handle)
+    loaded = HouseholdData(db_path).restore(document, args.confirm)
+    print(
+        f"Restored {sum(loaded.values())} rows into {len(loaded)} tables"
+        f" from {args.file}."
+    )
+    return 0
+
+
+_DATA_ACTIONS: dict[str, Callable[[argparse.Namespace, str], int]] = {
+    "export": _data_export,
+    "delete": _data_delete,
+    "restore": _data_restore,
+}
+
+
+def _handle_data(args: argparse.Namespace) -> int:
+    """Handle the ``data`` subcommand.
+
+    Needs no Anthropic key: it only reads and writes the database.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for failure).
+    """
+    db_path: str = (
+        args.database
+        or os.environ.get("DATABASE_URL")
+        or os.environ.get("DATABASE_PATH", "mealbot.db")
+    )
+    try:
+        return _DATA_ACTIONS[args.action](args, db_path)
+    except LifecycleError as err:
+        print(f"Error: {err}", file=sys.stderr)
+    except json.JSONDecodeError:
+        print(f"Error: {args.file} is not a JSON export.", file=sys.stderr)
+    except OSError as err:
+        print(f"Error: {err.filename}: {err.strerror}.", file=sys.stderr)
+    return 1
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser with all subcommands.
 
@@ -629,6 +733,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_recipes_parser(subparsers)
     _add_pantry_parser(subparsers)
     _add_bot_parser(subparsers)
+    _add_data_parser(subparsers)
 
     return parser
 
@@ -801,6 +906,50 @@ def _add_pantry_parser(
     )
 
 
+def _add_data_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Add the ``data`` subcommand parser.
+
+    Args:
+        subparsers: Subparsers action from the main parser.
+    """
+    data_parser = subparsers.add_parser(
+        "data",
+        help="Export, delete or restore all household data.",
+    )
+    data_parser.add_argument(
+        "action",
+        choices=sorted(_DATA_ACTIONS),
+        help="export: write every household table as JSON. delete: remove"
+        " every household row. restore: rebuild the database from an export.",
+    )
+    data_parser.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        help="The export to restore (restore only).",
+    )
+    data_parser.add_argument(
+        "--output",
+        default=None,
+        help="Write the export to this file, readable only by you, instead"
+        " of printing it (export only).",
+    )
+    data_parser.add_argument(
+        "--confirm",
+        default="",
+        help="The confirmation phrase delete and restore require. Run the"
+        " command without it to be told the phrase.",
+    )
+    data_parser.add_argument(
+        "--database",
+        default=None,
+        help="Database path or URL. Defaults to DATABASE_URL, then"
+        " DATABASE_PATH, then mealbot.db.",
+    )
+
+
 # ------------------------------------------------------------------
 # Entry point
 # ------------------------------------------------------------------
@@ -845,4 +994,6 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _handle_pantry(args)
     if command == "bot":
         return _handle_bot()
+    if command == "data":
+        return _handle_data(args)
     return 1  # pragma: no cover

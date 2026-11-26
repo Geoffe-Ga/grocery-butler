@@ -1242,6 +1242,41 @@ class TestPlans:
         assert _error(response)["code"] == "plan_not_found"
 
 
+class TestHouseholdExport:
+    """The household can take all its data away through the API."""
+
+    def test_export_holds_every_household_table(self, api: Api, db_path: str) -> None:
+        """The export is the lifecycle document, rows and all."""
+        from grocery_butler.data_lifecycle import EXPORT_FORMAT, HouseholdData
+
+        _item(api, "oat milk")
+
+        response = api.call("GET", "/household/export")
+        document = response.get_json()
+
+        assert response.status_code == 200
+        assert document["format"] == EXPORT_FORMAT
+        assert sorted(document["tables"]) == HouseholdData(db_path).tables()
+        members = document["tables"]["household_members"]
+        assert [m["member_key"] for m in members] == ["geoff"]
+        names = [row["name"] for row in document["tables"]["household_items"]]
+        assert "oat milk" in names
+
+    def test_export_needs_the_bearer(self, app: Flask) -> None:
+        """Without a valid bearer the household's data stays put."""
+        response = app.test_client().get("/api/v2/household/export")
+
+        assert response.status_code == 401
+        assert "tables" not in (response.get_json() or {})
+
+    @pytest.mark.parametrize("method", ["POST", "DELETE", "PUT"])
+    def test_export_is_read_only(self, api: Api, method: str) -> None:
+        """Delete and restore are operator commands, never HTTP calls."""
+        response = api.call(method, "/household/export", {})
+
+        assert response.status_code == 405
+
+
 class TestFulfillment:
     """Adapters are declared, and any plan can be exported for any store."""
 

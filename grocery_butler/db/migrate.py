@@ -287,7 +287,18 @@ def _run_python_hook(version: int, name: str, db_path: str) -> None:
     hook(db_path)
 
 
-def _apply_pending(conn: DatabaseConnection, db_path: str) -> int:
+def latest_version() -> int:
+    """Return the newest migration version this code ships.
+
+    Returns:
+        The highest version number in the migrations directory.
+    """
+    return max(version for version, _, _ in _discover_migrations(is_pg=False))
+
+
+def _apply_pending(
+    conn: DatabaseConnection, db_path: str, target: int | None = None
+) -> int:
     """Apply every migration the database has not recorded yet.
 
     The caller holds the migration lock, so the set read here can't go
@@ -296,6 +307,7 @@ def _apply_pending(conn: DatabaseConnection, db_path: str) -> int:
     Args:
         conn: Active database connection.
         db_path: Database file path or PostgreSQL URL.
+        target: Stop after this version. None applies everything.
 
     Returns:
         Number of migrations applied.
@@ -305,6 +317,8 @@ def _apply_pending(conn: DatabaseConnection, db_path: str) -> int:
 
     count = 0
     for version, name, path in _discover_migrations(_is_postgres(db_path)):
+        if target is not None and version > target:
+            break
         if version in applied:
             logger.debug("Skipping migration %03d_%s (already applied)", version, name)
             continue
@@ -317,7 +331,7 @@ def _apply_pending(conn: DatabaseConnection, db_path: str) -> int:
     return count
 
 
-def migrate(db_path: str) -> int:
+def migrate(db_path: str, target: int | None = None) -> int:
     """Apply all pending migrations to the database.
 
     Creates the schema_migrations tracking table if needed, discovers
@@ -328,12 +342,15 @@ def migrate(db_path: str) -> int:
 
     Args:
         db_path: Database file path or PostgreSQL URL.
+        target: Stop after this version, leaving later migrations pending.
+            A restore uses it to rebuild the schema a backup was taken at
+            (ADR 0013). None, the default, applies everything.
 
     Returns:
         Number of migrations applied.
     """
     with _migration_lock(db_path), closing(get_connection(db_path)) as conn:
-        count = _apply_pending(conn, db_path)
+        count = _apply_pending(conn, db_path, target)
 
     if count == 0:
         logger.info("Database is up to date.")
