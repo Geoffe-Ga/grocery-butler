@@ -980,6 +980,7 @@ encoded in the schema's comments:
 ./scripts/complexity.sh    # Run radon/xenon
 ./scripts/coverage.sh      # Coverage report (--html for browser view)
 ./scripts/mutation.sh      # Mutation testing via mutmut
+./scripts/container-scan.sh  # Build and scan the image (needs Docker; not in check-all)
 ```
 
 Always invoke through `./scripts/*.sh` rather than the underlying tools — the
@@ -1218,6 +1219,28 @@ batch, across the requests that submit and review it.
 or gets a 408, 429 or 5xx is tried up to three times, with pauses of 0.5 s
 then 1 s. Every try is a `call.attempt` event. Any other error fails at
 once.
+
+### Container scanning
+
+`./scripts/container-scan.sh` builds the production image and scans it with
+a pinned Trivy for HIGH and CRITICAL vulnerabilities that have a fix. It is
+**not** part of `./scripts/check-all.sh` or the CI gate: a CVE published
+overnight in the base image should be seen within a day, not block every
+unrelated pull request. The `Container scan` workflow runs it nightly, on
+demand, and on any pull request that changes the `Dockerfile`,
+`requirements.txt`, the entrypoint or the scan itself.
+
+When it fails, rebuild first: most findings are fixed by a newer base image.
+If a finding remains, upgrade the package that carries it (see the
+`cve-remediation` skill). Don't suppress it.
+
+The runtime stage runs `apt-get upgrade` and removes pip, for two reasons the
+first scan showed. A Debian fix can be newer than the `python:3.13-slim`
+image it applies to. And pip carries private copies of `urllib3`, `msgpack`
+and `setuptools` under `pip/_vendor`, which a pin in `requirements.txt`
+cannot reach; the app never installs anything at run time, so the installer
+goes. A finding in a package that is not in `requirements.txt` is usually one
+of these two.
 
 ### Browser security baseline
 

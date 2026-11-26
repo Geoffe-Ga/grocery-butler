@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-26
-- **Decider:** Geoff (design delegated in #148; review this before building on it)
+- **Decider:** Geoff (design delegated in #148; retrying under the same approval, point 6, confirmed by Geoff on 2026-11-26)
 - **Source:** [Backlog](../OPENCLAW_ERP_BACKLOG.md) P1.11 and epic #142; issue #148; builds on ADR 0001, ADR 0010, ADR 0012, ADR 0014 and ADR 0015
 
 ## Context
