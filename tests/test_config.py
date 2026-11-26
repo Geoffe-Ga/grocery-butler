@@ -235,15 +235,16 @@ class TestConfigReprHidesSecrets:
 
     def test_repr_omits_secret_values(self) -> None:
         """Keys, tokens and the database URL stay out of repr()."""
+        api_marker, bot_marker, db_marker = "marker-one", "marker-two", "marker-three"
         config = Config(
-            anthropic_api_key="sk-ant-secret-value",
-            discord_bot_token="discord-secret-value",
-            database_url="postgresql://user:db-secret-value@host/db",
+            anthropic_api_key=api_marker,
+            discord_bot_token=bot_marker,
+            database_url=f"postgresql://user:{db_marker}@host/db",
         )
 
         text = repr(config)
 
-        assert "sk-ant-secret-value" not in text
-        assert "discord-secret-value" not in text
-        assert "db-secret-value" not in text
+        assert api_marker not in text
+        assert bot_marker not in text
+        assert db_marker not in text
         assert "default_servings=4" in text
