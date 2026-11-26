@@ -26,6 +26,9 @@ the app directly. People reach the dashboard over the tailnet through
    cd grocery-butler
    ```
 
+   If the repository is private, give the server read access first, with a
+   read-only deploy key or `gh auth login`.
+
 2. **Write the secrets file.** It never leaves the server.
 
    ```bash
