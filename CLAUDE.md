@@ -76,6 +76,7 @@ grocery-butler/
 │   ├── cli.py              # argparse CLI
 │   ├── bot.py              # Discord bot (local only; retired from production)
 │   ├── meal_parser.py, consolidator.py, pantry_manager.py, household_items.py, inventory_ledger.py,
+│   │   replenishment.py,
 │   │   recipe_store.py, shopping_list_store.py, pending_actions.py   # Domain services
 │   ├── models.py, units.py, config.py, network_guard.py
 │   ├── claude_utils.py, prompt_loader.py, prompts/   # Anthropic wrapper and prompt templates

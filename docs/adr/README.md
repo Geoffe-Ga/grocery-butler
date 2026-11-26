@@ -13,6 +13,7 @@ ADR that supersedes the old one, rather than an edit.
 | [0005](0005-photo-capture-after-the-fulfillment-handoff.md) | Photo capture comes after the fulfillment handoff, by whole shelf, with photos kept until the batch closes | Accepted |
 | [0006](0006-canonical-household-item-identity.md) | Canonical household items, with aliases and reversible merges | Accepted |
 | [0007](0007-append-only-inventory-observations.md) | Append-only inventory observations and a snapshot derived on read | Accepted |
+| [0008](0008-explicit-replenishment-needs.md) | Explicit replenishment needs, one per item, with first-class reasons | Accepted |
 
 The product backlog these decisions serve is
 [`docs/OPENCLAW_ERP_BACKLOG.md`](../OPENCLAW_ERP_BACKLOG.md).
