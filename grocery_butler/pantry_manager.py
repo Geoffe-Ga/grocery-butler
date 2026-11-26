@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 from grocery_butler.claude_utils import extract_json_text
 from grocery_butler.db import get_connection
+from grocery_butler.household_items import SYSTEM_ACTOR, HouseholdItemStore
 from grocery_butler.models import (
     InventoryItem,
     InventoryStatus,
@@ -102,7 +103,7 @@ class PantryManager:
             cursor = conn.execute(
                 "SELECT ingredient, display_name, category, status, "
                 "current_quantity, current_unit, "
-                "default_quantity, default_unit, default_search_term, notes "
+                "default_quantity, default_unit, default_search_term, notes, item_id "
                 "FROM household_inventory ORDER BY ingredient"
             )
             return [_row_to_item(row) for row in cursor.fetchall()]
@@ -123,7 +124,7 @@ class PantryManager:
             cursor = conn.execute(
                 "SELECT ingredient, display_name, category, status, "
                 "current_quantity, current_unit, "
-                "default_quantity, default_unit, default_search_term, notes "
+                "default_quantity, default_unit, default_search_term, notes, item_id "
                 "FROM household_inventory WHERE LOWER(ingredient) = ?",
                 (ingredient.lower(),),
             )
@@ -144,14 +145,21 @@ class PantryManager:
         Raises:
             MissingRowIdError: If the insert returns no row id (a RuntimeError).
         """
+        household_item = HouseholdItemStore(self._db_path).resolve_or_create(
+            item.ingredient,
+            actor=SYSTEM_ACTOR,
+            display_name=item.display_name,
+            category=item.category,
+        )
         conn = get_connection(self._db_path)
         try:
             cursor = conn.execute(
                 "INSERT INTO household_inventory "
                 "(ingredient, display_name, category, status, "
                 "current_quantity, current_unit, "
-                "default_quantity, default_unit, default_search_term, notes) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "default_quantity, default_unit, default_search_term, notes, "
+                "item_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     item.ingredient.lower(),
                     item.display_name,
@@ -163,6 +171,7 @@ class PantryManager:
                     item.default_unit,
                     item.default_search_term,
                     item.notes,
+                    household_item.id,
                 ),
             )
             conn.commit()
@@ -274,7 +283,7 @@ class PantryManager:
             cursor = conn.execute(
                 "SELECT ingredient, display_name, category, status, "
                 "current_quantity, current_unit, "
-                "default_quantity, default_unit, default_search_term, notes "
+                "default_quantity, default_unit, default_search_term, notes, item_id "
                 "FROM household_inventory WHERE status IN (?, ?) "
                 "ORDER BY ingredient",
                 (InventoryStatus.LOW.value, InventoryStatus.OUT.value),
@@ -380,6 +389,7 @@ def _row_to_item(row: Any) -> InventoryItem:
         default_unit=row["default_unit"],
         default_search_term=row["default_search_term"],
         notes=row["notes"] or "",
+        item_id=row["item_id"],
     )
 
 
