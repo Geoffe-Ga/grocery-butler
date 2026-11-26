@@ -103,7 +103,8 @@ class PendingActionsStore:
 
         Raises:
             IntegrityError: If ``action_id`` already exists.
-            RuntimeError: If the inserted row cannot be read back.
+            VanishedActionError: If the inserted row cannot be read back
+                (a RuntimeError).
         """
         conn = self._connect()
         try:

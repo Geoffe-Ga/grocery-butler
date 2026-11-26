@@ -28,7 +28,7 @@ def load_prompt(name: str, **kwargs: str) -> str:
         Formatted prompt string.
 
     Raises:
-        FileNotFoundError: If template doesn't exist.
+        PromptNotFoundError: If template doesn't exist (a FileNotFoundError).
         KeyError: If a required variable is missing.
     """
     template_path = PROMPTS_DIR / f"{name}.txt"

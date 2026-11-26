@@ -303,7 +303,8 @@ def create_connection(db_url: str) -> DatabaseConnection:
         A DatabaseConnection for the appropriate backend.
 
     Raises:
-        ImportError: If psycopg2 is not installed for PostgreSQL URLs.
+        PostgresDriverMissingError: If psycopg2 is not installed for PostgreSQL
+            URLs (an ImportError).
     """
     if db_url.startswith(("postgresql://", "postgres://")):
         return _create_postgres_connection(db_url)
@@ -334,7 +335,7 @@ def _create_postgres_connection(db_url: str) -> PostgresConnection:
         A configured PostgresConnection.
 
     Raises:
-        ImportError: If psycopg2 is not installed.
+        PostgresDriverMissingError: If psycopg2 is not installed (an ImportError).
     """
     if not _HAS_PSYCOPG2:
         raise PostgresDriverMissingError

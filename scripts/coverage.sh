@@ -98,7 +98,9 @@ pytest "${PYTEST_ARGS[@]}" tests/ || {
 }
 
 # Branch coverage has its own floor, checked on its own: --cov-fail-under above
-# checks the combined number.
+# checks the combined number. The checker uses only the standard library, so
+# any python3 works; activate-venv.sh puts the venv's bin first on PATH, and CI
+# runs it under setup-python's interpreter, the one pytest ran under.
 python3 "$SCRIPT_DIR/check_branch_coverage.py" coverage.json || exit 1
 
 echo "✓ Coverage threshold met"

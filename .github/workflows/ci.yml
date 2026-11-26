@@ -104,7 +104,9 @@ jobs:
         env:
           # The branch guard protects local commits; a nightly or manual run checks out main.
           SKIP: no-commit-to-branch
-          # Only a PR diffs against a base; other runs check every file.
+          # Only a PR diffs against a base; other runs check every file. An empty
+          # BASE_REF, or one that isn't fetched, also makes precommit-changed.sh
+          # check every file (tests/test_scripts.py holds it to that).
           BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
           FULL: ${{ github.event_name != 'pull_request' }}
         run: ./scripts/precommit-changed.sh --show-diff-on-failure

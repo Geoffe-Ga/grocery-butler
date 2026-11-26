@@ -143,7 +143,7 @@ class PantryManager:
             The database row id of the inserted item.
 
         Raises:
-            RuntimeError: If the insert fails (e.g. duplicate ingredient).
+            MissingRowIdError: If the insert returns no row id (a RuntimeError).
         """
         conn = get_connection(self._db_path)
         try:
@@ -420,7 +420,7 @@ def _parse_claude_response(text: str) -> list[InventoryUpdate]:
 
     Raises:
         json.JSONDecodeError: If the response is not valid JSON.
-        ValueError: If the JSON structure is invalid.
+        NotAJsonArrayError: If the JSON is not an array (a ValueError).
     """
     data = json.loads(extract_json_text(text))
     if not isinstance(data, list):
