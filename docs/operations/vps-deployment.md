@@ -10,6 +10,10 @@ Postgres. Both listen only on the server's loopback address. OpenClaw calls
 the app directly. People reach the dashboard over the tailnet through
 `tailscale serve`.
 
+CI starts this same stack nightly with `./scripts/compose-smoke.sh` and
+checks it over HTTP, so a compose file or image that can't boot is found
+before you deploy it.
+
 ## What the server needs
 
 - Docker with the compose plugin (`docker compose version` prints a version).

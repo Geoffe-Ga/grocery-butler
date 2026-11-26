@@ -1236,6 +1236,22 @@ cannot reach; the app never installs anything at run time, so the installer
 goes. A finding in a package that is not in `requirements.txt` is usually one
 of these two.
 
+### Compose smoke test
+
+`./scripts/compose-smoke.sh` starts the real deployment (the app image and
+Postgres from `deploy/vps/compose.yaml`) under a throwaway project name,
+with secrets generated for the run, and checks it over HTTP: both
+containers healthy, the dashboard admitted by the network guard, a signed
+API call written to Postgres and read back, the same call refused without
+a token, the data still there after a restart, and both ports bound to
+`127.0.0.1`. Every other test runs the app in-process, so this is the only
+one that proves the image boots.
+
+Like the container scan it is not part of the CI gate. The
+`Compose smoke test` workflow runs it nightly, on demand, and on a pull
+request that changes the image, the compose file or the script. When it
+fails it prints the containers' logs.
+
 ### Browser security baseline
 
 `grocery_butler/web_security.py` protects the HTML dashboard, on top of the

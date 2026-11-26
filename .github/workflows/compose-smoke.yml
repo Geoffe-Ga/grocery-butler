@@ -1,0 +1,49 @@
+name: Compose smoke test
+
+# Starts the real deployment (./scripts/compose-smoke.sh): the app image and
+# Postgres from deploy/vps/compose.yaml, then checks it over HTTP.
+#
+# Every other test runs the app in-process. This is the only one that runs
+# the image, gunicorn, the entrypoint and Postgres together, and the only
+# automated check of the address the network guard has to trust (ADR 0021).
+#
+# Not part of the CI gate, for the reason the container scan is not
+# (issue #138): it runs nightly, by hand, and on a pull request that changes
+# the image, the compose file or the script.
+#
+# tests/test_compose_smoke.py holds the triggers and the job's timeout.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-entrypoint.sh
+      - requirements.txt
+      - deploy/vps/**
+      - scripts/compose-smoke.sh
+      - .github/workflows/compose-smoke.yml
+  # 16:11 UTC. Not :00 or :30, where GitHub delays and drops scheduled runs,
+  # and not the minute of the nightly CI run or the container scan.
+  schedule:
+    - cron: "11 16 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Compose smoke test
+    runs-on: ubuntu-latest
+    # No run measured yet: an image build, a Postgres pull and two boots.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ./scripts/compose-smoke.sh
+        run: ./scripts/compose-smoke.sh
