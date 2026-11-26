@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from contextlib import closing
+from contextlib import closing, suppress
 from typing import TYPE_CHECKING, Any
 
 from grocery_butler.db import get_connection
+from grocery_butler.db.adapter import IntegrityError
 from grocery_butler.household_items import HouseholdItemStore
 from grocery_butler.inventory_ledger import InventoryLedger, utc_now
 from grocery_butler.models import (
@@ -66,6 +67,12 @@ ALLOWED_MOVES: dict[NeedStatus, frozenset[NeedStatus]] = {
         {NeedStatus.RECEIVED, NeedStatus.APPROVED, NeedStatus.CANCELLED}
     ),
 }
+
+# The adapter exposes one error type without the Postgres driver and a
+# tuple of two with it; ``suppress`` wants them unpacked either way.
+_INTEGRITY_ERRORS: tuple[type[Exception], ...] = (
+    IntegrityError if isinstance(IntegrityError, tuple) else (IntegrityError,)
+)
 
 INVENTORY_SOURCE = "inventory"
 SYNC_ACTOR = "system"
@@ -276,16 +283,20 @@ class ReplenishmentNeeds:
         now = self._clock().isoformat()
         payload = json.dumps(detail or {}, sort_keys=True)
         existing = self._open_needs(canonical_id)
+        if not existing:
+            start = (
+                NeedStatus.APPROVED
+                if kind is NeedReasonKind.MANUAL_REQUEST
+                else NeedStatus.SUGGESTED
+            )
+            # If another writer opened the item's need between the lookup and
+            # this insert (issue #202), the one-open-need index refuses ours,
+            # and the lookup below finds theirs to join.
+            with suppress(*_INTEGRITY_ERRORS):
+                self._open_need(canonical_id, start, actor, now)
+            existing = self._open_needs(canonical_id)
+        need_id = existing[0].id
         with closing(get_connection(self._db_path)) as conn:
-            if existing:
-                need_id = existing[0].id
-            else:
-                start = (
-                    NeedStatus.APPROVED
-                    if kind is NeedReasonKind.MANUAL_REQUEST
-                    else NeedStatus.SUGGESTED
-                )
-                need_id = self._insert_need(conn, canonical_id, start, actor, now)
             self._upsert_reason(conn, need_id, kind, source_key, payload, now)
             conn.commit()
             return self._require(conn, need_id)
@@ -535,36 +546,35 @@ class ReplenishmentNeeds:
         dismissed_at = dt.datetime.fromisoformat(rows[-1]["updated_at"])
         return dismissed_at >= snapshot.observation.observed_at
 
-    def _insert_need(
-        self,
-        conn: DatabaseConnection,
-        item_id: int,
-        status: NeedStatus,
-        actor: str,
-        now: str,
-    ) -> int:
-        """Insert a need and its first event (not committed here).
+    def _open_need(
+        self, item_id: int, status: NeedStatus, actor: str, now: str
+    ) -> None:
+        """Insert a need and its first event, in a transaction of its own.
+
+        Runs on its own connection so that losing the one-open-need race
+        leaves nothing behind: on Postgres the failed insert aborts this
+        transaction, and the caller carries on with a fresh connection.
 
         Args:
-            conn: Open connection.
             item_id: The canonical item the need is for.
             status: The status the need starts in.
             actor: Who or what created it.
             now: The current time, ISO 8601.
 
-        Returns:
-            The new need's id.
+        Raises:
+            IntegrityError: If the item already has an open need.
         """
-        cursor = conn.execute(
-            "INSERT INTO replenishment_needs (item_id, status, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?)",
-            (item_id, status.value, now, now),
-        )
-        need_id = cursor.lastrowid
-        if need_id is None:  # pragma: no cover - both backends return the id
-            raise NeedNotFoundError(0)
-        self._record(conn, need_id, None, status, actor, "", now)
-        return need_id
+        with closing(get_connection(self._db_path)) as conn:
+            cursor = conn.execute(
+                "INSERT INTO replenishment_needs"
+                " (item_id, status, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (item_id, status.value, now, now),
+            )
+            need_id = cursor.lastrowid
+            if need_id is None:  # pragma: no cover - both backends return the id
+                raise NeedNotFoundError(0)
+            self._record(conn, need_id, None, status, actor, "", now)
+            conn.commit()
 
     def _upsert_reason(
         self,
