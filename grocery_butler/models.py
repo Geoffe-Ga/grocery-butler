@@ -131,6 +131,32 @@ class NeedReasonKind(StrEnum):
     MANUAL_REQUEST = "manual_request"
 
 
+class BatchStatus(StrEnum):
+    """Where an observation batch stands (ADR 0009)."""
+
+    OPEN = "open"
+    CONFIRMED = "confirmed"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+class ProposalDecision(StrEnum):
+    """What a household member decided about one proposal."""
+
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    CORRECTED = "corrected"
+    REJECTED = "rejected"
+
+
+class DecisionAction(StrEnum):
+    """What a member can do with a proposal when resolving a batch."""
+
+    CONFIRM = "confirm"
+    CORRECT = "correct"
+    REJECT = "reject"
+
+
 class Unit(StrEnum):
     """Standardized grocery measurement units."""
 
@@ -775,3 +801,130 @@ class NeedEvent(BaseModel):
     actor: str
     note: str
     created_at: dt.datetime
+
+
+# ---------------------------------------------------------------------------
+# Observation batches: proposals a member reviews (ADR 0009)
+# ---------------------------------------------------------------------------
+
+# Below this confidence a proposal is never confirmed in bulk; a member
+# has to look at it.
+REVIEW_CONFIDENCE = 0.8
+
+
+class NewProposal(BaseModel):
+    """One proposed observation in a batch being submitted.
+
+    ``name`` is what was seen or said, in the submitter's words. It is
+    matched to a household item by alias; it never creates one.
+    """
+
+    name: str = Field(min_length=1)
+    state: StockState
+    confidence: float = Field(ge=0, le=1)
+    notes: str = ""
+
+    @field_validator("state")
+    @classmethod
+    def _state_is_stated(cls, value: StockState) -> StockState:
+        """Refuse ``UNKNOWN``: a proposal has to say something.
+
+        Args:
+            value: The proposed state.
+
+        Returns:
+            The state unchanged.
+
+        Raises:
+            ValueError: If the state is ``UNKNOWN``.
+        """
+        if value is StockState.UNKNOWN:
+            msg = "A proposal states on_hand, low or out."
+            raise ValueError(msg)
+        return value
+
+
+class ProposalReview(BaseModel):
+    """A member's decision about one proposal.
+
+    ``item_id`` and ``state`` are used only with ``correct``, and at least
+    one of them must be given then.
+    """
+
+    proposal_id: int
+    action: DecisionAction
+    item_id: int | None = None
+    state: StockState | None = None
+
+    @model_validator(mode="after")
+    def _correction_says_what_changed(self) -> ProposalReview:
+        """Check that a correction corrects something, and nothing else does.
+
+        Returns:
+            The review unchanged.
+
+        Raises:
+            ValueError: If a correction changes nothing, states ``UNKNOWN``,
+                or another action carries correction fields.
+        """
+        has_changes = self.item_id is not None or self.state is not None
+        if self.action is DecisionAction.CORRECT and not has_changes:
+            msg = "A correction must give the right item_id, the right state, or both."
+            raise ValueError(msg)
+        if self.action is not DecisionAction.CORRECT and has_changes:
+            msg = "Only a correction can carry an item_id or a state."
+            raise ValueError(msg)
+        if self.state is StockState.UNKNOWN:
+            msg = "A correction states on_hand, low or out."
+            raise ValueError(msg)
+        return self
+
+
+class ObservationProposal(BaseModel):
+    """One proposed observation and what was decided about it.
+
+    ``item_id`` is the household item the name matched, or None when it
+    matched nothing. ``decided_item_id`` and ``decided_state`` are set only
+    by a correction; a plain confirmation leaves them None, because it
+    records the proposal as it stood. ``observation_id`` is the ledger row
+    written when the proposal was confirmed or corrected.
+    """
+
+    id: int
+    batch_id: int
+    candidate_name: str
+    item_id: int | None
+    state: StockState
+    confidence: float
+    notes: str
+    decision: ProposalDecision
+    decided_item_id: int | None
+    decided_state: StockState | None
+    observation_id: int | None
+
+    @property
+    def needs_review(self) -> bool:
+        """Whether a member has to look at this proposal individually.
+
+        Returns:
+            True when the name matched no item, or the confidence is below
+            ``REVIEW_CONFIDENCE``.
+        """
+        return self.item_id is None or self.confidence < REVIEW_CONFIDENCE
+
+
+class ObservationBatch(BaseModel):
+    """A set of proposed observations awaiting, or after, a member's review."""
+
+    id: int
+    status: BatchStatus
+    source: ObservationSource
+    submitted_by: str
+    evidence_ref: str | None
+    notes: str
+    observed_at: dt.datetime
+    created_at: dt.datetime
+    expires_at: dt.datetime
+    resolved_at: dt.datetime | None
+    resolved_by: str | None
+    proposals: list[ObservationProposal]

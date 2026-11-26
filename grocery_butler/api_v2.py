@@ -12,6 +12,7 @@ error body is ``{"error": {"code", "message", "details"}}``.
 
 from __future__ import annotations
 
+import datetime as dt
 import functools
 import json
 import logging
@@ -34,20 +35,46 @@ from grocery_butler.idempotency import (
     is_valid_key,
     request_hash,
 )
-from grocery_butler.inventory_ledger import InventoryLedger
+from grocery_butler.inventory_ledger import (
+    AlreadySupersededError,
+    InventoryLedger,
+    ObservationNotFoundError,
+)
 from grocery_butler.members import (
     InvalidMemberKeyError,
     MemberExistsError,
     MemberNotFoundError,
     MemberStore,
 )
-from grocery_butler.models import HouseholdItemUpdate, IngredientCategory
-from grocery_butler.replenishment import ReplenishmentNeeds
+from grocery_butler.models import (
+    BatchStatus,
+    HouseholdItemUpdate,
+    IngredientCategory,
+    NeedReasonKind,
+    NeedStatus,
+    NewObservation,
+    NewProposal,
+    ObservationSource,
+    ProposalReview,
+    StockState,
+)
+from grocery_butler.observation_batches import (
+    BatchNotFoundError,
+    BatchNotOpenError,
+    InvalidReviewError,
+    ObservationBatches,
+    ReviewsMissingError,
+)
+from grocery_butler.replenishment import (
+    InvalidNeedMoveError,
+    NeedNotFoundError,
+    ReplenishmentNeeds,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from grocery_butler.models import HouseholdItem
+    from grocery_butler.models import HouseholdItem, ObservationBatch
 
 LOG = logging.getLogger("api_v2")
 
@@ -79,6 +106,13 @@ _DOMAIN_ERRORS: dict[type[Exception], tuple[int, str]] = {
     MemberExistsError: (409, "member_exists"),
     MemberNotFoundError: (404, "member_not_found"),
     InvalidMemberKeyError: (400, "invalid_member_key"),
+    ObservationNotFoundError: (404, "observation_not_found"),
+    AlreadySupersededError: (409, "observation_superseded"),
+    BatchNotFoundError: (404, "batch_not_found"),
+    BatchNotOpenError: (409, "batch_not_open"),
+    InvalidReviewError: (409, "review_invalid"),
+    NeedNotFoundError: (404, "need_not_found"),
+    InvalidNeedMoveError: (409, "need_move_not_allowed"),
 }
 
 
@@ -749,3 +783,475 @@ def item_history(item_id: int) -> Response:
         },
         200,
     )
+
+
+# ---------------------------------------------------------------------------
+# Observations a member states directly
+# ---------------------------------------------------------------------------
+
+
+class _StatedObservation(BaseModel):
+    """Body of the direct observation capabilities.
+
+    Only for what a household member said themselves. What a model inferred
+    goes through an observation batch instead.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: StockState
+    quantity: float | None = None
+    unit: str | None = None
+    observed_at: dt.datetime | None = None
+    notes: str = ""
+
+
+class _Retraction(BaseModel):
+    """Body of ``POST /observations/<id>/retract``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    notes: str = ""
+
+
+def _stated(item_id: int, body: _StatedObservation) -> NewObservation:
+    """Turn a member's statement into a ledger observation.
+
+    Args:
+        item_id: The item the statement is about.
+        body: What the member said.
+
+    Returns:
+        A human observation attributed to the acting member.
+    """
+    return NewObservation(
+        item_id=item_id,
+        state=body.state,
+        source=ObservationSource.HUMAN,
+        actor=g.actor,
+        quantity=body.quantity,
+        unit=body.unit,
+        observed_at=body.observed_at,
+        notes=body.notes,
+    )
+
+
+@api_v2.post("/items/<int:item_id>/observations")
+@mutation()
+def record_observation(item_id: int) -> JsonResult:
+    """Record what a member says about an item, and sync its need.
+
+    Args:
+        item_id: The item's id.
+
+    Returns:
+        The stored observation, with 201.
+    """
+    body = _StatedObservation.model_validate(_body())
+    canonical = HouseholdItemStore(_db_path()).canonical(item_id)
+    stored = InventoryLedger(_db_path()).record(_stated(canonical.id, body))
+    ReplenishmentNeeds(_db_path()).sync_item(canonical.id)
+    return stored.model_dump(mode="json"), 201
+
+
+@api_v2.post("/observations/<int:observation_id>/correct")
+@mutation()
+def correct_observation(observation_id: int) -> JsonResult:
+    """Replace an observation with what should have been recorded.
+
+    Args:
+        observation_id: The observation that was wrong.
+
+    Returns:
+        The stored correction, with 201.
+    """
+    body = _StatedObservation.model_validate(_body())
+    ledger = InventoryLedger(_db_path())
+    wrong = ledger.get(observation_id)
+    if wrong is None:
+        raise ObservationNotFoundError(observation_id)
+    stored = ledger.correct(observation_id, _stated(wrong.item_id, body))
+    ReplenishmentNeeds(_db_path()).sync_item(stored.item_id)
+    return stored.model_dump(mode="json"), 201
+
+
+@api_v2.post("/observations/<int:observation_id>/retract")
+@mutation()
+def retract_observation(observation_id: int) -> JsonResult:
+    """Withdraw an observation without stating anything in its place.
+
+    Args:
+        observation_id: The observation to withdraw.
+
+    Returns:
+        The stored retraction, with 201.
+    """
+    body = _Retraction.model_validate(_body())
+    stored = InventoryLedger(_db_path()).retract(
+        observation_id, actor=g.actor, notes=body.notes
+    )
+    ReplenishmentNeeds(_db_path()).sync_item(stored.item_id)
+    return stored.model_dump(mode="json"), 201
+
+
+# ---------------------------------------------------------------------------
+# Observation batches: proposals a member reviews
+# ---------------------------------------------------------------------------
+
+
+class _NewBatch(BaseModel):
+    """Body of ``POST /observation-batches``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: ObservationSource
+    proposals: list[NewProposal]
+    evidence_ref: str | None = None
+    notes: str = ""
+    observed_at: dt.datetime | None = None
+
+
+class _BatchReview(BaseModel):
+    """Body of ``POST /observation-batches/<id>/resolve``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reviews: list[ProposalReview] = Field(default_factory=list)
+    accept_high_confidence: bool = False
+
+
+def _batch_payload(batch: ObservationBatch) -> dict[str, Any]:
+    """Shape a batch, flagging the proposals that need a member's eye.
+
+    Args:
+        batch: The observation batch.
+
+    Returns:
+        The batch's JSON object; each proposal carries ``needs_review``.
+    """
+    payload: dict[str, Any] = batch.model_dump(mode="json")
+    for shaped, proposal in zip(payload["proposals"], batch.proposals, strict=True):
+        shaped["needs_review"] = proposal.needs_review
+    return payload
+
+
+@api_v2.post("/observation-batches")
+@mutation()
+def submit_batch() -> JsonResult:
+    """Submit proposed observations for a member to review.
+
+    Nothing is written to the observation ledger.
+
+    Returns:
+        The open batch, with 201.
+
+    Raises:
+        ApiError: 400 ``batch_invalid`` when the batch is empty, too large
+            or from the ``system`` source.
+    """
+    body = _NewBatch.model_validate(_body())
+    try:
+        batch = ObservationBatches(_db_path()).submit(
+            body.source,
+            body.proposals,
+            submitted_by=g.actor,
+            evidence_ref=body.evidence_ref,
+            notes=body.notes,
+            observed_at=body.observed_at,
+        )
+    except ValueError as err:
+        raise ApiError(400, "batch_invalid", str(err)) from err
+    return _batch_payload(batch), 201
+
+
+@api_v2.get("/observation-batches")
+def list_batches() -> Response:
+    """List observation batches, oldest first.
+
+    Query: ``status`` filters by ``open``, ``confirmed``, ``rejected`` or
+    ``expired``.
+
+    Returns:
+        ``{"batches": [...]}``.
+
+    Raises:
+        ApiError: 400 ``validation_failed`` for an unknown status.
+    """
+    raw = request.args.get("status")
+    try:
+        status = BatchStatus(raw) if raw else None
+    except ValueError as err:
+        raise ApiError(
+            400, "validation_failed", "status must be a batch status."
+        ) from err
+    batches = ObservationBatches(_db_path()).list_batches(status)
+    return _json({"batches": [_batch_payload(batch) for batch in batches]}, 200)
+
+
+@api_v2.get("/observation-batches/<int:batch_id>")
+def get_batch(batch_id: int) -> Response:
+    """Return one batch with its proposals.
+
+    Args:
+        batch_id: The batch's id.
+
+    Returns:
+        The batch's JSON object.
+    """
+    batch = ObservationBatches(_db_path()).get(batch_id)
+    if batch is None:
+        raise BatchNotFoundError(batch_id)
+    return _json(_batch_payload(batch), 200)
+
+
+@api_v2.post("/observation-batches/<int:batch_id>/resolve")
+@mutation()
+def resolve_batch(batch_id: int) -> JsonResult:
+    """Apply a member's review of a batch, all at once.
+
+    Args:
+        batch_id: The batch's id.
+
+    Returns:
+        The reviewed batch.
+
+    Raises:
+        ApiError: 409 ``reviews_missing`` when some proposals have no
+            decision; ``details.proposal_ids`` lists them.
+    """
+    body = _BatchReview.model_validate(_body())
+    try:
+        batch = ObservationBatches(_db_path()).resolve(
+            batch_id,
+            body.reviews,
+            actor=g.actor,
+            accept_high_confidence=body.accept_high_confidence,
+        )
+    except ReviewsMissingError as err:
+        raise ApiError(
+            409, "reviews_missing", str(err), {"proposal_ids": err.proposal_ids}
+        ) from err
+    return _batch_payload(batch), 200
+
+
+@api_v2.post("/observation-batches/<int:batch_id>/reject")
+@mutation()
+def reject_batch(batch_id: int) -> JsonResult:
+    """Throw a whole batch away. Nothing is written to the ledger.
+
+    Args:
+        batch_id: The batch's id.
+
+    Returns:
+        The rejected batch.
+    """
+    batch = ObservationBatches(_db_path()).reject(batch_id, actor=g.actor)
+    return _batch_payload(batch), 200
+
+
+# ---------------------------------------------------------------------------
+# Replenishment needs
+# ---------------------------------------------------------------------------
+
+
+class _NeedRequest(BaseModel):
+    """Body of ``POST /needs``: a member asking for an item."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: int
+    note: str = ""
+
+
+class _NeedMove(BaseModel):
+    """Body of the need decisions that take only a note."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note: str = ""
+
+
+class _NeedDeferral(BaseModel):
+    """Body of ``POST /needs/<id>/defer``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    until: dt.datetime | None = None
+    note: str = ""
+
+
+def _need_payload(need_id: int) -> dict[str, Any]:
+    """Shape a need with the history of its status changes.
+
+    Args:
+        need_id: The need's id.
+
+    Returns:
+        The need's JSON object, with ``history``.
+
+    Raises:
+        NeedNotFoundError: If the need does not exist.
+    """
+    needs = ReplenishmentNeeds(_db_path())
+    need = needs.get(need_id)
+    if need is None:
+        raise NeedNotFoundError(need_id)
+    payload: dict[str, Any] = need.model_dump(mode="json")
+    payload["history"] = [
+        event.model_dump(mode="json") for event in needs.history(need_id)
+    ]
+    return payload
+
+
+def _move_need(need_id: int, to_status: NeedStatus) -> JsonResult:
+    """Apply a member's decision that takes only a note.
+
+    Args:
+        need_id: The need's id.
+        to_status: The status the decision moves it to.
+
+    Returns:
+        The need after the move.
+    """
+    body = _NeedMove.model_validate(request.get_json(silent=True) or {})
+    ReplenishmentNeeds(_db_path()).transition(
+        need_id, to_status, actor=g.actor, note=body.note
+    )
+    return _need_payload(need_id), 200
+
+
+@api_v2.get("/needs")
+def list_needs() -> Response:
+    """List replenishment needs, oldest first.
+
+    Query: ``status`` may be repeated to pick statuses. Defaults to every
+    open status.
+
+    Returns:
+        ``{"needs": [...]}``.
+
+    Raises:
+        ApiError: 400 ``validation_failed`` for an unknown status.
+    """
+    raw = request.args.getlist("status")
+    try:
+        statuses = {NeedStatus(value) for value in raw} or None
+    except ValueError as err:
+        raise ApiError(
+            400, "validation_failed", "status must be a replenishment need status."
+        ) from err
+    needs = ReplenishmentNeeds(_db_path()).list_needs(statuses)
+    return _json({"needs": [need.model_dump(mode="json") for need in needs]}, 200)
+
+
+@api_v2.post("/needs")
+@mutation()
+def request_need() -> JsonResult:
+    """Ask for an item on a member's behalf.
+
+    The request joins the item's open need, or starts one that is already
+    approved (ADR 0008).
+
+    Returns:
+        The need, with 201.
+    """
+    body = _NeedRequest.model_validate(_body())
+    need = ReplenishmentNeeds(_db_path()).add_reason(
+        body.item_id,
+        NeedReasonKind.MANUAL_REQUEST,
+        source_key=f"member:{g.actor}",
+        actor=g.actor,
+        detail={"note": body.note},
+    )
+    return _need_payload(need.id), 201
+
+
+@api_v2.get("/needs/<int:need_id>")
+def get_need(need_id: int) -> Response:
+    """Return one need with its reasons and history.
+
+    Args:
+        need_id: The need's id.
+
+    Returns:
+        The need's JSON object.
+    """
+    return _json(_need_payload(need_id), 200)
+
+
+@api_v2.post("/needs/<int:need_id>/approve")
+@mutation()
+def approve_need(need_id: int) -> JsonResult:
+    """Approve a need: the household wants this bought.
+
+    Args:
+        need_id: The need's id.
+
+    Returns:
+        The need after the move.
+    """
+    return _move_need(need_id, NeedStatus.APPROVED)
+
+
+@api_v2.post("/needs/<int:need_id>/dismiss")
+@mutation()
+def dismiss_need(need_id: int) -> JsonResult:
+    """Dismiss a need: don't suggest this again on the same evidence.
+
+    Args:
+        need_id: The need's id.
+
+    Returns:
+        The need after the move.
+    """
+    return _move_need(need_id, NeedStatus.DISMISSED)
+
+
+@api_v2.post("/needs/<int:need_id>/cancel")
+@mutation()
+def cancel_need(need_id: int) -> JsonResult:
+    """Cancel a need: it is no longer wanted.
+
+    Args:
+        need_id: The need's id.
+
+    Returns:
+        The need after the move.
+    """
+    return _move_need(need_id, NeedStatus.CANCELLED)
+
+
+@api_v2.post("/needs/<int:need_id>/reopen")
+@mutation()
+def reopen_need(need_id: int) -> JsonResult:
+    """End a deferral early and put the need back up for a decision.
+
+    Args:
+        need_id: The need's id.
+
+    Returns:
+        The need after the move.
+    """
+    return _move_need(need_id, NeedStatus.SUGGESTED)
+
+
+@api_v2.post("/needs/<int:need_id>/defer")
+@mutation()
+def defer_need(need_id: int) -> JsonResult:
+    """Snooze a need, until a date or until a member reopens it.
+
+    Args:
+        need_id: The need's id.
+
+    Returns:
+        The need after the move.
+    """
+    body = _NeedDeferral.model_validate(request.get_json(silent=True) or {})
+    ReplenishmentNeeds(_db_path()).transition(
+        need_id,
+        NeedStatus.DEFERRED,
+        actor=g.actor,
+        note=body.note,
+        deferred_until=body.until,
+    )
+    return _need_payload(need_id), 200
