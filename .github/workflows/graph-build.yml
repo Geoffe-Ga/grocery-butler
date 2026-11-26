@@ -1,0 +1,155 @@
+name: Graph build
+
+# Keeps a <=24h-fresh, code-only knowledge graph of `main` that any session can
+# fetch in seconds (./scripts/graph/restore.sh). It is published as assets on a
+# single rolling GitHub Release tagged `knowledge-graph`. See
+# scripts/graph/README.md.
+#
+#   push to main (code paths)  -> incremental update.sh off the published graph
+#   nightly / manual dispatch  -> full build.sh with GRAPHIFY_FORCE=1, so the
+#                                 shrink guard accepts deleted files
+#
+# Tree-sitter AST extraction only: no LLM calls and no API keys. The only token
+# is the built-in GITHUB_TOKEN, used by the release upsert. Ported from the
+# Reconcile repository, code graph only.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "grocery_butler/**"
+      - "tests/**"
+      - "scripts/**"
+      - ".graphifyignore"
+      - ".github/workflows/graph-build.yml"
+  schedule:
+    - cron: "40 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Serialize runs so overlapping pushes never race the asset upload.
+concurrency:
+  group: graph-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and publish code graph
+    runs-on: ubuntu-latest
+    timeout-minutes: 10  # no run measured here yet; Reconcile's slowest was 1.0 min
+    env:
+      GRAPH_TAG: knowledge-graph
+      OUT_DIR: graphify-out
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Resolve pinned graphifyy version
+        id: tool
+        run: |
+          version="$(sed -n 's/^graphifyy==//p' scripts/graph/requirements.txt)"
+          if [[ -z "$version" ]]; then
+            echo "::error::could not read the graphifyy pin from scripts/graph/requirements.txt"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache graphify toolchain
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: graphifyy-${{ runner.os }}-${{ steps.tool.outputs.version }}
+
+      - name: Install graphify toolchain
+        run: pip install -r scripts/graph/requirements.txt
+
+      - name: Restore prior published graph
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$OUT_DIR"
+          if gh release download "$GRAPH_TAG" --pattern graph.json --dir "$OUT_DIR" --clobber; then
+            echo "restored the prior graph for an incremental refresh"
+          else
+            echo "no published graph yet; falling back to a full build"
+          fi
+
+      - name: Refresh graph (incremental push)
+        if: github.event_name == 'push'
+        run: |
+          if [[ ! -f "$OUT_DIR/graph.json" ]]; then
+            ./scripts/graph/build.sh
+          elif ! ./scripts/graph/update.sh; then
+            echo "::warning::incremental update failed; forcing a full rebuild"
+            GRAPHIFY_FORCE=1 ./scripts/graph/build.sh
+          fi
+
+      - name: Build graph (full, nightly or manual)
+        if: github.event_name != 'push'
+        env:
+          GRAPHIFY_FORCE: "1"
+        run: ./scripts/graph/build.sh
+
+      - name: Write graph-meta.json
+        env:
+          GRAPHIFYY_VERSION: ${{ steps.tool.outputs.version }}
+        run: |
+          if [[ ! -f "$OUT_DIR/graph.json" ]]; then
+            echo "::error::$OUT_DIR/graph.json missing after build; nothing to publish"
+            exit 1
+          fi
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" SHA="$(git rev-parse --short HEAD)" \
+            python3 - "$OUT_DIR/graph.json" "$OUT_DIR/graph-meta.json" <<'PY'
+          import json
+          import os
+          import sys
+
+          graph_path, meta_path = sys.argv[1], sys.argv[2]
+          with open(graph_path, encoding="utf-8") as handle:
+              graph = json.load(handle)
+          meta = {
+              "built_at": os.environ["BUILT_AT"],
+              "sha": os.environ["SHA"],
+              "nodes": len(graph.get("nodes", [])),
+              "edges": len(graph.get("links") or graph.get("edges") or []),
+              "graphifyy": os.environ["GRAPHIFYY_VERSION"],
+              "kind": "code-only",
+          }
+          with open(meta_path, "w", encoding="utf-8") as handle:
+              json.dump(meta, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          print(f"graph-meta: {meta['nodes']:,} nodes / {meta['edges']:,} edges @ {meta['sha']}")
+          PY
+
+      - name: Publish rolling knowledge-graph release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=("$OUT_DIR/graph.json" "$OUT_DIR/graph-meta.json")
+          if [[ -f "$OUT_DIR/GRAPH_REPORT.md" ]]; then
+            assets+=("$OUT_DIR/GRAPH_REPORT.md")
+          fi
+          if ! gh release view "$GRAPH_TAG" >/dev/null 2>&1; then
+            gh release create "$GRAPH_TAG" \
+              --title "Knowledge graph (rolling)" \
+              --notes "Rolling code-only knowledge graph of main, re-uploaded on every graph-build run. Not a version." \
+              --latest=false
+          fi
+          upload() { gh release upload "$GRAPH_TAG" "${assets[@]}" --clobber; }
+          if ! upload; then
+            echo "upload failed; retrying once in 10s"
+            sleep 10
+            if ! upload; then
+              echo "::error::release upload failed twice; the graph was NOT published"
+              exit 1
+            fi
+          fi
+          echo "published ${#assets[@]} asset(s) to release $GRAPH_TAG"
