@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import os
 import secrets
 from typing import TYPE_CHECKING, Any
@@ -1240,6 +1241,323 @@ class TestPlans:
         response = api.call("GET", "/plans/7")
 
         assert _error(response)["code"] == "plan_not_found"
+
+
+class TestHandoffs:
+    """Draft, approve and execute a handoff to an outside service (ADR 0016)."""
+
+    @pytest.fixture(autouse=True)
+    def _instacart_stub(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Turn the Instacart adapter on, on its stub transport."""
+        monkeypatch.setenv("INSTACART_ENABLED", "true")
+        monkeypatch.delenv("INSTACART_ENV", raising=False)
+        monkeypatch.delenv("INSTACART_API_KEY", raising=False)
+
+    def _plan(self, api: Api, *names: str) -> int:
+        """Request each item, build the plan and return its version."""
+        for name in names or ("oat milk",):
+            api.call("POST", "/needs", {"item_id": _item(api, name)})
+        version: int = api.call("POST", "/plans", {}).get_json()["version"]
+        return version
+
+    def _approved(self, api: Api, version: int) -> int:
+        """Draft and approve a handoff; return the approval id."""
+        draft = api.call(
+            "POST", f"/plans/{version}/handoffs", {"adapter": "instacart"}
+        ).get_json()
+        approved = api.call(
+            "POST",
+            f"/handoffs/{draft['id']}/approve",
+            {"payload_hash": draft["payload_hash"]},
+        )
+        assert approved.status_code == 200
+        approval_id: int = draft["id"]
+        return approval_id
+
+    def test_draft_shows_what_will_be_approved(self, api: Api) -> None:
+        """The draft carries the content, its hash and an expiry, and sends nothing."""
+        version = self._plan(api, "oat milk", "rye bread")
+
+        response = api.call(
+            "POST", f"/plans/{version}/handoffs", {"adapter": "instacart"}
+        )
+        draft = response.get_json()
+
+        assert response.status_code == 201
+        assert draft["status"] == "draft"
+        assert draft["plan_version"] == version
+        assert draft["payload"]["adapter"] == "instacart"
+        assert [line["display_name"] for line in draft["payload"]["lines"]] == [
+            "Oat Milk",
+            "Rye Bread",
+        ]
+        assert len(draft["payload_hash"]) == 64
+        assert draft["approved_by"] is None
+        assert api.call("GET", f"/plans/{version}/handoffs").get_json() == {
+            "attempts": []
+        }
+        fetched = api.call("GET", f"/handoffs/{draft['id']}").get_json()
+        assert fetched == draft
+
+    def test_the_whole_flow_creates_one_link(self, api: Api) -> None:
+        """Draft, approve, execute: one attempt with a link, and no order."""
+        version = self._plan(api)
+        approval_id = self._approved(api, version)
+
+        response = api.call("POST", f"/handoffs/{approval_id}/execute", key="exec-0001")
+        attempt = response.get_json()
+
+        assert response.status_code == 201
+        assert attempt["status"] == "created"
+        assert attempt["adapter"] == "instacart"
+        assert attempt["approval_id"] == approval_id
+        assert attempt["plan_version"] == version
+        assert attempt["external_url"].startswith(
+            "https://example.invalid/instacart-stub/"
+        )
+        assert attempt["link_expires_at"] is not None
+        assert attempt["error_code"] is None
+        assert attempt["created_by"].startswith("geoff@")
+        assert "idempotency_key" not in attempt
+        needs = api.call("GET", "/needs").get_json()["needs"]
+        assert {need["status"] for need in needs} <= {"planned", "approved"}
+
+    def test_repeating_execute_replays_and_sends_nothing(self, api: Api) -> None:
+        """The same key returns the same attempt."""
+        approval_id = self._approved(api, self._plan(api))
+
+        first = api.call("POST", f"/handoffs/{approval_id}/execute", key="exec-0001")
+        again = api.call("POST", f"/handoffs/{approval_id}/execute", key="exec-0001")
+
+        assert again.get_json() == first.get_json()
+        assert again.headers["Idempotency-Replayed"] == "true"
+        attempts = api.call(
+            "GET", f"/plans/{first.get_json()['plan_version']}/handoffs"
+        ).get_json()["attempts"]
+        assert len(attempts) == 1
+
+    def test_a_second_key_can_not_reuse_the_approval(self, api: Api) -> None:
+        """An approval is spent by its first execution."""
+        approval_id = self._approved(api, self._plan(api))
+        api.call("POST", f"/handoffs/{approval_id}/execute", key="exec-0001")
+
+        response = api.call("POST", f"/handoffs/{approval_id}/execute", key="exec-0002")
+
+        assert (response.status_code, _error(response)["code"]) == (
+            409,
+            "approval_not_actionable",
+        )
+
+    def test_the_attempt_can_be_read_back(self, api: Api) -> None:
+        """An attempt is fetched by id; an unknown id is a 404 with a code."""
+        approval_id = self._approved(api, self._plan(api))
+        created = api.call(
+            "POST", f"/handoffs/{approval_id}/execute", key="exec-0001"
+        ).get_json()
+
+        fetched = api.call("GET", f"/handoffs/attempts/{created['id']}")
+        missing = api.call("GET", "/handoffs/attempts/99999")
+
+        assert fetched.get_json() == created
+        assert (missing.status_code, _error(missing)["code"]) == (
+            404,
+            "handoff_attempt_not_found",
+        )
+
+    def test_execute_needs_an_approval_first(self, api: Api) -> None:
+        """A draft nobody approved can't be executed."""
+        version = self._plan(api)
+        draft = api.call(
+            "POST", f"/plans/{version}/handoffs", {"adapter": "instacart"}
+        ).get_json()
+
+        response = api.call("POST", f"/handoffs/{draft['id']}/execute")
+
+        assert (response.status_code, _error(response)["code"]) == (
+            409,
+            "approval_not_actionable",
+        )
+
+    def test_the_wrong_hash_is_refused(self, api: Api) -> None:
+        """Approval is bound to what was shown."""
+        version = self._plan(api)
+        draft = api.call(
+            "POST", f"/plans/{version}/handoffs", {"adapter": "instacart"}
+        ).get_json()
+
+        response = api.call(
+            "POST", f"/handoffs/{draft['id']}/approve", {"payload_hash": "0" * 64}
+        )
+
+        assert (response.status_code, _error(response)["code"]) == (
+            409,
+            "approval_hash_mismatch",
+        )
+
+    def test_a_changed_plan_invalidates_the_approval(self, api: Api) -> None:
+        """A new need after approval makes the approval stale; nothing is sent."""
+        version = self._plan(api)
+        approval_id = self._approved(api, version)
+        api.call("POST", "/needs", {"item_id": _item(api, "rye bread")})
+
+        response = api.call("POST", f"/handoffs/{approval_id}/execute")
+
+        assert (response.status_code, _error(response)["code"]) == (
+            409,
+            "approval_stale",
+        )
+        assert api.call("GET", f"/plans/{version}/handoffs").get_json() == {
+            "attempts": []
+        }
+
+    def test_a_stale_plan_can_not_be_drafted(self, api: Api) -> None:
+        """Once the needs move on, the old plan isn't offered for handoff."""
+        version = self._plan(api)
+        api.call("POST", "/needs", {"item_id": _item(api, "rye bread")})
+
+        response = api.call(
+            "POST", f"/plans/{version}/handoffs", {"adapter": "instacart"}
+        )
+
+        assert (response.status_code, _error(response)["code"]) == (
+            409,
+            "plan_not_current",
+        )
+
+    def test_reject_closes_the_handoff(self, api: Api) -> None:
+        """A rejected handoff can't be executed."""
+        approval_id = self._approved(api, self._plan(api))
+
+        rejected = api.call(
+            "POST", f"/handoffs/{approval_id}/reject", {"note": "not today"}
+        )
+        executed = api.call("POST", f"/handoffs/{approval_id}/execute")
+
+        assert rejected.status_code == 200
+        assert rejected.get_json()["status"] == "rejected"
+        assert _error(executed)["code"] == "approval_not_actionable"
+
+    @pytest.mark.parametrize(
+        ("adapter", "status", "code"),
+        [
+            ("export", 400, "handoff_not_available"),
+            ("nonesuch", 404, "adapter_not_found"),
+        ],
+    )
+    def test_adapters_that_can_not_be_drafted_for(
+        self, api: Api, adapter: str, status: int, code: str
+    ) -> None:
+        """The export needs no approval; an unknown adapter doesn't exist."""
+        version = self._plan(api)
+
+        response = api.call("POST", f"/plans/{version}/handoffs", {"adapter": adapter})
+
+        assert (response.status_code, _error(response)["code"]) == (status, code)
+
+    def test_instacart_disabled_is_not_found(
+        self, api: Api, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deployment that hasn't turned Instacart on can't draft for it."""
+        version = self._plan(api)
+        monkeypatch.delenv("INSTACART_ENABLED")
+
+        response = api.call(
+            "POST", f"/plans/{version}/handoffs", {"adapter": "instacart"}
+        )
+
+        assert (response.status_code, _error(response)["code"]) == (
+            404,
+            "adapter_not_found",
+        )
+
+    @pytest.mark.parametrize(
+        ("path", "body", "code"),
+        [
+            ("/plans/999/handoffs", {"adapter": "instacart"}, "plan_not_found"),
+            ("/handoffs/999/approve", {"payload_hash": "0" * 64}, "approval_not_found"),
+            ("/handoffs/999/execute", None, "approval_not_found"),
+            ("/handoffs/999/reject", None, "approval_not_found"),
+        ],
+    )
+    def test_unknown_ids_are_404s(
+        self, api: Api, path: str, body: dict[str, Any] | None, code: str
+    ) -> None:
+        """Each step names what it couldn't find."""
+        response = api.call("POST", path, body)
+
+        assert (response.status_code, _error(response)["code"]) == (404, code)
+        assert api.call("GET", "/handoffs/999").status_code == 404
+
+    @pytest.mark.parametrize(
+        "body", [{}, {"adapter": ""}, {"adapter": "instacart", "extra": 1}]
+    )
+    def test_a_bad_draft_request_is_refused(
+        self, api: Api, body: dict[str, Any]
+    ) -> None:
+        """The adapter must be named, and nothing else sent."""
+        version = self._plan(api)
+
+        response = api.call("POST", f"/plans/{version}/handoffs", body)
+
+        assert (response.status_code, _error(response)["code"]) == (
+            400,
+            "validation_failed",
+        )
+
+    def test_a_missing_key_fails_closed_and_points_to_the_export(
+        self, api: Api, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A real environment without a key: 502, an actionable message, no link."""
+        version = self._plan(api)
+        approval_id = self._approved(api, version)
+        monkeypatch.setenv("INSTACART_ENV", "development")
+
+        response = api.call("POST", f"/handoffs/{approval_id}/execute", key="exec-0001")
+        error = _error(response)
+
+        assert response.status_code == 502
+        assert error["code"] == "handoff_failed"
+        assert "list export" in error["message"]
+        assert error["details"]["attempt"]["status"] == "failed"
+        assert error["details"]["attempt"]["error_code"] == "not_configured"
+        assert error["details"]["attempt"]["retryable"] is False
+        assert error["details"]["attempt"]["external_url"] is None
+
+    def test_the_key_never_reaches_a_response_or_a_log(
+        self,
+        api: Api,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """With a real key configured and the provider down, the key stays put.
+
+        The suite-wide guard stops the connection, so this also shows a
+        failed call is reported as a failed handoff and never as a link.
+        """
+        key = secrets.token_hex(24)
+        version = self._plan(api)
+        approval_id = self._approved(api, version)
+        monkeypatch.setenv("INSTACART_ENV", "development")
+        monkeypatch.setenv("INSTACART_API_KEY", key)
+        caplog.set_level(logging.DEBUG)
+
+        response = api.call("POST", f"/handoffs/{approval_id}/execute", key="exec-0001")
+        listed = api.call("GET", f"/plans/{version}/handoffs")
+        adapters = api.call("GET", "/fulfillment/adapters")
+
+        assert response.status_code == 502
+        assert _error(response)["details"]["attempt"]["status"] == "failed"
+        for body in (response, listed, adapters):
+            assert key not in body.get_data(as_text=True)
+        assert key not in caplog.text
+
+    def test_handoffs_need_the_bearer(self, app: Flask) -> None:
+        """Nothing here is reachable without the token."""
+        client = app.test_client()
+
+        assert client.post("/api/v2/plans/1/handoffs").status_code == 401
+        assert client.post("/api/v2/handoffs/1/execute").status_code == 401
+        assert client.get("/api/v2/handoffs/attempts/1").status_code == 401
 
 
 class TestOperationsMetrics:

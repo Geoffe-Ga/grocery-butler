@@ -12,14 +12,27 @@ from typing import TYPE_CHECKING
 
 from grocery_butler.fulfillment.export import ExportAdapter
 from grocery_butler.fulfillment.instacart.adapter import InstacartAdapter
-from grocery_butler.fulfillment.instacart.transport import StubTransport
+from grocery_butler.fulfillment.instacart.http_transport import (
+    DEVELOPMENT_HOST,
+    PRODUCTION_HOST,
+    HttpTransport,
+)
+from grocery_butler.fulfillment.instacart.transport import (
+    NotConfiguredTransport,
+    StubTransport,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from grocery_butler.fulfillment.base import FulfillmentAdapter
+    from grocery_butler.fulfillment.instacart.transport import Transport
 
 INSTACART_ENABLED_ENV = "INSTACART_ENABLED"
+INSTACART_ENV_VARIABLE = "INSTACART_ENV"
+INSTACART_KEY_VARIABLE = "INSTACART_API_KEY"
+STUB = "stub"
+_HOSTS = {"development": DEVELOPMENT_HOST, "production": PRODUCTION_HOST}
 _TRUTHY = frozenset({"1", "true", "yes"})
 
 
@@ -107,13 +120,41 @@ def instacart_enabled(environ: Mapping[str, str]) -> bool:
     return environ.get(INSTACART_ENABLED_ENV, "").strip().lower() in _TRUTHY
 
 
+def instacart_transport(environ: Mapping[str, str]) -> Transport:
+    """Choose how the Instacart adapter reaches Instacart.
+
+    ``INSTACART_ENV`` decides:
+
+    - unset or ``stub``: a fake link, nothing contacted.
+    - ``development`` or ``production``: the real host, with the key from
+      ``INSTACART_API_KEY``.
+
+    Anything else, or a real environment without a key, gives a transport
+    that refuses every call with ``not_configured``. It never falls back
+    to a different host.
+
+    Args:
+        environ: The environment to read.
+
+    Returns:
+        The transport.
+    """
+    chosen = environ.get(INSTACART_ENV_VARIABLE, STUB).strip().lower() or STUB
+    if chosen == STUB:
+        return StubTransport()
+    host = _HOSTS.get(chosen)
+    key = environ.get(INSTACART_KEY_VARIABLE, "")
+    if host is None or not key:
+        return NotConfiguredTransport()
+    return HttpTransport(key, host)
+
+
 def default_registry(environ: Mapping[str, str] | None = None) -> AdapterRegistry:
     """Build the registry of adapters this deployment offers.
 
     The universal list export is always there. The Instacart adapter
-    (ADR 0014) is off unless ``INSTACART_ENABLED`` is set, and today it
-    runs on a stub transport that returns a fake link and reaches no
-    network.
+    (ADR 0014) is off unless ``INSTACART_ENABLED`` is set; how it reaches
+    Instacart is decided by :func:`instacart_transport`.
 
     Args:
         environ: The environment to read. Defaults to the process's own.
@@ -121,8 +162,9 @@ def default_registry(environ: Mapping[str, str] | None = None) -> AdapterRegistr
     Returns:
         The registry.
     """
+    env = os.environ if environ is None else environ
     registry = AdapterRegistry()
     registry.register(ExportAdapter())
-    if instacart_enabled(os.environ if environ is None else environ):
-        registry.register(InstacartAdapter(StubTransport()))
+    if instacart_enabled(env):
+        registry.register(InstacartAdapter(instacart_transport(env)))
     return registry

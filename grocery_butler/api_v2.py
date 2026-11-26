@@ -22,6 +22,13 @@ from flask import Blueprint, Response, current_app, g, request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from werkzeug.exceptions import HTTPException
 
+from grocery_butler.approvals import (
+    EnvelopeNotActionableError,
+    EnvelopeNotFoundError,
+    EnvelopeTamperedError,
+    PayloadMismatchError,
+    StaleEnvelopeError,
+)
 from grocery_butler.auth_middleware import require_bearer
 from grocery_butler.constraints import (
     COMMON_ALLERGENS,
@@ -30,7 +37,15 @@ from grocery_butler.constraints import (
 )
 from grocery_butler.data_lifecycle import HouseholdData
 from grocery_butler.fulfillment.base import Capability
-from grocery_butler.fulfillment.registry import default_registry
+from grocery_butler.fulfillment.handoffs import (
+    AttemptNotFoundError,
+    AttemptStatus,
+    HandoffNotAvailableError,
+    Handoffs,
+    KeyBelongsToAnotherHandoffError,
+    PlanNotCurrentError,
+)
+from grocery_butler.fulfillment.registry import AdapterNotFoundError, default_registry
 from grocery_butler.fulfillment.runner import create_handoff
 from grocery_butler.household_items import (
     AliasConflictError,
@@ -92,6 +107,8 @@ from grocery_butler.shopping_plans import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from grocery_butler.approvals import ApprovalEnvelope
+    from grocery_butler.fulfillment.handoffs import HandoffAttempt
     from grocery_butler.models import HouseholdItem, ObservationBatch, ShoppingPlan
 
 LOG = logging.getLogger("api_v2")
@@ -134,6 +151,16 @@ _DOMAIN_ERRORS: dict[type[Exception], tuple[int, str]] = {
     PlanNotFoundError: (404, "plan_not_found"),
     RecipeNotFoundError: (404, "recipe_not_found"),
     ConstraintNotFoundError: (404, "constraint_not_found"),
+    AdapterNotFoundError: (404, "adapter_not_found"),
+    EnvelopeNotFoundError: (404, "approval_not_found"),
+    EnvelopeNotActionableError: (409, "approval_not_actionable"),
+    PayloadMismatchError: (409, "approval_hash_mismatch"),
+    StaleEnvelopeError: (409, "approval_stale"),
+    EnvelopeTamperedError: (409, "approval_tampered"),
+    HandoffNotAvailableError: (400, "handoff_not_available"),
+    PlanNotCurrentError: (409, "plan_not_current"),
+    AttemptNotFoundError: (404, "handoff_attempt_not_found"),
+    KeyBelongsToAnotherHandoffError: (409, "idempotency_key_reused"),
 }
 
 
@@ -1402,6 +1429,267 @@ def export_household() -> Response:
         and every row of every household table.
     """
     return _json(HouseholdData(_db_path()).export(), 200)
+
+
+# ---------------------------------------------------------------------------
+# Handoffs: draft, approve, execute (ADR 0016)
+# ---------------------------------------------------------------------------
+
+
+class _HandoffRequest(BaseModel):
+    """Which adapter to hand a plan to."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adapter: str = Field(min_length=1, max_length=64)
+
+
+class _HandoffApproval(BaseModel):
+    """The hash of the content the member was shown."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    payload_hash: str = Field(min_length=1, max_length=128)
+
+
+class _HandoffRejection(BaseModel):
+    """Why a handoff was turned down, if the member said."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note: str = Field(default="", max_length=500)
+
+
+def _handoffs() -> Handoffs:
+    """Build the handoff service for this request.
+
+    Returns:
+        The service, over this deployment's adapters.
+    """
+    return Handoffs(_db_path(), default_registry().get)
+
+
+def _approval_payload(envelope: ApprovalEnvelope) -> dict[str, Any]:
+    """Serialize a handoff's approval envelope.
+
+    Args:
+        envelope: The envelope.
+
+    Returns:
+        What a member is asked to approve, the hash to echo, and where the
+        approval stands. The internal binding is left out.
+    """
+    return {
+        "id": envelope.id,
+        "status": envelope.status.value,
+        "plan_version": envelope.subject_version,
+        "payload": envelope.payload,
+        "payload_hash": envelope.payload_hash,
+        "created_by": envelope.created_by,
+        "created_at": envelope.created_at.isoformat(),
+        "expires_at": envelope.expires_at.isoformat(),
+        "approved_by": envelope.approved_by,
+        "approved_at": (
+            envelope.approved_at.isoformat() if envelope.approved_at else None
+        ),
+    }
+
+
+def _attempt_payload(attempt: HandoffAttempt) -> dict[str, Any]:
+    """Serialize a handoff attempt.
+
+    Args:
+        attempt: The attempt.
+
+    Returns:
+        The attempt as JSON-ready data. The idempotency key is left out.
+    """
+    return {
+        "id": attempt.id,
+        "approval_id": attempt.envelope_id,
+        "adapter": attempt.adapter,
+        "plan_version": attempt.plan_version,
+        "plan_content_hash": attempt.plan_content_hash,
+        "status": attempt.status.value,
+        "external_url": attempt.external_url,
+        "link_expires_at": (
+            attempt.link_expires_at.isoformat() if attempt.link_expires_at else None
+        ),
+        "error_code": attempt.error_code,
+        "retryable": attempt.retryable,
+        "human_action": attempt.human_action,
+        "created_by": attempt.created_by,
+        "created_at": attempt.created_at.isoformat(),
+        "updated_at": attempt.updated_at.isoformat(),
+    }
+
+
+@api_v2.post("/plans/<int:version>/handoffs")
+@mutation()
+def draft_handoff(version: int) -> JsonResult:
+    """Draft a handoff of a plan version for a member to approve.
+
+    Nothing is sent. Show the member the returned ``payload``; to approve
+    they echo ``payload_hash``.
+
+    Args:
+        version: The plan version.
+
+    Returns:
+        The draft approval.
+
+    Raises:
+        PlanNotFoundError: If there is no such version.
+        AdapterNotFoundError: If no adapter has that name.
+        HandoffNotAvailableError: If the adapter needs no approval, or the
+            plan has no lines.
+        PlanNotCurrentError: If the needs under the plan have changed.
+    """
+    body = _HandoffRequest.model_validate(_body())
+    envelope = _handoffs().draft(version, body.adapter, actor=g.actor)
+    return _approval_payload(envelope), 201
+
+
+@api_v2.get("/handoffs/<int:approval_id>")
+def get_handoff(approval_id: int) -> Response:
+    """Return a handoff's approval, to show the member again.
+
+    Args:
+        approval_id: The approval's id.
+
+    Returns:
+        The approval.
+
+    Raises:
+        EnvelopeNotFoundError: If there is no such handoff approval.
+    """
+    return _json(_approval_payload(_handoffs().approval(approval_id)), 200)
+
+
+@api_v2.post("/handoffs/<int:approval_id>/approve")
+@mutation()
+def approve_handoff(approval_id: int) -> JsonResult:
+    """Approve a drafted handoff by echoing the hash of what was shown.
+
+    Approving also acknowledges every hard constraint the payload lists as
+    unenforced.
+
+    Args:
+        approval_id: The draft.
+
+    Returns:
+        The approved approval.
+
+    Raises:
+        EnvelopeNotFoundError: If there is no such handoff approval.
+        EnvelopeNotActionableError: If it is not a live draft.
+        PayloadMismatchError: If the hash is not the draft's.
+        StaleEnvelopeError: If the plan's needs have changed.
+    """
+    body = _HandoffApproval.model_validate(_body())
+    envelope = _handoffs().approve(approval_id, body.payload_hash, actor=g.actor)
+    return _approval_payload(envelope), 200
+
+
+@api_v2.post("/handoffs/<int:approval_id>/reject")
+@mutation()
+def reject_handoff(approval_id: int) -> JsonResult:
+    """Turn a drafted or approved handoff down. Nothing is sent.
+
+    Args:
+        approval_id: The approval.
+
+    Returns:
+        The rejected approval.
+
+    Raises:
+        EnvelopeNotFoundError: If there is no such handoff approval.
+        EnvelopeNotActionableError: If it is already closed.
+    """
+    body = _HandoffRejection.model_validate(request.get_json(silent=True) or {})
+    envelope = _handoffs().reject(approval_id, actor=g.actor, note=body.note)
+    return _approval_payload(envelope), 200
+
+
+@api_v2.post("/handoffs/<int:approval_id>/execute")
+@mutation()
+def execute_handoff(approval_id: int) -> JsonResult:
+    """Carry out an approved handoff, once.
+
+    The request's ``Idempotency-Key`` is the attempt's key. Repeating the
+    request never sends twice. If the attempt failed with ``retryable``
+    true, repeating it with the same key tries again under the same
+    approval.
+
+    Args:
+        approval_id: The approved handoff.
+
+    Returns:
+        201 with the created attempt and its link.
+
+    Raises:
+        ApiError: 502 ``handoff_failed`` when no handoff was created; the
+            details carry the attempt, its ``error_code`` and whether a
+            retry could help. 409 ``handoff_in_progress`` when another
+            request with the same key is still working.
+        EnvelopeNotActionableError: If the approval is not live.
+        StaleEnvelopeError: If the plan's needs have changed.
+    """
+    attempt = _handoffs().execute(
+        approval_id,
+        actor=g.actor,
+        idempotency_key=request.headers.get(IDEMPOTENCY_HEADER, ""),
+    )
+    payload = _attempt_payload(attempt)
+    if attempt.status is AttemptStatus.PENDING:
+        raise ApiError(
+            409,
+            "handoff_in_progress",
+            "This handoff is already being carried out. Read the attempt to"
+            " see how it ended.",
+            {"attempt": payload},
+        )
+    if attempt.status is AttemptStatus.FAILED:
+        raise ApiError(
+            502,
+            "handoff_failed",
+            attempt.human_action or "No handoff was created.",
+            {"attempt": payload},
+        )
+    return payload, 201
+
+
+@api_v2.get("/handoffs/attempts/<int:attempt_id>")
+def get_handoff_attempt(attempt_id: int) -> Response:
+    """Return one handoff attempt.
+
+    Args:
+        attempt_id: The attempt's id.
+
+    Returns:
+        The attempt. ``status`` is ``expired`` once its link has run out.
+
+    Raises:
+        AttemptNotFoundError: If there is no such attempt.
+    """
+    attempt = _handoffs().get_attempt(attempt_id)
+    if attempt is None:
+        raise AttemptNotFoundError(attempt_id)
+    return _json(_attempt_payload(attempt), 200)
+
+
+@api_v2.get("/plans/<int:version>/handoffs")
+def list_handoff_attempts(version: int) -> Response:
+    """List the handoff attempts made for a plan version, oldest first.
+
+    Args:
+        version: The plan version.
+
+    Returns:
+        ``{"attempts": [...]}``.
+    """
+    attempts = _handoffs().attempts_for_plan(version)
+    return _json({"attempts": [_attempt_payload(a) for a in attempts]}, 200)
 
 
 # ---------------------------------------------------------------------------

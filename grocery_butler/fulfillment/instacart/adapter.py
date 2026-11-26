@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
@@ -143,6 +143,17 @@ class InstacartAdapter(FulfillmentAdapter):
             handoff.
         """
         return translate(plan, link_days=self._link_days)
+
+    def preview_issues(self, plan: ShoppingPlan) -> tuple[dict[str, Any], ...]:
+        """List what the link for this plan would leave out.
+
+        Args:
+            plan: The stored plan version.
+
+        Returns:
+            The translation issues as plain data, in plan order.
+        """
+        return tuple(issue.as_dict() for issue in self.translate(plan).issues)
 
     def create_handoff(
         self, plan: ShoppingPlan, *, constraints_acknowledged: bool = False
