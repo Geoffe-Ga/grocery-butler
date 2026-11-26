@@ -1,0 +1,5 @@
+# The quality gates in scripts/ are POSIX shell run via bash (Git Bash
+# on Windows). Bash cannot execute CRLF scripts, so pin them to LF —
+# this keeps `bash scripts/check-all.sh` working on Windows checkouts
+# where core.autocrlf=true is the default.
+*.sh text eol=lf

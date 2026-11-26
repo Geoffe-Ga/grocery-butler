@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=scripts/activate-venv.sh
 source "$SCRIPT_DIR/activate-venv.sh"
 
 VERBOSE=false
@@ -24,13 +25,14 @@ Usage: $(basename "$0") [OPTIONS]
 Run all quality checks in sequence.
 
 Runs:
-  1. Linting (Ruff)
+  1. Linting (Ruff, then interrogate's docstring coverage)
   2. Formatting (Ruff)
   3. Type checking (MyPy)
-  4. Security checks (Bandit + pip-audit)
-  5. Complexity analysis (Radon)
+  4. Security checks (Bandit + pip-audit on the pinned requirements)
+  5. Complexity analysis (Radon + Xenon)
   6. Unit tests
-  7. Coverage report
+  7. Coverage report (line and branch thresholds)
+  8. Build (sdist + wheel, twine check)
 
 OPTIONS:
     --verbose   Show detailed output
@@ -94,6 +96,7 @@ run_check "Security checks" "security.sh"
 run_check "Complexity analysis" "complexity.sh"
 run_check "Unit tests" "test.sh" --unit
 run_check "Coverage report" "coverage.sh"
+run_check "Build" "build.sh"
 
 echo "=== Quality Checks Summary ==="
 echo "Passed: ${#PASSED_CHECKS[@]}"

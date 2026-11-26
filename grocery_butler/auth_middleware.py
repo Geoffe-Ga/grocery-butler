@@ -81,14 +81,20 @@ class AuthError(Exception):
         self.status = status
 
 
+class MissingSecretError(RuntimeError):
+    """Raised at startup when the shared secret's environment variable is unset."""
+
+    def __init__(self, env_var: str) -> None:
+        """Name the unset variable in the message."""
+        super().__init__(f"{env_var} not set; refusing to start auth-protected service")
+
+
 def _shared_secret() -> bytes:
     """Return the shared secret from the environment, failing loud if unset."""
     secret = os.environ.get(SECRET_ENV_VAR)
     if not secret:
         # Fail loud at startup, not at first request
-        raise RuntimeError(
-            f"{SECRET_ENV_VAR} not set; refusing to start auth-protected service"
-        )
+        raise MissingSecretError(SECRET_ENV_VAR)
     return secret.encode()
 
 

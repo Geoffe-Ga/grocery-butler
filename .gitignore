@@ -12,6 +12,7 @@ venv/
 
 .coverage
 coverage.xml
+coverage.json
 htmlcov/
 .mutmut-cache/
 

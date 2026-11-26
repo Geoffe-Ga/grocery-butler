@@ -1,33 +1,42 @@
-# Development dependencies
-# Testing
-pytest>=7.4.0
-pytest-cov>=4.1.0
-pytest-mock>=3.12.0
-pytest-asyncio>=0.21.0
-pytest-timeout>=2.1.0
-pytest-xdist>=3.3.0
+# Development dependencies, pinned exactly.
+#
+# Local checks, pre-commit, and CI all run these same versions, so a rule can
+# never pass in one place and fail in another. Upgrade deliberately: bump the
+# pin here, run ./scripts/check-all.sh, and commit the result.
+-r requirements.txt
 
-# Code quality
-ruff>=0.1.0
-mypy>=1.5.0
+# Testing
+pytest==9.2.0
+pytest-cov==7.1.0
+pytest-mock==3.17.0
+pytest-asyncio==1.5.0
+pytest-timeout==2.4.0
+pytest-xdist==3.8.0
+
+# Lint, format (ruff does both), types, docstrings
+ruff==0.17.6
+mypy==2.4.1
+interrogate==1.7.0
 
 # Security
-bandit>=1.7.5
-pip-audit>=2.6.0
+bandit==1.9.4
+pip-audit==2.10.1
 
-# Complexity analysis
-radon>=6.0.0
-xenon>=0.9.0
+# Complexity
+radon==6.0.1
+xenon==0.9.3
 
-# Mutation testing
-mutmut>=2.4.0
+# Mutation testing. Stay on 2.x: 3.x changed the [tool.mutmut] config schema.
+mutmut==2.5.1
 
-# Pre-commit hooks
-pre-commit>=3.4.0
+# Packaging (scripts/build.sh)
+build==1.6.1
+twine==7.0.0
 
-# Type stubs
-types-PyYAML>=6.0.0
-types-psycopg2>=2.9.0
+# Hooks
+pre-commit==4.7.0
 
-# Documentation coverage
-interrogate>=1.5.0
+# YAML parsing (tests/test_ci_triggers.py) and type stubs
+PyYAML==6.0.4
+types-PyYAML==6.0.12.20261122
+types-psycopg2==2.9.21.20261122

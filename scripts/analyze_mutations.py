@@ -38,26 +38,22 @@ def analyze_cache(
     conn = sqlite3.connect(cache_path)
     cursor = conn.cursor()
 
-    # Build file filter condition
-    file_filter_sql = ""
-    file_filter_params: tuple[str, ...] = ()
+    # Every query filters on the file name through one bound parameter. With no
+    # filter the pattern is "%", which matches every file, so the SQL is the
+    # same constant text either way and nothing is formatted into it.
+    file_filter_params: tuple[str, ...] = (f"%{filter_file}" if filter_file else "%",)
     if filter_file:
-        # Match any path ending with the specified file
-        file_filter_sql = """
-            AND sf.filename LIKE ?
-        """
-        file_filter_params = (f"%{filter_file}",)
         print(f"=== Mutmut Cache Analysis (filtered: {filter_file}) ===\n")
     else:
         print("=== Mutmut Cache Analysis ===\n")
 
     # Get total mutants (with optional filter)
-    query = f"""
+    query = """
         SELECT COUNT(*)
         FROM Mutant m, Line l, SourceFile sf
         WHERE m.line = l.id
           AND l.sourcefile = sf.id
-          {file_filter_sql}
+          AND sf.filename LIKE ?
     """
     cursor.execute(query, file_filter_params)
     total = cursor.fetchone()[0]
@@ -65,12 +61,12 @@ def analyze_cache(
     print()
 
     # Get status counts (with optional filter)
-    query = f"""
+    query = """
         SELECT m.status, COUNT(*)
         FROM Mutant m, Line l, SourceFile sf
         WHERE m.line = l.id
           AND l.sourcefile = sf.id
-          {file_filter_sql}
+          AND sf.filename LIKE ?
         GROUP BY m.status
     """
     cursor.execute(query, file_filter_params)
@@ -116,13 +112,13 @@ def analyze_cache(
     # Show files with most survived mutants (with optional filter)
     if survived > 0:
         print(f"=== Files with Most Survived Mutants (Top {top_files}) ===")
-        query = f"""
+        query = """
             SELECT sf.filename, COUNT(*) as count
             FROM Mutant m, Line l, SourceFile sf
             WHERE m.line = l.id
               AND l.sourcefile = sf.id
               AND m.status = "bad_survived"
-              {file_filter_sql}
+              AND sf.filename LIKE ?
             GROUP BY sf.filename
             ORDER BY count DESC
             LIMIT ?
@@ -135,13 +131,13 @@ def analyze_cache(
 
         # Show sample of survived mutants (with optional filter)
         print("Sample of survived mutants (first 10):")
-        query = f"""
+        query = """
             SELECT m.id, sf.filename, l.line_number
             FROM Mutant m, Line l, SourceFile sf
             WHERE m.line = l.id
               AND l.sourcefile = sf.id
               AND m.status = "bad_survived"
-              {file_filter_sql}
+              AND sf.filename LIKE ?
             ORDER BY sf.filename, l.line_number
             LIMIT 10
         """

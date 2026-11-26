@@ -6,10 +6,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=scripts/activate-venv.sh
 source "$SCRIPT_DIR/activate-venv.sh"
 
 FIX=false
-CHECK=false
 VERBOSE=false
 
 # Parse command line arguments
@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --check)
-            CHECK=true
+            # Checking is the default; the flag is accepted for older callers.
             shift
             ;;
         --verbose)
@@ -71,20 +71,29 @@ if $FIX; then
     if $VERBOSE; then
         echo "Fixing linting issues..."
     fi
-    ruff check . --fix
-    EXIT_CODE=$?
+    EXIT_CODE=0
+    ruff check . --fix || EXIT_CODE=$?
 else
     if $VERBOSE; then
         echo "Checking for linting issues..."
     fi
-    ruff check .
-    EXIT_CODE=$?
+    EXIT_CODE=0
+    ruff check . || EXIT_CODE=$?
 fi
 
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "✓ Linting checks passed"
-    exit 0
-else
+if [ $EXIT_CODE -ne 0 ]; then
     echo "✗ Linting checks failed" >&2
     exit 1
 fi
+
+echo "=== Docstring coverage (interrogate) ==="
+
+# Thresholds and scope live in [tool.interrogate] in pyproject.toml, so this
+# script, the pre-commit hook and CI all apply the same rule.
+if ! interrogate -c pyproject.toml; then
+    echo "✗ Docstring coverage below threshold" >&2
+    exit 1
+fi
+
+echo "✓ Linting checks passed"
+exit 0

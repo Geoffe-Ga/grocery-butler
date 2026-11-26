@@ -1,21 +1,29 @@
-# Pre-commit hooks configuration for grocery-butler
-# Install: pre-commit install
-# Run manually: pre-commit run --all-files
+# Pre-commit hooks for grocery-butler
+# Install: pre-commit install --install-hooks -t pre-commit -t commit-msg
+# Run manually (with .venv active): ./scripts/precommit-changed.sh
+# (changed files, exactly as CI does; it checks every file when this config changes)
+#
+# One set of rules everywhere: hooks that run a project tool are `local` hooks
+# calling the exact versions pinned in requirements-dev.txt, with config from
+# pyproject.toml. CI runs this file too (the `pre-commit` job), alongside
+# ./scripts/check-all.sh. Don't add a second copy of a tool here.
 
 default_language_version:
-  python: python3.11
+  python: python3
+
 repos:
 - repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: v4.5.0
+  rev: v6.0.0
   hooks:
   - id: trailing-whitespace
+    # Two trailing spaces are a hard line break in Markdown; keep them.
+    args: [--markdown-linebreak-ext=md]
   - id: end-of-file-fixer
   - id: check-yaml
   - id: check-toml
   - id: check-json
   - id: check-added-large-files
-    args:
-    - --maxkb=500
+    args: [--maxkb=500]
   - id: check-case-conflict
   - id: check-merge-conflict
   - id: check-symlinks
@@ -25,105 +33,65 @@ repos:
   - id: detect-private-key
   - id: fix-byte-order-marker
   - id: mixed-line-ending
-    args:
-    - --fix=lf
+    args: [--fix=lf]
   - id: no-commit-to-branch
-    args:
-    - --branch
-    - main
-# Ruff runs through the repo's scripts, like mypy below: the pinned
-# ruff-pre-commit v0.2.0 formatted differently from the Ruff that
-# check-all.sh and CI use, so the hook and CI rewrote each other's output.
+    args: [--branch, main]
+
 - repo: local
   hooks:
-  - id: ruff
-    name: ruff lint (scripts/lint.sh)
-    entry: ./scripts/lint.sh --check
+  # --fix applies Ruff's safe fixes locally. In CI a fix still fails the hook,
+  # because pre-commit fails any hook that changes a file.
+  - id: ruff-lint
+    name: ruff (lint, pinned)
+    entry: ruff check --fix
     language: system
-    types: [python]
-    pass_filenames: false
+    types_or: [python, pyi]
   - id: ruff-format
-    name: ruff format (scripts/format.sh)
-    entry: ./scripts/format.sh --check
+    name: ruff (format, pinned)
+    entry: ruff format
     language: system
-    types: [python]
-    pass_filenames: false
-# mypy runs through the repo's own script so the hook, check-all.sh and CI
-# share one configuration (pyproject.toml) and one environment (.venv).
-- repo: local
-  hooks:
+    types_or: [python, pyi]
   - id: mypy
-    name: mypy (scripts/typecheck.sh)
+    name: mypy (pinned; scope from scripts/typecheck.sh)
     entry: ./scripts/typecheck.sh
     language: system
-    types: [python]
     pass_filenames: false
-- repo: https://github.com/PyCQA/bandit
-  rev: 1.7.7
-  hooks:
+    types: [python]
+  - id: interrogate
+    name: interrogate (docstring coverage, pinned; config in pyproject.toml)
+    entry: interrogate -c pyproject.toml
+    language: system
+    pass_filenames: false
+    types: [python]
   - id: bandit
-    args:
-    - -c
-    - pyproject.toml
-    additional_dependencies:
-    - bandit[toml]
-- repo: https://github.com/compilerla/conventional-pre-commit
-  rev: v3.0.0
-  hooks:
-  - id: conventional-pre-commit
-    stages:
-    - commit-msg
-- repo: https://github.com/shellcheck-py/shellcheck-py
-  rev: v0.9.0.6
-  hooks:
-  - id: shellcheck
-- repo: https://github.com/asottile/pyupgrade
-  rev: v3.15.0
-  hooks:
-  - id: pyupgrade
-    args:
-    - --py311-plus
-- repo: https://github.com/PyCQA/autoflake
-  rev: v2.2.1
-  hooks:
-  - id: autoflake
-    args:
-    - --in-place
-    - --remove-all-unused-imports
-    - --remove-unused-variables
-    - --remove-duplicate-keys
-    - --ignore-init-module-imports
-- repo: https://github.com/guilatrova/tryceratops
-  rev: v2.3.2
-  hooks:
-  - id: tryceratops
-- repo: https://github.com/dosisod/refurb
-  rev: v1.26.0
-  hooks:
-  - id: refurb
+    name: bandit (pinned; config in pyproject.toml)
+    entry: bandit -c pyproject.toml -q
+    language: system
+    types: [python]
+    exclude: ^tests/
+
+# Dead-code check: no pinned copy elsewhere, so it runs at this one version.
+# tryceratops and refurb aren't separate hooks: Ruff's TRY and FURB rules
+# (pyproject.toml) cover them, at the version requirements-dev.txt pins.
 - repo: https://github.com/jendrikseipp/vulture
-  rev: v2.10
+  rev: v2.16
   hooks:
   - id: vulture
-    args:
-    - grocery_butler/
-    - --min-confidence
-    - '80'
-- repo: https://github.com/econchick/interrogate
-  rev: 1.7.0
+    args: [grocery_butler/, --min-confidence, '80']
+
+- repo: https://github.com/shellcheck-py/shellcheck-py
+  rev: v0.11.0.1
   hooks:
-  - id: interrogate
-    args:
-    - -vv
-    - --fail-under=95
+  - id: shellcheck
+
 - repo: https://github.com/Yelp/detect-secrets
-  rev: v1.4.0
+  rev: v1.5.0
   hooks:
   - id: detect-secrets
-    args:
-    - --baseline
-    - .secrets.baseline
-ci:
-  autofix_commit_msg: 'style: auto-fix by pre-commit hooks'
-  autoupdate_commit_msg: 'chore: update pre-commit hooks'
-  skip: []
+    args: [--baseline, .secrets.baseline]
+
+- repo: https://github.com/compilerla/conventional-pre-commit
+  rev: v4.3.0
+  hooks:
+  - id: conventional-pre-commit
+    stages: [commit-msg]
