@@ -362,6 +362,25 @@ class TestAdapterContract:
             description, plan
         )
 
+    @pytest.mark.parametrize("adapter", CONTRACT_ADAPTERS, ids=CONTRACT_ADAPTER_IDS)
+    def test_a_plan_leaves_the_household_only_after_review(
+        self, adapter: FulfillmentAdapter, plan: ShoppingPlan
+    ) -> None:
+        """ADR 0012: no outside handoff with an unreviewed hard constraint.
+
+        An adapter that creates something outside the household (it returns
+        a URL) must refuse a plan with unenforced hard constraints until a
+        person has acknowledged them.
+        """
+        unreviewed = adapter.create_handoff(plan)
+        reviewed = adapter.create_handoff(plan, constraints_acknowledged=True)
+
+        assert unreviewed.unenforced_constraints
+        assert unreviewed.external_url is None
+        assert reviewed.status is HandoffStatus.CREATED
+        if reviewed.external_url is not None:
+            assert unreviewed.status is HandoffStatus.FAILED
+
     def test_an_adapter_that_enforces_a_kind_is_not_asked_to_report_it(
         self, plan: ShoppingPlan
     ) -> None:

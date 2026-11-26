@@ -1,13 +1,16 @@
 """The Instacart adapter: a plan becomes a shopping list link (ADR 0014).
 
-This is the tracer skeleton (#146). It sends each plan line by name only.
-Quantities, units and preferences arrive with translation (#147); the real
-network transport and approval binding arrive with link creation (#148).
+Each plan line is translated into a documented line item
+(:mod:`.translate`), and everything the translation can't carry comes back
+as an issue. The real network transport and the approval binding arrive
+with link creation (#148).
 
-What it already guarantees:
+What it guarantees:
 
 - It claims one capability, ``shopping_list_link``.
-- It enforces no hard constraint, so it reports every one as unenforced.
+- It enforces no hard constraint, so it reports every one as unenforced,
+  and it refuses to send a plan that has any until a person has
+  acknowledged them.
 - A link is a handoff. Nothing here says, or can say, that anything was
   bought.
 """
@@ -15,6 +18,7 @@ What it already guarantees:
 from __future__ import annotations
 
 import datetime as dt
+import json
 from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
@@ -28,11 +32,8 @@ from grocery_butler.fulfillment.base import (
     HandoffStatus,
     unenforced_constraints,
 )
-from grocery_butler.fulfillment.instacart.models import (
-    MAX_LINK_DAYS,
-    LineItem,
-    ProductsLinkRequest,
-)
+from grocery_butler.fulfillment.instacart.models import MAX_LINK_DAYS
+from grocery_butler.fulfillment.instacart.translate import translate
 from grocery_butler.fulfillment.instacart.transport import TransportError
 from grocery_butler.inventory_ledger import utc_now
 from grocery_butler.retries import is_transient
@@ -40,6 +41,7 @@ from grocery_butler.retries import is_transient
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from grocery_butler.fulfillment.instacart.translate import TranslationResult
     from grocery_butler.fulfillment.instacart.transport import Transport
     from grocery_butler.models import ShoppingPlan
 
@@ -52,6 +54,31 @@ _HUMAN_ACTION = (
 )
 _NOTHING_TO_HAND_OFF = "The plan has no lines, so there is nothing to hand off."
 _BAD_RESPONSE = "invalid_response"
+NEEDS_REVIEW = "hard_constraints_need_review"
+ISSUES_ARTIFACT = "translation_issues"
+_DEFAULT_FAILED_ACTION = (
+    "No Instacart link was created. Use the list export instead, or try again."
+)
+_FAILED_ACTIONS = {
+    NEEDS_REVIEW: (
+        "No Instacart link was created. Instacart can't enforce some of this"
+        " plan's hard constraints. Review them, then confirm you want to"
+        " continue."
+    ),
+}
+
+
+def _issue_artifacts(translated: TranslationResult) -> dict[str, str]:
+    """Carry the translation issues on a handoff result.
+
+    Args:
+        translated: The translation.
+
+    Returns:
+        One artifact: the issues as a JSON array, in plan order.
+    """
+    issues = [issue.as_dict() for issue in translated.issues]
+    return {ISSUES_ARTIFACT: json.dumps(issues, sort_keys=True)}
 
 
 class InstacartAdapter(FulfillmentAdapter):
@@ -105,32 +132,33 @@ class InstacartAdapter(FulfillmentAdapter):
             human_required=True,
         )
 
-    def build_request(self, plan: ShoppingPlan) -> ProductsLinkRequest | None:
-        """Turn a plan into the request for its link.
+    def translate(self, plan: ShoppingPlan) -> TranslationResult:
+        """Translate a plan into the request for its link, with every loss.
 
         Args:
             plan: The stored plan version.
 
         Returns:
-            The request, or None when the plan has no lines.
+            The request and the issues a person should see before the
+            handoff.
         """
-        if not plan.lines:
-            return None
-        return ProductsLinkRequest(
-            title=f"Grocery Butler shopping plan {plan.version}",
-            line_items=[LineItem(name=line.display_name) for line in plan.lines],
-            expires_in=self._link_days,
-        )
+        return translate(plan, link_days=self._link_days)
 
-    def create_handoff(self, plan: ShoppingPlan) -> HandoffResult:
+    def create_handoff(
+        self, plan: ShoppingPlan, *, constraints_acknowledged: bool = False
+    ) -> HandoffResult:
         """Create a shopping list link for a stored plan version.
 
         Args:
             plan: The stored plan version to hand off.
+            constraints_acknowledged: Whether a person has reviewed the
+                hard constraints Instacart can't enforce. Without it, a
+                plan that has any is refused and nothing is sent.
 
         Returns:
             A created handoff with its link and expiry, or a failed one
-            with a stable reason. Never a purchase.
+            with a stable reason. Never a purchase. Either way the
+            translation issues are in ``artifacts["translation_issues"]``.
 
         Raises:
             TransportError: If the provider failed in a way worth retrying
@@ -138,34 +166,40 @@ class InstacartAdapter(FulfillmentAdapter):
                 runner retries those; any other failure is returned as a
                 failed handoff.
         """
-        request = self.build_request(plan)
-        if request is None:
-            return self._failed(plan, _NOTHING_TO_HAND_OFF)
+        translated = self.translate(plan)
+        if translated.request is None:
+            return self._failed(plan, _NOTHING_TO_HAND_OFF, translated)
+        if translated.needs_acknowledgement and not constraints_acknowledged:
+            return self._failed(plan, NEEDS_REVIEW, translated)
         try:
-            response = self._transport.create_products_link(request)
+            response = self._transport.create_products_link(translated.request)
         except TransportError as err:
             if is_transient(err):
                 raise
-            return self._failed(plan, err.code)
+            return self._failed(plan, err.code, translated)
         except ValidationError:
-            return self._failed(plan, _BAD_RESPONSE)
+            return self._failed(plan, _BAD_RESPONSE, translated)
         return HandoffResult(
             adapter=ADAPTER_NAME,
             status=HandoffStatus.CREATED,
             plan_version=plan.version,
             plan_content_hash=plan.content_hash,
             human_action=_HUMAN_ACTION,
+            artifacts=_issue_artifacts(translated),
             external_url=response.products_link_url,
             expires_at=self._clock() + dt.timedelta(days=self._link_days),
             unenforced_constraints=unenforced_constraints(self.describe(), plan),
         )
 
-    def _failed(self, plan: ShoppingPlan, detail: str) -> HandoffResult:
+    def _failed(
+        self, plan: ShoppingPlan, detail: str, translated: TranslationResult
+    ) -> HandoffResult:
         """Build a failed handoff.
 
         Args:
             plan: The plan that was being handed off.
             detail: A stable reason, safe to show.
+            translated: The translation, for its issues.
 
         Returns:
             The failed result. It still lists the unenforced constraints.
@@ -175,10 +209,8 @@ class InstacartAdapter(FulfillmentAdapter):
             status=HandoffStatus.FAILED,
             plan_version=plan.version,
             plan_content_hash=plan.content_hash,
-            human_action=(
-                "No Instacart link was created. Use the list export instead,"
-                " or try again."
-            ),
+            human_action=_FAILED_ACTIONS.get(detail, _DEFAULT_FAILED_ACTION),
+            artifacts=_issue_artifacts(translated),
             detail=detail,
             unenforced_constraints=unenforced_constraints(self.describe(), plan),
         )

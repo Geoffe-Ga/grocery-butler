@@ -332,11 +332,16 @@ class ExportAdapter(FulfillmentAdapter):
             human_required=True,
         )
 
-    def create_handoff(self, plan: ShoppingPlan) -> HandoffResult:
+    def create_handoff(
+        self, plan: ShoppingPlan, *, constraints_acknowledged: bool = False
+    ) -> HandoffResult:
         """Render the plan in every export format.
 
         Args:
             plan: The stored plan version to export.
+            constraints_acknowledged: Not needed here. The list prints
+                every hard constraint on its line, so the person reading
+                it is the review.
 
         Returns:
             A created handoff whose artifacts hold the text, JSON and CSV.

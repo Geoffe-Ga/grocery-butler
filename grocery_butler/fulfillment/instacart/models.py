@@ -34,11 +34,16 @@ class Filters(_Strict):
 
 
 class LineItem(_Strict):
-    """One thing to shop for. ``name`` is the search term."""
+    """One thing to shop for.
+
+    ``name`` is the search term and ``display_text`` is what the shopper
+    sees. When ``upcs`` is set, Instacart ignores ``filters``.
+    """
 
     name: str = Field(min_length=1)
     display_text: str | None = None
     line_item_measurements: list[Measurement] = Field(default_factory=list)
+    upcs: list[str] = Field(default_factory=list)
     filters: Filters | None = None
 
 

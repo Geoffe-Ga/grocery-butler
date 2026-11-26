@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
+import json
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,8 @@ from grocery_butler.fulfillment.base import (
 from grocery_butler.fulfillment.instacart.adapter import (
     ADAPTER_NAME,
     DEFAULT_LINK_DAYS,
+    ISSUES_ARTIFACT,
+    NEEDS_REVIEW,
     InstacartAdapter,
 )
 from grocery_butler.fulfillment.instacart.models import (
@@ -163,7 +166,7 @@ class TestHandoff:
         adapter = InstacartAdapter(transport, clock=_clock)
         plan = _plan()
 
-        result = adapter.create_handoff(plan)
+        result = adapter.create_handoff(plan, constraints_acknowledged=True)
 
         assert result.status is HandoffStatus.CREATED
         assert result.adapter == "instacart"
@@ -175,19 +178,35 @@ class TestHandoff:
         assert result.detail == ""
         assert len(transport.requests) == 1
 
-    def test_the_request_names_each_line_and_always_sets_an_expiry(self) -> None:
-        """The skeleton sends names only, and never omits expires_in."""
+    def test_the_request_is_the_translation_and_always_sets_an_expiry(self) -> None:
+        """Amounts and preferences are translated; expires_in is never omitted."""
         transport = FakeTransport.ok(LINK)
 
-        InstacartAdapter(transport, link_days=5).create_handoff(_plan())
+        InstacartAdapter(transport, link_days=5).create_handoff(
+            _plan(), constraints_acknowledged=True
+        )
 
+        brand = {"brand_filters": ["Clover"], "health_filters": []}
+        pounds = [{"quantity": 2.0, "unit": "lb"}]
         assert transport.requests[0].body() == {
             "title": "Grocery Butler shopping plan 7",
             "link_type": "shopping_list",
             "expires_in": 5,
             "line_items": [
-                {"name": "Carrots", "line_item_measurements": []},
-                {"name": "Granola Bars", "line_item_measurements": []},
+                {
+                    "name": "carrots",
+                    "display_text": "Carrots",
+                    "line_item_measurements": pounds,
+                    "upcs": [],
+                    "filters": brand,
+                },
+                {
+                    "name": "granola bars",
+                    "display_text": "Granola Bars",
+                    "line_item_measurements": pounds,
+                    "upcs": [],
+                    "filters": brand,
+                },
             ],
         }
 
@@ -197,7 +216,7 @@ class TestHandoff:
         adapter = InstacartAdapter(transport)
         plan = _plan()
 
-        result = adapter.create_handoff(plan)
+        result = adapter.create_handoff(plan, constraints_acknowledged=True)
 
         assert [(c.display_name, c.value) for c in result.unenforced_constraints] == [
             ("Granola Bars", "peanut")
@@ -205,8 +224,47 @@ class TestHandoff:
         assert result.unenforced_constraints == unenforced_constraints(
             adapter.describe(), plan
         )
-        assert all(item.filters is None for item in transport.requests[0].line_items)
+        sent = transport.requests[0].line_items
+        assert all(not item.filters.health_filters for item in sent if item.filters)
         assert "peanut" not in str(transport.requests[0].body())
+
+    def test_unreviewed_hard_constraints_block_the_handoff(self) -> None:
+        """Without a person's acknowledgement nothing is sent."""
+        transport = FakeTransport.ok(LINK)
+
+        result = InstacartAdapter(transport).create_handoff(_plan())
+
+        assert result.status is HandoffStatus.FAILED
+        assert result.detail == NEEDS_REVIEW == "hard_constraints_need_review"
+        assert result.external_url is None
+        assert "Review them" in result.human_action
+        assert transport.requests == []
+        assert [c.value for c in result.unenforced_constraints] == ["peanut"]
+
+    def test_a_plan_without_hard_constraints_needs_no_acknowledgement(self) -> None:
+        """Nothing to review, nothing to acknowledge."""
+        transport = FakeTransport.ok(LINK)
+        plan = _plan()
+        plain = plan.model_copy(update={"lines": [plan.lines[0]]})
+
+        result = InstacartAdapter(transport).create_handoff(plain)
+
+        assert result.status is HandoffStatus.CREATED
+        assert len(transport.requests) == 1
+
+    def test_the_result_carries_the_translation_issues(self) -> None:
+        """What the link won't carry travels with the handoff, sent or not."""
+        adapter = InstacartAdapter(FakeTransport.ok(LINK))
+
+        blocked = adapter.create_handoff(_plan())
+        created = adapter.create_handoff(_plan(), constraints_acknowledged=True)
+
+        issues = json.loads(created.artifacts[ISSUES_ARTIFACT])
+        assert blocked.artifacts == created.artifacts
+        assert [(i["item_id"], i["kind"]) for i in issues] == [
+            (2, "hard_constraint_unrepresentable")
+        ]
+        assert adapter.translate(_plan()).needs_acknowledgement is True
 
     def test_an_empty_plan_is_a_failed_handoff_without_a_request(self) -> None:
         """Nothing to send means nothing is sent."""
@@ -229,7 +287,7 @@ class TestHandoff:
         """A refusal is reported with its stable code, and never as created."""
         adapter = InstacartAdapter(FakeTransport.failing(code, status))
 
-        result = adapter.create_handoff(_plan())
+        result = adapter.create_handoff(_plan(), constraints_acknowledged=True)
 
         assert result.status is HandoffStatus.FAILED
         assert result.detail == code
@@ -248,7 +306,7 @@ class TestHandoff:
         adapter = InstacartAdapter(FakeTransport.failing(code, status))
 
         with pytest.raises(TransportError, match=code) as raised:
-            adapter.create_handoff(_plan())
+            adapter.create_handoff(_plan(), constraints_acknowledged=True)
 
         assert raised.value.status_code == status
 
@@ -257,7 +315,9 @@ class TestHandoff:
         self, link: str
     ) -> None:
         """A 200 with no HTTPS link is not a handoff."""
-        result = InstacartAdapter(FakeTransport.ok(link)).create_handoff(_plan())
+        result = InstacartAdapter(FakeTransport.ok(link)).create_handoff(
+            _plan(), constraints_acknowledged=True
+        )
 
         assert result.status is HandoffStatus.FAILED
         assert result.detail == "invalid_response"
@@ -273,7 +333,10 @@ class TestThroughTheRunner:
         slept: list[float] = []
 
         result = create_handoff(
-            InstacartAdapter(transport), _plan(), sleep=slept.append
+            InstacartAdapter(transport),
+            _plan(),
+            constraints_acknowledged=True,
+            sleep=slept.append,
         )
 
         assert result.status is HandoffStatus.CREATED
@@ -285,7 +348,12 @@ class TestThroughTheRunner:
         transport = FakeTransport.failing("unavailable", 503)
 
         with pytest.raises(RetriesExhaustedError):
-            create_handoff(InstacartAdapter(transport), _plan(), sleep=lambda _s: None)
+            create_handoff(
+                InstacartAdapter(transport),
+                _plan(),
+                constraints_acknowledged=True,
+                sleep=lambda _s: None,
+            )
 
         assert len(transport.requests) == 3
 
@@ -293,7 +361,9 @@ class TestThroughTheRunner:
         """A 400 is sent once."""
         transport = FakeTransport.failing("bad_request", 400)
 
-        result = create_handoff(InstacartAdapter(transport), _plan())
+        result = create_handoff(
+            InstacartAdapter(transport), _plan(), constraints_acknowledged=True
+        )
 
         assert result.status is HandoffStatus.FAILED
         assert len(transport.requests) == 1
@@ -304,9 +374,15 @@ class TestStubTransport:
 
     def test_the_link_is_deterministic_per_plan_version(self) -> None:
         """The same plan version always gives the same link."""
-        first = InstacartAdapter(StubTransport()).create_handoff(_plan(7))
-        again = InstacartAdapter(StubTransport()).create_handoff(_plan(7))
-        other = InstacartAdapter(StubTransport()).create_handoff(_plan(8))
+        first = InstacartAdapter(StubTransport()).create_handoff(
+            _plan(7), constraints_acknowledged=True
+        )
+        again = InstacartAdapter(StubTransport()).create_handoff(
+            _plan(7), constraints_acknowledged=True
+        )
+        other = InstacartAdapter(StubTransport()).create_handoff(
+            _plan(8), constraints_acknowledged=True
+        )
 
         assert first.status is HandoffStatus.CREATED
         assert first.external_url == again.external_url
@@ -314,7 +390,9 @@ class TestStubTransport:
 
     def test_the_link_is_obviously_fake_and_can_not_resolve(self) -> None:
         """It points at the reserved .invalid domain."""
-        result = InstacartAdapter(StubTransport()).create_handoff(_plan())
+        result = InstacartAdapter(StubTransport()).create_handoff(
+            _plan(), constraints_acknowledged=True
+        )
 
         assert result.external_url is not None
         assert result.external_url.startswith(STUB_LINK_PREFIX)
@@ -344,6 +422,7 @@ class TestModels:
                 "name": "carrots",
                 "display_text": "Carrots",
                 "line_item_measurements": [{"quantity": 2.0, "unit": "pound"}],
+                "upcs": [],
                 "filters": {"brand_filters": [], "health_filters": ["ORGANIC"]},
             }
         ]
@@ -398,7 +477,9 @@ class TestRegistry:
         registry = default_registry({INSTACART_ENABLED_ENV: value})
 
         assert registry.names() == ["export", "instacart"]
-        result = registry.get("instacart").create_handoff(_plan())
+        result = registry.get("instacart").create_handoff(
+            _plan(), constraints_acknowledged=True
+        )
         assert result.external_url is not None
         assert result.external_url.startswith(STUB_LINK_PREFIX)
 
