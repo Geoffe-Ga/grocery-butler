@@ -1,0 +1,4 @@
+-- Migration 024: open needs for items already known to be low or out (SQLite).
+-- No schema change. The work is in the Python hook beside this file, which
+-- calls grocery_butler.replenishment.backfill_needs. This marker records
+-- version 024 as applied.

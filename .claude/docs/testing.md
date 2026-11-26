@@ -39,6 +39,10 @@ A unit test checks one behavior and controls everything else:
 
 If a test only fails sometimes, it shares state, depends on order, or reads the clock. Find which and fix it; the rule for flaky tests is in [`CLAUDE.md`](../../CLAUDE.md#critical-principles).
 
+### The route ledger
+
+A complete run of the end-to-end lane ends by comparing the routes it reached with the routes the app registers. A route that no end-to-end test drives must be listed, with a reason, in `tests/e2e/route_ledger.py`; a listed route that is now driven must be removed. So a new route needs an end-to-end test or a written reason, and the list only shrinks. `tests/test_route_ledger.py` also holds the docs to the app (`docs/api/v2.md` and the README's route tables) and fails if a module is imported by nothing an entry point reaches. A run narrowed to some files or by `-k` skips the comparison.
+
 ## 3. Postgres Tests
 
 Every end-to-end test runs twice, on SQLite and on Postgres: the `db_path` fixture in `tests/e2e/conftest.py` is parametrized, and on Postgres each test gets a schema of its own that is dropped afterwards. The adapter, store and pending-action tests have Postgres variants too. All of them skip unless `TEST_DATABASE_URL` is set:
