@@ -737,6 +737,17 @@ or dismisses, and nothing is marked received automatically. The shopping
 list still reads the older restock queue; it moves to needs with shopping
 plans.
 
+**Approval envelopes ([ADR 0010](docs/adr/0010-immutable-approval-envelopes.md)).**
+`grocery_butler/approvals.py` is how anything gets approved from here on. An
+envelope stores exactly what a member is asked to approve, with its hash and
+a fingerprint of the state it was built from. Approving means sending back
+the hash of what was shown. Executing reads the content from the envelope,
+never from the caller, and is refused if the envelope expired, was altered,
+or the state under it changed. So a changed plan can't execute under an
+earlier approval. The only scope is a handoff; approving a purchase belongs
+in the retailer's own checkout. Shopping plans and handoffs start using
+envelopes as they are built.
+
 The backlog's next domain concepts (`ShoppingPlan`, `FulfillmentDraft`, and
 others) are
 described in

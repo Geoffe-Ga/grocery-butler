@@ -15,6 +15,7 @@ ADR that supersedes the old one, rather than an edit.
 | [0007](0007-append-only-inventory-observations.md) | Append-only inventory observations and a snapshot derived on read | Accepted |
 | [0008](0008-explicit-replenishment-needs.md) | Explicit replenishment needs, one per item, with first-class reasons | Accepted |
 | [0009](0009-capability-api-v2-contract.md) | Capability API v2 contract: named actors, idempotency keys, coded errors | Accepted |
+| [0010](0010-immutable-approval-envelopes.md) | Approvals are bound to immutable, expiring envelopes | Accepted |
 
 The product backlog these decisions serve is
 [`docs/OPENCLAW_ERP_BACKLOG.md`](../OPENCLAW_ERP_BACKLOG.md).
