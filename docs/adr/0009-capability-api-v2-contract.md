@@ -69,9 +69,11 @@ attributable and retry-safe".
 
 ### Neutral
 
-- The first member is created without an `X-Household-Member` header,
-  because there is no member yet to name. That call is attributed to the
-  channel alone.
+- A member is created without an `X-Household-Member` header whenever the
+  household has no active member, because there is nobody to name. That is
+  the very first member, and also the case where every member has been
+  deactivated; otherwise the household would be locked out of its own API.
+  The call is attributed to the channel alone.
 
 ## Alternatives considered
 

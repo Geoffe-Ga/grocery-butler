@@ -6,6 +6,7 @@ import datetime as dt
 import os
 from contextlib import closing
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
@@ -22,6 +23,7 @@ from grocery_butler.models import (
     NeedStatus,
     NewObservation,
     ObservationSource,
+    ReplenishmentNeed,
     StockState,
 )
 from grocery_butler.pantry_manager import PantryManager
@@ -245,6 +247,35 @@ class TestAddReason:
             needs.add_reason(
                 99999, NeedReasonKind.OUT, source_key=INVENTORY_SOURCE, actor=ACTOR
             )
+
+    def test_losing_a_race_to_open_a_need_joins_the_winners_need(
+        self, needs: ReplenishmentNeeds, milk: HouseholdItem
+    ) -> None:
+        """Issue #202: a second writer adds its reason to the first one's need."""
+        winner = needs.add_reason(
+            milk.id, NeedReasonKind.LOW_STOCK, source_key=INVENTORY_SOURCE, actor="a"
+        )
+        real_open_needs = ReplenishmentNeeds._open_needs
+        calls: list[int] = []
+
+        def stale_then_real(
+            self: ReplenishmentNeeds, canonical_id: int
+        ) -> list[ReplenishmentNeed]:
+            """Miss once, as a lookup made just before the other insert would."""
+            calls.append(canonical_id)
+            if len(calls) == 1:
+                return []
+            return real_open_needs(self, canonical_id)
+
+        with patch.object(ReplenishmentNeeds, "_open_needs", stale_then_real):
+            joined = needs.add_reason(
+                milk.id, NeedReasonKind.RECIPE_DEMAND, source_key="recipe:9", actor="b"
+            )
+
+        assert joined.id == winner.id
+        assert _kinds(list(joined.active_reasons)) == ["low_stock", "recipe_demand"]
+        assert len(needs.list_needs()) == 1
+        assert len(needs.history(winner.id)) == 1
 
     def test_a_closed_need_is_not_reused(
         self, needs: ReplenishmentNeeds, milk: HouseholdItem
@@ -931,3 +962,34 @@ class TestPostgres:
                 " (item_id, status, created_at, updated_at) VALUES (?, ?, ?, ?)",
                 (pg_item.id, "suggested", NOW.isoformat(), NOW.isoformat()),
             )
+
+    def test_losing_a_race_to_open_a_need_joins_the_winners_need(
+        self, pg_item: HouseholdItem
+    ) -> None:
+        """Issue #202 on Postgres, where the failed insert aborts a transaction."""
+        needs = ReplenishmentNeeds(_PG_URL)
+        winner = needs.add_reason(
+            pg_item.id, NeedReasonKind.OUT, source_key=INVENTORY_SOURCE, actor="a"
+        )
+        real_open_needs = ReplenishmentNeeds._open_needs
+        calls: list[int] = []
+
+        def stale_then_real(
+            self: ReplenishmentNeeds, canonical_id: int
+        ) -> list[ReplenishmentNeed]:
+            """Miss once, as a lookup made just before the other insert would."""
+            calls.append(canonical_id)
+            if len(calls) == 1:
+                return []
+            return real_open_needs(self, canonical_id)
+
+        with patch.object(ReplenishmentNeeds, "_open_needs", stale_then_real):
+            joined = needs.add_reason(
+                pg_item.id,
+                NeedReasonKind.RECIPE_DEMAND,
+                source_key="recipe:9",
+                actor="b",
+            )
+
+        assert joined.id == winner.id
+        assert len(joined.active_reasons) == 2
