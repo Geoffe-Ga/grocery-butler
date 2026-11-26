@@ -11,7 +11,8 @@ Five numbers, read on demand:
 - **stale inventory**: items whose last observation is older than its
   freshness window. Read from the ledger.
 - **reconciliation gaps**: needs marked ordered that nobody has confirmed
-  received within the grace period. Read from the needs.
+  received within the grace period, plus handoffs that old with no
+  confirmed receipt. Read from the needs, attempts and receipts.
 
 The first two leave no other trace, so they are stored as daily counters.
 The other three are derived from rows that already exist, so they can't
@@ -56,6 +57,14 @@ _DECISIONS = (
 )
 _GAPS = (
     "SELECT COUNT(*) AS n FROM replenishment_needs WHERE status = ? AND updated_at < ?"
+)
+_HANDOFF_GAPS = (
+    "SELECT COUNT(*) AS n FROM fulfillment_attempts"
+    " WHERE status = 'created' AND created_at < ?"
+    " AND id NOT IN ("
+    "   SELECT attempt_id FROM receipts"
+    "   WHERE attempt_id IS NOT NULL AND status = 'confirmed'"
+    " )"
 )
 
 
@@ -202,14 +211,21 @@ class Metrics:
         return sum(1 for snapshot in ledger.snapshots() if snapshot.stale)
 
     def reconciliation_gaps(self) -> int:
-        """Count ordered needs nobody has confirmed received in time.
+        """Count what was handed off or ordered and never confirmed.
+
+        Two kinds of gap, added together: a need marked ordered longer ago
+        than the grace period and not yet received, and a handoff created
+        longer ago than the grace period that no confirmed receipt points
+        at.
 
         Returns:
-            The number of needs ordered longer ago than the grace period.
+            The number of gaps.
         """
         cutoff = (self._clock() - RECONCILIATION_GRACE).isoformat()
         with closing(get_connection(self._db_path)) as conn:
-            return _number(conn, _GAPS, (NeedStatus.ORDERED.value, cutoff), "n")
+            needs = _number(conn, _GAPS, (NeedStatus.ORDERED.value, cutoff), "n")
+            handoffs = _number(conn, _HANDOFF_GAPS, (cutoff,), "n")
+        return needs + handoffs
 
     def snapshot(self) -> dict[str, Any]:
         """Read all five metrics at once.

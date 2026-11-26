@@ -94,6 +94,16 @@ from grocery_butler.observation_batches import (
     ObservationBatches,
     ReviewsMissingError,
 )
+from grocery_butler.reconciliation import (
+    LineReview,
+    NewReceiptLine,
+    ReceiptInvalidError,
+    ReceiptNotFoundError,
+    ReceiptNotOpenError,
+    ReceiptReviewError,
+    ReceiptStatus,
+    Reconciliations,
+)
 from grocery_butler.replenishment import (
     InvalidNeedMoveError,
     NeedNotFoundError,
@@ -111,6 +121,7 @@ if TYPE_CHECKING:
     from grocery_butler.approvals import ApprovalEnvelope
     from grocery_butler.fulfillment.handoffs import HandoffAttempt
     from grocery_butler.models import HouseholdItem, ObservationBatch, ShoppingPlan
+    from grocery_butler.reconciliation import Receipt
 
 LOG = logging.getLogger("api_v2")
 
@@ -163,6 +174,9 @@ _DOMAIN_ERRORS: dict[type[Exception], tuple[int, str]] = {
     PlanNotCurrentError: (409, "plan_not_current"),
     AttemptNotFoundError: (404, "handoff_attempt_not_found"),
     KeyBelongsToAnotherHandoffError: (409, "idempotency_key_reused"),
+    ReceiptNotFoundError: (404, "receipt_not_found"),
+    ReceiptNotOpenError: (409, "receipt_not_open"),
+    ReceiptReviewError: (409, "receipt_review_invalid"),
 }
 
 
@@ -1694,6 +1708,158 @@ def list_handoff_attempts(version: int) -> Response:
     """
     attempts = _handoffs().attempts_for_plan(version)
     return _json({"attempts": [_attempt_payload(a) for a in attempts]}, 200)
+
+
+# ---------------------------------------------------------------------------
+# Receipts: what actually arrived (ADR 0018)
+# ---------------------------------------------------------------------------
+
+
+class _NewReceipt(BaseModel):
+    """Body of ``POST /receipts``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    lines: list[NewReceiptLine]
+    attempt_id: int | None = None
+    evidence_ref: str | None = Field(default=None, max_length=200)
+    notes: str = Field(default="", max_length=500)
+    purchased_at: dt.datetime | None = None
+
+
+class _ReceiptReview(BaseModel):
+    """Body of ``POST /receipts/<id>/resolve``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reviews: list[LineReview]
+
+
+def _receipt_payload(receipt: Receipt) -> dict[str, Any]:
+    """Serialize a receipt.
+
+    Args:
+        receipt: The receipt.
+
+    Returns:
+        The receipt with its lines, as JSON-ready data.
+    """
+    return receipt.model_dump(mode="json")
+
+
+@api_v2.post("/receipts")
+@mutation()
+def submit_receipt() -> JsonResult:
+    """Store what a receipt says happened, for a member to review.
+
+    Nothing else changes: no inventory, no need.
+
+    Returns:
+        The open receipt, with each line matched to an item where it can be.
+
+    Raises:
+        ApiError: 400 ``receipt_invalid`` when there are no lines, too
+            many, or the handoff attempt named does not exist.
+    """
+    body = _NewReceipt.model_validate(_body())
+    try:
+        receipt = Reconciliations(_db_path()).submit(
+            body.lines,
+            submitted_by=g.actor,
+            attempt_id=body.attempt_id,
+            evidence_ref=body.evidence_ref,
+            notes=body.notes,
+            purchased_at=body.purchased_at,
+        )
+    except ReceiptInvalidError as err:
+        raise ApiError(400, "receipt_invalid", str(err)) from err
+    return _receipt_payload(receipt), 201
+
+
+@api_v2.get("/receipts")
+def list_receipts() -> Response:
+    """List receipts, oldest first.
+
+    Query: ``status`` is ``open``, ``confirmed`` or ``rejected``.
+
+    Returns:
+        ``{"receipts": [...]}``.
+
+    Raises:
+        ApiError: 400 ``validation_failed`` for an unknown status.
+    """
+    raw = request.args.get("status")
+    try:
+        status = ReceiptStatus(raw) if raw else None
+    except ValueError as err:
+        raise ApiError(
+            400,
+            "validation_failed",
+            "status must be one of: open, confirmed, rejected.",
+        ) from err
+    receipts = Reconciliations(_db_path()).list_receipts(status)
+    return _json({"receipts": [_receipt_payload(r) for r in receipts]}, 200)
+
+
+@api_v2.get("/receipts/<int:receipt_id>")
+def get_receipt(receipt_id: int) -> Response:
+    """Return one receipt with its lines.
+
+    Args:
+        receipt_id: The receipt's id.
+
+    Returns:
+        The receipt.
+
+    Raises:
+        ReceiptNotFoundError: If there is no such receipt.
+    """
+    receipt = Reconciliations(_db_path()).get(receipt_id)
+    if receipt is None:
+        raise ReceiptNotFoundError(receipt_id)
+    return _json(_receipt_payload(receipt), 200)
+
+
+@api_v2.post("/receipts/<int:receipt_id>/resolve")
+@mutation()
+def resolve_receipt(receipt_id: int) -> JsonResult:
+    """Apply a member's review of a receipt, all at once.
+
+    Args:
+        receipt_id: The receipt.
+
+    Returns:
+        The confirmed receipt.
+
+    Raises:
+        ReceiptNotFoundError: If there is no such receipt.
+        ReceiptNotOpenError: If it was already resolved or rejected.
+        ReceiptReviewError: If the review can't be applied; nothing changed.
+    """
+    body = _ReceiptReview.model_validate(_body())
+    receipt = Reconciliations(_db_path()).resolve(
+        receipt_id, body.reviews, actor=g.actor
+    )
+    return _receipt_payload(receipt), 200
+
+
+@api_v2.post("/receipts/<int:receipt_id>/reject")
+@mutation()
+def reject_receipt(receipt_id: int) -> JsonResult:
+    """Throw a whole receipt away. Nothing else changes.
+
+    Args:
+        receipt_id: The receipt.
+
+    Returns:
+        The rejected receipt.
+
+    Raises:
+        ReceiptNotFoundError: If there is no such receipt.
+        ReceiptNotOpenError: If it was already resolved or rejected.
+    """
+    receipt = Reconciliations(_db_path()).reject(receipt_id, actor=g.actor)
+    return _receipt_payload(receipt), 200
 
 
 # ---------------------------------------------------------------------------

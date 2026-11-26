@@ -69,9 +69,10 @@ wrong (wrong item, wrong state).
 
 ### 4. Reconcile after the shop
 
-Tell Grocery Butler what actually came home. Until receipt reconciliation
-(#150) exists this is manual: go down the plan with OpenClaw and say what
-was bought, substituted or skipped. Log how long it took, and whether
+Tell Grocery Butler what actually came home. Go down the receipt with
+OpenClaw and say what arrived, what was swapped and what was refunded.
+OpenClaw submits it as a receipt and you confirm each line
+([ADR 0018](../adr/0018-receipts-are-reviewed-evidence.md)). Log how long it took, and whether
 anything was marked received that you can't back with a receipt or your own
 eyes. That number must be zero.
 
