@@ -8,6 +8,7 @@
 <section class="add-item-section">
     <h2>Add Preference</h2>
     <form action="/brands/add" method="post" class="add-item-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-row">
             <div class="form-group">
                 <label for="match_target">Target</label>
@@ -62,6 +63,7 @@
                     {% endif %}
                 </div>
                 <form action="/brands/{{ pref.id }}/remove" method="post" class="inline-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-danger btn-sm">Remove</button>
                 </form>
             </div>
@@ -84,6 +86,7 @@
                     {% endif %}
                 </div>
                 <form action="/brands/{{ pref.id }}/remove" method="post" class="inline-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <button type="submit" class="btn btn-danger btn-sm">Remove</button>
                 </form>
             </div>

@@ -161,6 +161,9 @@ def app(db_path: str, e2e_env: None) -> Flask:
     """
     application = create_app(db_path=db_path)
     application.config["TESTING"] = True
+    # CSRF has its own tests (tests/test_web_security.py); off here so these
+    # tests can post forms directly.
+    application.config["WEB_CSRF_ENABLED"] = False
     return application
 
 

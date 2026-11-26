@@ -8,6 +8,7 @@
 <section class="add-item-section">
     <h2>Add Item</h2>
     <form action="/inventory/add" method="post" class="add-item-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-row">
             <div class="form-group">
                 <label for="ingredient">Ingredient</label>

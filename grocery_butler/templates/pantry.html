@@ -8,6 +8,7 @@
 <section class="add-item-section">
     <h2>Add Staple</h2>
     <form action="/pantry/add" method="post" class="add-item-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-row">
             <div class="form-group">
                 <label for="ingredient">Ingredient</label>
@@ -40,6 +41,7 @@
             {% endif %}
         </div>
         <form action="/pantry/{{ staple.id }}/remove" method="post" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="btn btn-danger btn-sm">Remove</button>
         </form>
     </div>
