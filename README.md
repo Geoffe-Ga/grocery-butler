@@ -669,10 +669,13 @@ public ones:
 | `BrandPreference` | A `preferred`/`avoid` rule scoped to category or ingredient. |
 | `HouseholdItem` | One thing the household keeps, with a stable id, a staple policy and a preferred brand and size. |
 | `ItemEvent` | One entry in a household item's append-only audit trail. |
+| `InventoryObservation` | One row of the append-only observation ledger. |
+| `InventorySnapshot` | What we currently believe about an item, and the observation behind it. |
 
 Vocabulary enums (`StrEnum`): `IngredientCategory`, `InventoryStatus`, `Unit`,
 `BrandPreferenceType`, `BrandMatchType`, `PendingActionStatus`,
-`StaplePolicy`, `ItemEventType`.
+`StaplePolicy`, `ItemEventType`, `StockState`, `ObservationSource`,
+`ObservationKind`.
 
 **Canonical items ([ADR 0006](docs/adr/0006-canonical-household-item-identity.md)).**
 `grocery_butler/household_items.py` owns item identity. Every name an item
@@ -683,8 +686,22 @@ nothing, so an unmerge restores the earlier state exactly, and every
 identity change is recorded with its actor. Recipe ingredients, pantry
 staples and inventory rows each carry an `item_id`.
 
-The backlog's next domain concepts (`InventoryObservation`,
-`ReplenishmentNeed`, `ShoppingPlan`, `FulfillmentDraft`, and others) are
+**Observation ledger ([ADR 0007](docs/adr/0007-append-only-inventory-observations.md)).**
+`grocery_butler/inventory_ledger.py` holds what was observed about each
+item: a state (`on_hand`, `low`, `out`), an optional stated quantity, a
+source, a confidence, an actor and a time. Rows are only ever added. A
+correction or a retraction is a new row that supersedes an old one. An
+item's current state is derived on read from its latest valid observation,
+and becomes `unknown` once that observation is older than its category's
+freshness window (7 days for produce, meat, bakery and deli; 10 for dairy;
+30 for beverages and other; 60 for frozen and dry goods). The snapshot
+always says what was last stated, by whom, and when. For now the
+`household_inventory` table is still what the dashboard and the shopping
+list read; every status change through `PantryManager` is also written to
+the ledger.
+
+The backlog's next domain concepts (`ReplenishmentNeed`, `ShoppingPlan`,
+`FulfillmentDraft`, and others) are
 described in
 [Domain model changes](docs/OPENCLAW_ERP_BACKLOG.md#domain-model-changes).
 
