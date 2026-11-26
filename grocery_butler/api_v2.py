@@ -55,6 +55,7 @@ from grocery_butler.models import (
     NewObservation,
     NewProposal,
     ObservationSource,
+    PlanMeal,
     ProposalReview,
     StockState,
 )
@@ -70,11 +71,16 @@ from grocery_butler.replenishment import (
     NeedNotFoundError,
     ReplenishmentNeeds,
 )
+from grocery_butler.shopping_plans import (
+    PlanNotFoundError,
+    RecipeNotFoundError,
+    ShoppingPlans,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from grocery_butler.models import HouseholdItem, ObservationBatch
+    from grocery_butler.models import HouseholdItem, ObservationBatch, ShoppingPlan
 
 LOG = logging.getLogger("api_v2")
 
@@ -113,6 +119,8 @@ _DOMAIN_ERRORS: dict[type[Exception], tuple[int, str]] = {
     InvalidReviewError: (409, "review_invalid"),
     NeedNotFoundError: (404, "need_not_found"),
     InvalidNeedMoveError: (409, "need_move_not_allowed"),
+    PlanNotFoundError: (404, "plan_not_found"),
+    RecipeNotFoundError: (404, "recipe_not_found"),
 }
 
 
@@ -1255,3 +1263,111 @@ def defer_need(need_id: int) -> JsonResult:
         deferred_until=body.until,
     )
     return _need_payload(need_id), 200
+
+
+# ---------------------------------------------------------------------------
+# Shopping plans
+# ---------------------------------------------------------------------------
+
+
+class _PlanRequest(BaseModel):
+    """Body of ``POST /plans``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    meals: list[PlanMeal] = Field(default_factory=list)
+
+
+def _plan_payload(plan: ShoppingPlan) -> dict[str, Any]:
+    """Shape a stored plan, saying whether it still reflects the household.
+
+    Args:
+        plan: A stored plan version.
+
+    Returns:
+        The plan's JSON object. ``is_current`` is false once the needs,
+        recipes or items under it have changed since it was built.
+    """
+    payload: dict[str, Any] = plan.model_dump(mode="json")
+    fingerprint = ShoppingPlans(_db_path()).current_fingerprint(plan.version)
+    payload["is_current"] = fingerprint == plan.content_hash
+    return payload
+
+
+@api_v2.post("/plans")
+@mutation()
+def build_plan() -> JsonResult:
+    """Build the shopping plan from approved needs and the meals given.
+
+    Returns:
+        The plan: 201 when a new version was stored, 200 when nothing
+        changed and the latest version still stands.
+
+    Raises:
+        ApiError: 400 ``plan_invalid`` when a recipe is listed twice.
+    """
+    body = _PlanRequest.model_validate(request.get_json(silent=True) or {})
+    plans = ShoppingPlans(_db_path())
+    before = plans.latest()
+    try:
+        plan = plans.build(body.meals, actor=g.actor)
+    except ValueError as err:
+        raise ApiError(400, "plan_invalid", str(err)) from err
+    created = before is None or plan.version != before.version
+    return _plan_payload(plan), 201 if created else 200
+
+
+@api_v2.get("/plans")
+def list_plans() -> Response:
+    """List every plan version, oldest first, without their lines.
+
+    Returns:
+        ``{"plans": [...]}``, each with its version, hash, line count,
+        author and time.
+    """
+    summaries = [
+        {
+            "version": plan.version,
+            "content_hash": plan.content_hash,
+            "line_count": len(plan.lines),
+            "created_by": plan.created_by,
+            "created_at": plan.created_at.isoformat(),
+        }
+        for plan in ShoppingPlans(_db_path()).list_plans()
+    ]
+    return _json({"plans": summaries}, 200)
+
+
+@api_v2.get("/plans/latest")
+def latest_plan() -> Response:
+    """Return the current plan.
+
+    Returns:
+        The latest plan version with its lines.
+
+    Raises:
+        PlanNotFoundError: If no plan was ever built.
+    """
+    plan = ShoppingPlans(_db_path()).latest()
+    if plan is None:
+        raise PlanNotFoundError(1)
+    return _json(_plan_payload(plan), 200)
+
+
+@api_v2.get("/plans/<int:version>")
+def get_plan(version: int) -> Response:
+    """Return one plan version.
+
+    Args:
+        version: The plan version.
+
+    Returns:
+        The plan with its lines.
+
+    Raises:
+        PlanNotFoundError: If there is no such version.
+    """
+    plan = ShoppingPlans(_db_path()).get(version)
+    if plan is None:
+        raise PlanNotFoundError(version)
+    return _json(_plan_payload(plan), 200)
