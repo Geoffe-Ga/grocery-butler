@@ -16,6 +16,7 @@ kind of record is and when it stops mattering.
 | Inventory observations and item, need and plan history | Until deleted | Append-only audit trail (ADR 0007). Old observations stop counting as current after the category's freshness window; they stay in the ledger. |
 | Observation batches and their proposals | Until deleted | A batch nobody reviews expires after 72 hours and can no longer be applied. The record stays. |
 | Approval envelopes | Until deleted | An approval expires 30 minutes after it is drafted. The record stays. |
+| Handoff attempts | Until deleted | One row per approved handoff: the adapter, the plan version, the link and when it expires. No payment or order data; none exists. |
 | API idempotency records | Until deleted | A key is only honoured for 30 days. |
 | Operational counters | Until deleted | One number per counter per day. No household content. |
 | Audit events | Not in the database | Lines in the platform's logs, kept as long as the platform keeps logs. No images or secrets. |
@@ -34,9 +35,11 @@ export.
 | Anthropic API | The text of a recipe, or of an inventory update, being parsed | Claude turns free text into structured rows. It holds no state for us. |
 | Tailscale | Network metadata only; traffic is end to end encrypted | The dashboard and API are reachable only on the tailnet. |
 | OpenClaw (RubotPaul) | Whatever it reads and writes through `/api/v1` and `/api/v2` | The household's own assistant. |
+| Instacart | Only if the adapter is enabled and a member approves a handoff: that plan's item names, amounts, and brand or organic preferences | Creates the shopping list link (ADR 0014). It receives no member identity and no hard constraints. |
 
-No retailer receives anything from Grocery Butler (ADR 0001). A shopping
-list leaves only when a person exports it and takes it somewhere.
+Nothing goes to a retailer or to Instacart without a member's approval of
+that exact plan (ADR 0016). Otherwise a shopping list leaves only when a
+person exports it and takes it somewhere.
 
 ## Export
 

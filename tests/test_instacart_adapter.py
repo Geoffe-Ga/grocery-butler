@@ -527,14 +527,16 @@ class TestBoundary:
 
         assert {"models.py", "api_v2.py", "shopping_plans.py", "registry.py"} <= names
 
-    def test_the_package_can_not_reach_a_network(self) -> None:
-        """No HTTP or socket library is imported here until #148."""
+    def test_only_the_http_transport_can_reach_a_network(self) -> None:
+        """One module imports a network library; the rest of the package can't."""
         network = ("requests", "httpx", "httpx2", "urllib", "http", "socket", "aiohttp")
         offending = sorted(
-            f"{path.name}: {name}"
-            for path in (PACKAGE / "fulfillment" / "instacart").glob("*.py")
-            for name in _imports(path)
-            if name.split(".")[0] in network
+            {
+                path.name
+                for path in (PACKAGE / "fulfillment" / "instacart").glob("*.py")
+                for name in _imports(path)
+                if name.split(".")[0] in network
+            }
         )
 
-        assert offending == []
+        assert offending == ["http_transport.py"]

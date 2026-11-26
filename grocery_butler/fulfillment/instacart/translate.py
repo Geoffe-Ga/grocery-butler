@@ -164,6 +164,8 @@ def _measurements(
         )
         return [], [(IssueKind.AMBIGUOUS_MAPPING, detail)]
     amount = line.amounts[0]
+    # The plan model doesn't forbid a zero amount, and Instacart answers one
+    # with a 400, so it is caught here rather than sent.
     if amount.quantity <= 0:
         detail = f"{stated} is not an amount that can be bought; none was sent."
         return [], [(IssueKind.AMBIGUOUS_MAPPING, detail)]

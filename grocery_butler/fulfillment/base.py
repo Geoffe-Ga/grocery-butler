@@ -21,7 +21,7 @@ from __future__ import annotations
 import abc
 import enum
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import datetime as dt
@@ -195,6 +195,23 @@ class FulfillmentAdapter(abc.ABC):
         Returns:
             What was created, or how it failed. Never a purchase.
         """
+
+    def preview_issues(self, plan: ShoppingPlan) -> tuple[dict[str, Any], ...]:
+        """List what a handoff of this plan would leave out, without sending it.
+
+        A person is shown these before approving a handoff. The default is
+        nothing; an adapter that translates the plan for an outside service
+        overrides this.
+
+        Args:
+            plan: The stored plan version.
+
+        Returns:
+            Plain-data issues, each with at least ``kind``, ``item_id``,
+            ``display_name`` and ``detail``.
+        """
+        del plan
+        return ()
 
     def require(self, capability: Capability) -> None:
         """Check that this adapter declared a capability.
