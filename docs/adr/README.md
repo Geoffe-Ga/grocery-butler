@@ -16,6 +16,7 @@ ADR that supersedes the old one, rather than an edit.
 | [0008](0008-explicit-replenishment-needs.md) | Explicit replenishment needs, one per item, with first-class reasons | Accepted |
 | [0009](0009-capability-api-v2-contract.md) | Capability API v2 contract: named actors, idempotency keys, coded errors | Accepted |
 | [0010](0010-immutable-approval-envelopes.md) | Approvals are bound to immutable, expiring envelopes | Accepted |
+| [0011](0011-versioned-deterministic-shopping-plans.md) | Shopping plans are immutable versions built by a deterministic rule | Accepted |
 
 The product backlog these decisions serve is
 [`docs/OPENCLAW_ERP_BACKLOG.md`](../OPENCLAW_ERP_BACKLOG.md).

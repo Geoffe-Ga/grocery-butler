@@ -519,8 +519,8 @@ The contract is [`docs/api/v2.md`](docs/api/v2.md); the reasons are in
   applied all at once or not at all.
 - **Live today:** household members; household items with their aliases,
   merges, current state and history; observations a member states directly;
-  observation batches; and replenishment needs. Plans, handoffs and receipts
-  arrive with their own work.
+  observation batches; replenishment needs; and shopping plans. Handoffs
+  and receipts arrive with their own work.
 
 ### Discord Bot Commands
 
@@ -696,6 +696,7 @@ public ones:
 | `InventoryObservation` | One row of the append-only observation ledger. |
 | `InventorySnapshot` | What we currently believe about an item, and the observation behind it. |
 | `ReplenishmentNeed` | An item that should be bought, with its status and reasons. |
+| `ShoppingPlan` | One immutable version of what the household intends to buy. |
 
 Vocabulary enums (`StrEnum`): `IngredientCategory`, `InventoryStatus`, `Unit`,
 `BrandPreferenceType`, `BrandMatchType`, `PendingActionStatus`,
@@ -748,8 +749,18 @@ earlier approval. The only scope is a handoff; approving a purchase belongs
 in the retailer's own checkout. Shopping plans and handoffs start using
 envelopes as they are built.
 
-The backlog's next domain concepts (`ShoppingPlan`, `FulfillmentDraft`, and
-others) are
+**Shopping plans ([ADR 0011](docs/adr/0011-versioned-deterministic-shopping-plans.md)).**
+`grocery_butler/shopping_plans.py` builds the plan: one line per household
+item, with every reason it is there. It is built by plain code from the needs
+a member approved and, optionally, saved recipes to shop for. No model takes
+part, so the same inputs always give the same plan and the same hash. Each
+plan is a numbered version that is never changed; a change in the inputs
+makes the next version. Amounts come only from recipes; a line that only a
+need put there has no amount and means "the usual". The older shopping list
+(`/api/v1/shopping-list/preview` and the dashboard page) still works as
+before and is retired with v1.
+
+The backlog's next domain concepts (`FulfillmentDraft` and others) are
 described in
 [Domain model changes](docs/OPENCLAW_ERP_BACKLOG.md#domain-model-changes).
 
