@@ -16,6 +16,7 @@ import datetime as dt
 import functools
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from flask import Blueprint, Response, current_app, g, request
@@ -131,6 +132,11 @@ API_V2_PREFIX = "/api/v2"
 api_v2 = Blueprint("api_v2", __name__, url_prefix=API_V2_PREFIX)
 
 MEMBER_HEADER = "X-Household-Member"
+
+# App config key for the function that waits between provider retries. Unset,
+# it is ``time.sleep``. End-to-end tests set a recorder, so the retry loop
+# runs for real without the test waiting.
+RETRY_SLEEP_CONFIG = "RETRY_SLEEP"
 IDEMPOTENCY_HEADER = "Idempotency-Key"
 REPLAY_HEADER = "Idempotency-Replayed"
 
@@ -1486,7 +1492,11 @@ def _handoffs() -> Handoffs:
     Returns:
         The service, over this deployment's adapters.
     """
-    return Handoffs(_db_path(), default_registry().get)
+    return Handoffs(
+        _db_path(),
+        default_registry().get,
+        sleep=current_app.config.get(RETRY_SLEEP_CONFIG, time.sleep),
+    )
 
 
 def _approval_payload(envelope: ApprovalEnvelope) -> dict[str, Any]:
