@@ -9,21 +9,19 @@
 #   2. $PROJECT_ROOT/.venv/
 #   3. Shared venv at ../../grocery-butler/.venv/ (worktree layout)
 
-if [ -n "${VIRTUAL_ENV:-}" ]; then
-    return 0 2>/dev/null || exit 0
-fi
-
-_VENV_CANDIDATES=(
-    "$PROJECT_ROOT/.venv"
-    "$PROJECT_ROOT/../../grocery-butler/.venv"
-)
-
-for _venv in "${_VENV_CANDIDATES[@]}"; do
-    if [ -f "$_venv/bin/activate" ]; then
-        export VIRTUAL_ENV="$_venv"
-        export PATH="$_venv/bin:$PATH"
-        return 0 2>/dev/null || exit 0
+if [ -z "${VIRTUAL_ENV:-}" ]; then
+    _VENV_CANDIDATES=(
+        "$PROJECT_ROOT/.venv"
+        "$PROJECT_ROOT/../../grocery-butler/.venv"
+    )
+    for _venv in "${_VENV_CANDIDATES[@]}"; do
+        if [ -f "$_venv/bin/activate" ]; then
+            export VIRTUAL_ENV="$_venv"
+            export PATH="$_venv/bin:$PATH"
+            break
+        fi
+    done
+    if [ -z "${VIRTUAL_ENV:-}" ]; then
+        echo "Warning: No virtualenv found. Tools may not be available." >&2
     fi
-done
-
-echo "Warning: No virtualenv found. Tools may not be available." >&2
+fi

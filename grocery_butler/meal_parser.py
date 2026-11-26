@@ -474,7 +474,7 @@ class MealParser:
         prompt = load_prompt(
             "meal_decomposition",
             default_servings=str(target_servings),
-            dietary_restrictions=dietary if dietary else "None",
+            dietary_restrictions=dietary or "None",
             pantry_staples=", ".join(pantry_names) if pantry_names else "None",
             units=units,
             known_recipes=(

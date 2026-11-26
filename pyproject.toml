@@ -51,6 +51,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "e2e: end-to-end tests exercising real wiring with mocks only at external boundaries",
     "integration: integration tests",
@@ -145,6 +146,8 @@ select = [
     "SIM",    # flake8-simplify
     "TCH",    # flake8-type-checking
     "RUF",    # Ruff-specific rules
+    "TRY",    # tryceratops (exception handling)
+    "FURB",   # refurb (modernization)
 ]
 ignore = []
 
@@ -160,3 +163,13 @@ paths_to_mutate = "grocery_butler/"
 backup = false
 runner = "python -m pytest --exitfirst --quiet --tb=no"
 tests_dir = "tests/"
+
+[tool.interrogate]
+# Docstring coverage. scripts/lint.sh, the pre-commit hook and CI all read this
+# table, so the rule is set in one place.
+fail-under = 95
+ignore-init-method = true
+ignore-init-module = true
+ignore-magic = true
+ignore-nested-functions = true
+exclude = [".venv", "build", "dist", "docs", "plans", ".claude", "htmlcov"]

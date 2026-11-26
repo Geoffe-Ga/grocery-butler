@@ -30,6 +30,25 @@ logger = logging.getLogger(__name__)
 _RESTOCK_STATUSES = (InventoryStatus.LOW, InventoryStatus.OUT)
 
 
+class MissingRowIdError(RuntimeError):
+    """Raised when an INSERT returns no row id."""
+
+    def __init__(self) -> None:
+        """Use the one message this error carries."""
+        super().__init__("Insert did not return a row id")
+
+
+class NotAJsonArrayError(ValueError):
+    """Raised when Claude's inventory reply parses as JSON but isn't an array.
+
+    It stays a ``ValueError``, because callers treat any malformed reply alike.
+    """
+
+    def __init__(self) -> None:
+        """Use the one message this error carries."""
+        super().__init__("Expected a JSON array")
+
+
 class RecipeStoreProtocol(Protocol):
     """Protocol for RecipeStore pantry staple lookup.
 
@@ -150,7 +169,7 @@ class PantryManager:
             conn.commit()
             row_id = cursor.lastrowid
             if row_id is None:  # pragma: no cover
-                raise RuntimeError("Insert did not return a row id")
+                raise MissingRowIdError
             return row_id
         finally:
             conn.close()
@@ -405,7 +424,7 @@ def _parse_claude_response(text: str) -> list[InventoryUpdate]:
     """
     data = json.loads(extract_json_text(text))
     if not isinstance(data, list):
-        raise ValueError("Expected a JSON array")
+        raise NotAJsonArrayError
 
     updates = []
     for entry in data:

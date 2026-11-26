@@ -310,6 +310,17 @@ def create_connection(db_url: str) -> DatabaseConnection:
     return _create_sqlite_connection(db_url)
 
 
+class PostgresDriverMissingError(ImportError):
+    """Raised when a PostgreSQL URL is given but psycopg2 isn't installed."""
+
+    def __init__(self) -> None:
+        """Say which package to install."""
+        super().__init__(
+            "PostgreSQL support requires psycopg2-binary. "
+            "Install it with: pip install psycopg2-binary"
+        )
+
+
 def _create_postgres_connection(db_url: str) -> PostgresConnection:
     """Create a configured PostgreSQL connection.
 
@@ -326,10 +337,7 @@ def _create_postgres_connection(db_url: str) -> PostgresConnection:
         ImportError: If psycopg2 is not installed.
     """
     if not _HAS_PSYCOPG2:
-        raise ImportError(
-            "PostgreSQL support requires psycopg2-binary. "
-            "Install it with: pip install psycopg2-binary"
-        )
+        raise PostgresDriverMissingError
     raw = psycopg2.connect(db_url)
     return PostgresConnection(raw)
 

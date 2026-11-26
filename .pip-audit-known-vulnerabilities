@@ -1,0 +1,9 @@
+# Known vulnerabilities in dependencies that cannot be fixed yet.
+# scripts/security.sh passes each ID here to pip-audit --ignore-vuln.
+# Format: VULN_ID  # package - reason - tracking issue
+#
+# Review periodically and remove entries when fixes become available.
+# The list is empty: the pinned requirements audit clean.
+#
+# Example (uncomment and edit):
+# CVE-2025-00000    # example-package - no fix yet - tracking #123

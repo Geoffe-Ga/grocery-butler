@@ -6,6 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# shellcheck source=scripts/activate-venv.sh
 source "$SCRIPT_DIR/activate-venv.sh"
 
 VERBOSE=false
@@ -59,30 +60,23 @@ fi
 
 echo "=== Code Complexity Analysis ==="
 
-# Check Cyclomatic Complexity with Radon
-if command -v radon &> /dev/null; then
-    echo ""
-    echo "Cyclomatic Complexity (should be <= 10):"
-    radon cc -a grocery_butler/ || true
+for tool in radon xenon; do
+    command -v "$tool" >/dev/null || { echo "✗ $tool not installed: pip install -r requirements-dev.txt" >&2; exit 1; }
+done
 
-    echo ""
-    echo "Maintainability Index (should be >= 20):"
-    radon mi -a grocery_butler/ || true
-else
-    echo "Warning: radon not installed, skipping cyclomatic complexity check" >&2
-fi
+# One scope and one threshold set, shared with CI (which runs this script).
+# CLAUDE.md: complexity <= 10 per function (xenon rank B), modules and the
+# average stay at rank A.
+echo ""
+echo "Cyclomatic complexity (report):"
+radon cc -a -nb grocery_butler/
 
-# Check complexity with Xenon
-if command -v xenon &> /dev/null; then
-    if $VERBOSE; then
-        echo "Running Xenon complexity check..."
-    fi
-    xenon --max-absolute B --max-modules B --max-average B grocery_butler/ ||         { echo "✗ Complexity exceeds thresholds" >&2; exit 1; }
-else
-    if $VERBOSE; then
-        echo "Note: xenon not installed for strict complexity checks"
-    fi
-fi
+echo ""
+echo "Maintainability index (report):"
+radon mi -nb grocery_butler/
+
+xenon --max-absolute B --max-modules A --max-average A grocery_butler/ \
+    || { echo "✗ Complexity exceeds thresholds" >&2; exit 1; }
 
 echo "✓ Complexity analysis completed"
 exit 0
