@@ -31,9 +31,11 @@ jobs:
   python:
     name: Python gate (${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    # The old quality job's slowest successful run was 2.3 min; this one adds
-    # the build and a pinned-requirements audit, so it gets room until measured.
-    timeout-minutes: 10
+    # Measured on 2026-11-26 with 2,785 tests: 7.5 min on one version, and two
+    # others were cancelled at the old 10 min limit with the second test pass
+    # 82% done, so a run needs about 11 min. check-all runs the tests twice
+    # (the unit lane, then everything under coverage), which is most of it.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
