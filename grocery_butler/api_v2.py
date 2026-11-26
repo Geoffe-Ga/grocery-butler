@@ -23,6 +23,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from werkzeug.exceptions import HTTPException
 
 from grocery_butler.auth_middleware import require_bearer
+from grocery_butler.fulfillment.base import Capability
+from grocery_butler.fulfillment.registry import default_registry
 from grocery_butler.household_items import (
     AliasConflictError,
     HouseholdItemStore,
@@ -1371,3 +1373,74 @@ def get_plan(version: int) -> Response:
     if plan is None:
         raise PlanNotFoundError(version)
     return _json(_plan_payload(plan), 200)
+
+
+# ---------------------------------------------------------------------------
+# Fulfillment: adapters and the universal list export
+# ---------------------------------------------------------------------------
+
+
+@api_v2.get("/fulfillment/adapters")
+def list_adapters() -> Response:
+    """List the fulfillment adapters this deployment offers.
+
+    Returns:
+        ``{"adapters": [...]}``: each adapter's name, capabilities,
+        authorization, data freshness and whether a person must act.
+    """
+    adapters = [
+        {
+            "name": description.name,
+            "display_name": description.display_name,
+            "capabilities": sorted(c.value for c in description.capabilities),
+            "authorization": description.authorization.value,
+            "data_freshness": description.data_freshness,
+            "human_required": description.human_required,
+        }
+        for description in (a.describe() for a in default_registry().adapters())
+    ]
+    return _json({"adapters": adapters}, 200)
+
+
+@api_v2.get("/plans/<int:version>/export")
+def export_plan(version: int) -> Response:
+    """Export a plan version as a list for any store.
+
+    Query: ``format`` is ``text`` (the default), ``json`` or ``csv``.
+    Exporting changes nothing and contacts nobody, so it needs no approval.
+
+    Args:
+        version: The plan version.
+
+    Returns:
+        The export's content with the plan version and hash it came from.
+
+    Raises:
+        PlanNotFoundError: If there is no such version.
+        ApiError: 400 ``validation_failed`` for an unknown format.
+    """
+    plan = ShoppingPlans(_db_path()).get(version)
+    if plan is None:
+        raise PlanNotFoundError(version)
+    adapter = default_registry().get("export")
+    adapter.require(Capability.EXPORT_LIST)
+    result = adapter.create_handoff(plan)
+    wanted = request.args.get("format", "text")
+    if wanted not in result.artifacts:
+        raise ApiError(
+            400,
+            "validation_failed",
+            f"format must be one of: {', '.join(sorted(result.artifacts))}.",
+        )
+    return _json(
+        {
+            "adapter": result.adapter,
+            "status": result.status.value,
+            "plan_version": result.plan_version,
+            "plan_content_hash": result.plan_content_hash,
+            "format": wanted,
+            "content": result.artifacts[wanted],
+            "human_action": result.human_action,
+        },
+        200,
+    )

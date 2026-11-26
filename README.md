@@ -236,11 +236,33 @@ What that means today:
 - There is **no** Safeway (or other retailer) username, password, store id, or
   order-submission flag to configure. Don't add one.
 - Grocery Butler **cannot** build, review, or submit a retailer cart. Its
-  output is a retailer-neutral shopping list; checkout happens in the
+  output is a retailer-neutral shopping plan; checkout happens in the
   retailer's own app or site, by a person.
-- New fulfillment paths arrive only as authorized adapters (a list export
-  first, then options chosen after the terms review in backlog P2.2). No
-  adapter is built from undocumented endpoints.
+- New fulfillment paths arrive only as authorized adapters, chosen after the
+  terms review in backlog P2.2. No adapter is built from undocumented
+  endpoints.
+
+### Fulfillment adapters
+
+A fulfillment adapter moves an approved plan toward a purchase the household
+completes somewhere else. The interface is
+`grocery_butler/fulfillment/base.py`; adapters live beside it and are found
+through `grocery_butler/fulfillment/registry.py`.
+
+- **Each adapter declares itself:** its capabilities (`export_list`,
+  `open_search`, `shopping_list_link`, `draft_cart`, `deep_link_cart`,
+  `read_cart`, `read_order`, `import_receipt`), how it is authorized, how
+  fresh its data is, and that a person must act.
+- **A handoff is never an order.** A result says a handoff was created or
+  failed. The vocabulary has no word for a purchase.
+- **No stored retailer credentials.** The authorization methods are none, a
+  provider's developer program, or the user's own session.
+- **Core modules never import an adapter.** A test walks the imports of
+  every domain module to hold that line.
+
+The one adapter today is the **list export** (`fulfillment/export.py`): any
+plan version as a grouped checklist in text, JSON or CSV, for any store. It
+contacts nothing. Get it from `GET /api/v2/plans/{version}/export`.
 
 The live-API verification plans that used to live here (#31, #32, #60) are
 superseded by the ADR.

@@ -1240,3 +1240,84 @@ class TestPlans:
         response = api.call("GET", "/plans/7")
 
         assert _error(response)["code"] == "plan_not_found"
+
+
+class TestFulfillment:
+    """Adapters are declared, and any plan can be exported for any store."""
+
+    def test_adapters_declare_what_they_do(self, api: Api) -> None:
+        """OpenClaw can see what each adapter can and can't do."""
+        adapters = api.call("GET", "/fulfillment/adapters").get_json()["adapters"]
+
+        assert adapters == [
+            {
+                "name": "export",
+                "display_name": "Shopping list export",
+                "capabilities": ["export_list"],
+                "authorization": "none",
+                "data_freshness": adapters[0]["data_freshness"],
+                "human_required": True,
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        ("fmt", "marker"),
+        [
+            ("text", "[ ] Oat Milk: the usual (requested)"),
+            ("csv", "Oat Milk"),
+            ("json", '"item": "Oat Milk"'),
+        ],
+    )
+    def test_export_in_each_format(self, api: Api, fmt: str, marker: str) -> None:
+        """The same plan in text, CSV and JSON, tied to its version and hash."""
+        item_id = _item(api, "oat milk")
+        api.call("POST", "/needs", {"item_id": item_id})
+        plan = api.call("POST", "/plans").get_json()
+
+        response = api.call("GET", "/plans/1/export", query=f"format={fmt}")
+
+        export = response.get_json()
+        assert response.status_code == 200
+        assert export["adapter"] == "export"
+        assert export["status"] == "created"
+        assert export["format"] == fmt
+        assert export["plan_version"] == 1
+        assert export["plan_content_hash"] == plan["content_hash"]
+        assert marker in export["content"]
+        assert "Nothing has been ordered" in export["human_action"]
+
+    def test_text_is_the_default_format(self, api: Api) -> None:
+        """No format means the checklist."""
+        api.call("POST", "/plans")
+
+        export = api.call("GET", "/plans/1/export").get_json()
+
+        assert export["format"] == "text"
+        assert export["content"] == "Shopping plan v1\n\nNothing to buy.\n"
+
+    def test_exporting_changes_nothing(self, api: Api) -> None:
+        """An export is a read: no new version, and the need stays planned."""
+        item_id = _item(api, "oat milk")
+        api.call("POST", "/needs", {"item_id": item_id})
+        api.call("POST", "/plans")
+
+        api.call("GET", "/plans/1/export")
+        api.call("GET", "/plans/1/export", query="format=csv")
+
+        need = api.call("GET", f"/items/{item_id}").get_json()["open_need"]
+        assert len(api.call("GET", "/plans").get_json()["plans"]) == 1
+        assert need["status"] == "planned"
+
+    def test_unknown_format_and_missing_plan_are_coded(self, api: Api) -> None:
+        """Each failure has its code."""
+        api.call("POST", "/plans")
+
+        bad_format = api.call("GET", "/plans/1/export", query="format=pdf")
+        missing = api.call("GET", "/plans/9/export")
+
+        assert (bad_format.status_code, _error(bad_format)["code"]) == (
+            400,
+            "validation_failed",
+        )
+        assert "csv, json, text" in _error(bad_format)["message"]
+        assert (missing.status_code, _error(missing)["code"]) == (404, "plan_not_found")
