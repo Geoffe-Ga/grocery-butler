@@ -278,7 +278,7 @@ def _register_network_guard(app: Flask) -> None:
 
 
 def _register_api(app: Flask) -> None:
-    """Register the RubotPaul-facing /api/v1 JSON blueprint.
+    """Register the OpenClaw-facing JSON blueprints, /api/v1 and /api/v2.
 
     Validates production startup config (RubotPaul shared secret) and
     warns about optional-but-recommended config (Anthropic API key)
@@ -292,10 +292,12 @@ def _register_api(app: Flask) -> None:
             ``RUBOTPAUL_SHARED_SECRET`` is unset or empty.
     """
     from grocery_butler.api import api_v1
+    from grocery_butler.api_v2 import api_v2
 
     _require_rubotpaul_secret()
     _warn_if_no_anthropic_key()
     app.register_blueprint(api_v1)
+    app.register_blueprint(api_v2)
 
 
 def _get_db() -> DatabaseConnection:
@@ -341,6 +343,9 @@ def _register_teardown(app: Flask) -> None:
 #: (Issue #77).
 _API_PATH_PREFIX = "/api/v1"
 
+#: ``/api/v2`` errors use that API's coded envelope (ADR 0009) instead.
+_API_V2_PATH_PREFIX = "/api/v2"
+
 
 def _wants_json_error() -> bool:
     """Return whether the current request expects a JSON error body.
@@ -367,6 +372,10 @@ def _api_or_html_error(
         ``/api/v1`` requests, or the rendered ``error.html`` template
         for everything else.
     """
+    if request.path.startswith(_API_V2_PATH_PREFIX):
+        from grocery_butler.api_v2 import framework_error
+
+        return framework_error(code, json_message), code
     if _wants_json_error():
         return jsonify(error=json_message), code
     return render_template("error.html", code=code, message=html_message), code
