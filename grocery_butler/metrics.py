@@ -22,6 +22,7 @@ drift from the truth.
 from __future__ import annotations
 
 import datetime as dt
+import functools
 from contextlib import closing
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -57,6 +58,15 @@ _DECISIONS = (
 )
 _GAPS = (
     "SELECT COUNT(*) AS n FROM replenishment_needs WHERE status = ? AND updated_at < ?"
+)
+_ATTEMPTS = "SELECT status, link_expires_at, opened_at, id FROM fulfillment_attempts"
+_RECONCILED_ATTEMPTS = (
+    "SELECT DISTINCT attempt_id FROM receipts"
+    " WHERE attempt_id IS NOT NULL AND status = 'confirmed'"
+)
+_DRAFTS_NOT_SENT = (
+    "SELECT COUNT(*) AS n FROM approval_envelopes"
+    " WHERE kind = 'plan_handoff' AND status IN ('rejected', 'stale')"
 )
 _HANDOFF_GAPS = (
     "SELECT COUNT(*) AS n FROM fulfillment_attempts"
@@ -98,6 +108,60 @@ def _number(
     """
     row = conn.execute(sql, params).fetchone()
     return int(row[column]) if row is not None else 0
+
+
+def _where(rows: list[Any], column: str, value: object) -> list[Any]:
+    """Keep the rows whose column holds a value.
+
+    Args:
+        rows: Database rows.
+        column: The column to compare.
+        value: The value to keep.
+
+    Returns:
+        The matching rows.
+    """
+    return [row for row in rows if row[column] == value]
+
+
+def _how_many(rows: list[Any], test: Callable[[Any], bool]) -> int:
+    """Count the rows that pass a test.
+
+    Args:
+        rows: Database rows.
+        test: Says whether a row counts.
+
+    Returns:
+        The count.
+    """
+    return len([row for row in rows if test(row)])
+
+
+def _in(row: Any, ids: set[int]) -> bool:
+    """Say whether a row's id is in a set.
+
+    Args:
+        row: A row with an ``id`` column.
+        ids: The ids to look in.
+
+    Returns:
+        True when it is.
+    """
+    return row["id"] in ids
+
+
+def _abandoned(row: Any, now: str) -> bool:
+    """Say whether a created handoff expired without being opened.
+
+    Args:
+        row: A ``fulfillment_attempts`` row with status ``created``.
+        now: The current time, ISO 8601.
+
+    Returns:
+        True when its link has run out and nobody followed it.
+    """
+    expires = row["link_expires_at"]
+    return not row["opened_at"] and bool(expires) and expires <= now
 
 
 class Metrics:
@@ -227,6 +291,35 @@ class Metrics:
             handoffs = _number(conn, _HANDOFF_GAPS, (cutoff,), "n")
         return needs + handoffs
 
+    def handoffs(self) -> dict[str, int]:
+        """Count what became of the household's handoffs.
+
+        Returns:
+            ``created`` (a link was made), ``opened`` (a member followed
+            it), ``abandoned`` (it expired without being opened),
+            ``reconciled`` (a confirmed receipt points at it), ``failed``,
+            and ``corrected_before_handoff`` (a draft the member rejected,
+            or that went stale because the plan changed first). Counts
+            only: no item, name or link.
+        """
+        now = self._clock().isoformat()
+        with closing(get_connection(self._db_path)) as conn:
+            rows = conn.execute(_ATTEMPTS).fetchall()
+            reconciled = {
+                row["attempt_id"]
+                for row in conn.execute(_RECONCILED_ATTEMPTS).fetchall()
+            }
+            corrected = _number(conn, _DRAFTS_NOT_SENT, (), "n")
+        made = _where(rows, "status", "created")
+        return {
+            "created": len(made),
+            "opened": len(made) - len(_where(made, "opened_at", None)),
+            "abandoned": _how_many(made, functools.partial(_abandoned, now=now)),
+            "reconciled": _how_many(made, functools.partial(_in, ids=reconciled)),
+            "failed": len(_where(rows, "status", "failed")),
+            "corrected_before_handoff": corrected,
+        }
+
     def snapshot(self) -> dict[str, Any]:
         """Read all five metrics at once.
 
@@ -240,6 +333,7 @@ class Metrics:
             "correction_rate": self.correction_rate(),
             "stale_inventory": self.stale_inventory(),
             "reconciliation_gaps": self.reconciliation_gaps(),
+            "handoffs": self.handoffs(),
         }
 
     def _counter_view(self, counter: Counter) -> dict[str, int]:

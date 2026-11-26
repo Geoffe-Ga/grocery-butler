@@ -48,6 +48,7 @@ from grocery_butler.fulfillment.handoffs import (
 )
 from grocery_butler.fulfillment.registry import AdapterNotFoundError, default_registry
 from grocery_butler.fulfillment.runner import create_handoff
+from grocery_butler.fulfillment.wording import checks_for, summarize
 from grocery_butler.household_items import (
     AliasConflictError,
     HouseholdItemStore,
@@ -1515,14 +1516,18 @@ def _approval_payload(envelope: ApprovalEnvelope) -> dict[str, Any]:
 
 
 def _attempt_payload(attempt: HandoffAttempt) -> dict[str, Any]:
-    """Serialize a handoff attempt.
+    """Serialize a handoff attempt, with what was sent and what to say.
 
     Args:
         attempt: The attempt.
 
     Returns:
-        The attempt as JSON-ready data. The idempotency key is left out.
+        The attempt as JSON-ready data: its link and expiry, the lines as
+        approved, what still needs a person's check, and a sentence to say.
+        The idempotency key is left out.
     """
+    approved = _handoffs().approved_payload(attempt)
+    live = attempt.status in (AttemptStatus.CREATED, AttemptStatus.OPENED)
     return {
         "id": attempt.id,
         "approval_id": attempt.envelope_id,
@@ -1531,12 +1536,21 @@ def _attempt_payload(attempt: HandoffAttempt) -> dict[str, Any]:
         "plan_content_hash": attempt.plan_content_hash,
         "status": attempt.status.value,
         "external_url": attempt.external_url,
+        "open_path": f"/handoff/attempts/{attempt.id}/open" if live else None,
         "link_expires_at": (
             attempt.link_expires_at.isoformat() if attempt.link_expires_at else None
         ),
+        "opened_at": attempt.opened_at.isoformat() if attempt.opened_at else None,
         "error_code": attempt.error_code,
         "retryable": attempt.retryable,
         "human_action": attempt.human_action,
+        "summary": summarize(attempt, approved),
+        "needs_your_check": checks_for(approved),
+        "sent": {
+            "lines": approved.get("lines", []),
+            "issues": approved.get("issues", []),
+            "unenforced_constraints": approved.get("unenforced_constraints", []),
+        },
         "created_by": attempt.created_by,
         "created_at": attempt.created_at.isoformat(),
         "updated_at": attempt.updated_at.isoformat(),

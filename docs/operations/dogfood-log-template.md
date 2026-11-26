@@ -77,6 +77,7 @@ Notes:
 | `correction_rate` | |
 | `stale_inventory` | |
 | `reconciliation_gaps` | |
+| `handoffs.created` / `opened` / `abandoned` / `reconciled` | |
 
 ## Weekly checks
 
