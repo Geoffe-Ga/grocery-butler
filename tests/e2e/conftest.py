@@ -16,6 +16,7 @@ secrets) and locally.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import os
@@ -83,27 +84,49 @@ def _run_on_postgres(statement: str) -> None:
         conn.commit()
 
 
-@pytest.fixture(
-    params=[
-        "sqlite",
-        pytest.param(
-            "postgres",
-            marks=pytest.mark.skipif(
-                not POSTGRES_URL, reason="TEST_DATABASE_URL not set"
-            ),
-        ),
-    ]
-)
+@contextlib.contextmanager
+def empty_database(dialect: str, tmp_path: Path) -> Iterator[str]:
+    """Yield a database with nothing in it, not even a schema's tables.
+
+    On SQLite it is a file path that does not exist yet. On Postgres it is
+    a schema of its own inside the throwaway database, dropped afterwards,
+    so no test sees another's rows and none depends on order or cleanup.
+
+    Args:
+        dialect: ``"sqlite"`` or ``"postgres"``.
+        tmp_path: Pytest's per-test temporary directory.
+
+    Yields:
+        A SQLite file path, or a Postgres URL bound to the new schema.
+    """
+    if dialect == "sqlite":
+        yield str(tmp_path / "e2e.db")
+        return
+    schema = f"e2e_{uuid.uuid4().hex}"
+    _run_on_postgres(f"CREATE SCHEMA {quote_identifier(schema)}")
+    try:
+        yield _postgres_url_for_schema(POSTGRES_URL, schema)
+    finally:
+        _run_on_postgres(f"DROP SCHEMA {quote_identifier(schema)} CASCADE")
+
+
+#: Both dialects; the Postgres one skips without a throwaway database.
+DIALECTS = [
+    "sqlite",
+    pytest.param(
+        "postgres",
+        marks=pytest.mark.skipif(not POSTGRES_URL, reason="TEST_DATABASE_URL not set"),
+    ),
+]
+
+
+@pytest.fixture(params=DIALECTS)
 def db_path(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[str]:
     """Yield a fresh, migrated database: once on SQLite, once on Postgres.
 
     The single seam for the storage backend. Every fixture and service in
     this suite reads and writes through this value, so each end-to-end
     test runs against both dialects with the same assertions (issue #227).
-
-    On Postgres each test gets a schema of its own inside the throwaway
-    database, dropped afterwards. No test sees another's rows, so none
-    depends on order or on cleanup having run.
 
     Args:
         request: Says which dialect this run is for.
@@ -112,19 +135,9 @@ def db_path(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[str]:
     Yields:
         A SQLite file path, or a Postgres URL bound to the test's schema.
     """
-    if request.param == "sqlite":
-        path = str(tmp_path / "e2e.db")
-        init_db(path)
-        yield path
-        return
-    schema = f"e2e_{uuid.uuid4().hex}"
-    _run_on_postgres(f"CREATE SCHEMA {quote_identifier(schema)}")
-    url = _postgres_url_for_schema(POSTGRES_URL, schema)
-    try:
-        init_db(url)
-        yield url
-    finally:
-        _run_on_postgres(f"DROP SCHEMA {quote_identifier(schema)} CASCADE")
+    with empty_database(request.param, tmp_path) as location:
+        init_db(location)
+        yield location
 
 
 @pytest.fixture(autouse=True)

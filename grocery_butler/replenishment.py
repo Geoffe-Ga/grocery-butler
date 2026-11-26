@@ -740,3 +740,17 @@ class ReplenishmentNeeds:
             created_at=dt.datetime.fromisoformat(row["created_at"]),
             updated_at=dt.datetime.fromisoformat(row["updated_at"]),
         )
+
+
+def backfill_needs(db_path: str) -> None:
+    """Bring every item's need in step with what inventory already says.
+
+    Migration 024's hook. Needs are opened when an observation arrives, so
+    an item that was already low or out before needs existed has none
+    until it is observed again. This applies the same rule to every item
+    once. Running it again changes nothing.
+
+    Args:
+        db_path: SQLite file path or PostgreSQL URL.
+    """
+    ReplenishmentNeeds(db_path).sync_all()
