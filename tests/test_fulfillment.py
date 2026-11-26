@@ -71,6 +71,7 @@ CORE_MODULES = [
     "pantry_manager",
     "pending_actions",
     "recipe_store",
+    "reconciliation",
     "replenishment",
     "shopping_plans",
 ]

@@ -727,6 +727,8 @@ def _require_whole_target(item: HouseholdItem, fields: dict[str, Any]) -> None:
         TargetIncompleteError: If, after the change, exactly one of the
             target quantity and target unit would be set.
     """
+    # ``fields`` holds stored values (an enum is already its text), so the
+    # item's own unit is read as text too before the two are compared.
     quantity = fields.get("target_quantity", item.target_quantity)
     unit = fields.get(
         "target_unit", item.target_unit.value if item.target_unit else None
