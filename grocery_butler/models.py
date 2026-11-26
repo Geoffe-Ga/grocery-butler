@@ -928,3 +928,71 @@ class ObservationBatch(BaseModel):
     resolved_at: dt.datetime | None
     resolved_by: str | None
     proposals: list[ObservationProposal]
+
+
+# ---------------------------------------------------------------------------
+# Shopping plans (ADR 0011)
+# ---------------------------------------------------------------------------
+
+
+class PlanMeal(BaseModel):
+    """A saved recipe a member wants to shop for.
+
+    ``servings`` defaults to the recipe's own default when omitted.
+    """
+
+    recipe_id: int
+    servings: int | None = Field(default=None, ge=1)
+
+
+class PlanAmount(BaseModel):
+    """An amount a recipe stated, summed within one unit dimension."""
+
+    quantity: float
+    unit: Unit
+
+
+class PlanReason(BaseModel):
+    """One reason a line is on the plan."""
+
+    kind: NeedReasonKind
+    source_key: str
+    detail: dict[str, Any]
+
+
+class PlanLine(BaseModel):
+    """One household item on a plan, with every reason it is there.
+
+    ``amounts`` is empty when nothing stated an amount; the line then means
+    "buy the usual". ``need_id`` is the approved need behind the line, if
+    there is one.
+    """
+
+    item_id: int
+    display_name: str
+    category: IngredientCategory | None
+    amounts: list[PlanAmount]
+    reasons: list[PlanReason]
+    constraints: dict[str, Any]
+    need_id: int | None
+
+
+class UnplannedIngredient(BaseModel):
+    """A recipe ingredient the builder could not put on the plan."""
+
+    recipe_id: int
+    ingredient: str
+    problem: str
+
+
+class ShoppingPlan(BaseModel):
+    """One immutable version of the household's shopping plan."""
+
+    id: int
+    version: int
+    content_hash: str
+    meals: list[PlanMeal]
+    lines: list[PlanLine]
+    unplanned: list[UnplannedIngredient]
+    created_by: str
+    created_at: dt.datetime

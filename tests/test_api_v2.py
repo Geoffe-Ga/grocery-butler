@@ -1094,3 +1094,149 @@ class TestNeeds:
         assert _error(need)["code"] == "need_not_found"
         assert _error(move)["code"] == "need_not_found"
         assert _error(request_for)["code"] == "item_not_found"
+
+
+class TestPlans:
+    """The shopping plan: a numbered version OpenClaw can read and rebuild."""
+
+    def _approved(self, api: Api, name: str) -> int:
+        """Create an item with an approved manual request; return the item id."""
+        item_id = _item(api, name)
+        api.call("POST", "/needs", {"item_id": item_id})
+        return item_id
+
+    def _recipe(self, db_path: str, name: str, ingredient: str) -> int:
+        """Save a one-ingredient recipe and return its id."""
+        from grocery_butler.models import (
+            Ingredient,
+            IngredientCategory,
+            ParsedMeal,
+            Unit,
+        )
+        from grocery_butler.recipe_store import RecipeStore
+
+        return RecipeStore(db_path).save_recipe(
+            ParsedMeal(
+                name=name,
+                servings=2,
+                known_recipe=True,
+                needs_confirmation=False,
+                purchase_items=[
+                    Ingredient(
+                        ingredient=ingredient,
+                        quantity=1.0,
+                        unit=Unit.CUP,
+                        category=IngredientCategory.DAIRY,
+                    )
+                ],
+                pantry_items=[],
+            )
+        )
+
+    def test_no_plan_yet_is_not_found(self, api: Api) -> None:
+        """Before the first build there is no current plan."""
+        response = api.call("GET", "/plans/latest")
+
+        assert (response.status_code, _error(response)["code"]) == (
+            404,
+            "plan_not_found",
+        )
+        assert api.call("GET", "/plans").get_json() == {"plans": []}
+
+    def test_build_from_needs_alone(self, api: Api) -> None:
+        """A plan needs no meals (ADR 0004), and marks its needs planned."""
+        item_id = self._approved(api, "oat milk")
+
+        response = api.call("POST", "/plans")
+
+        plan = response.get_json()
+        need = api.call("GET", f"/items/{item_id}").get_json()["open_need"]
+        assert response.status_code == 201
+        assert plan["version"] == 1
+        assert plan["is_current"] is True
+        assert plan["created_by"] == "geoff@rubotpaul"
+        assert [line["display_name"] for line in plan["lines"]] == ["Oat Milk"]
+        assert plan["lines"][0]["amounts"] == []
+        assert plan["lines"][0]["reasons"][0]["kind"] == "manual_request"
+        assert need["status"] == "planned"
+
+    def test_rebuilding_unchanged_inputs_returns_the_same_version_with_200(
+        self, api: Api
+    ) -> None:
+        """Nothing changed, nothing new is stored."""
+        self._approved(api, "oat milk")
+        first = api.call("POST", "/plans")
+
+        again = api.call("POST", "/plans", {"meals": []})
+
+        assert (first.status_code, again.status_code) == (201, 200)
+        assert again.get_json()["version"] == 1
+        assert len(api.call("GET", "/plans").get_json()["plans"]) == 1
+
+    def test_a_change_makes_a_new_version_and_the_old_one_reads_as_stale(
+        self, api: Api, db_path: str
+    ) -> None:
+        """Version 1 stays readable, and says it no longer reflects the household."""
+        self._approved(api, "oat milk")
+        api.call("POST", "/plans")
+        self._approved(api, "eggs")
+        recipe_id = self._recipe(db_path, "Porridge", "oats")
+
+        stale = api.call("GET", "/plans/1").get_json()
+        second = api.call(
+            "POST", "/plans", {"meals": [{"recipe_id": recipe_id, "servings": 4}]}
+        )
+        listed = api.call("GET", "/plans").get_json()["plans"]
+
+        plan = second.get_json()
+        assert stale["is_current"] is False
+        assert second.status_code == 201
+        assert plan["version"] == 2
+        assert plan["meals"] == [{"recipe_id": recipe_id, "servings": 4}]
+        assert sorted(line["display_name"] for line in plan["lines"]) == [
+            "Eggs",
+            "Oat Milk",
+            "Oats",
+        ]
+        oats = next(line for line in plan["lines"] if line["display_name"] == "Oats")
+        assert oats["amounts"] == [{"quantity": 2.0, "unit": "cup"}]
+        assert [(p["version"], p["line_count"]) for p in listed] == [(1, 1), (2, 3)]
+        assert api.call("GET", "/plans/latest").get_json()["version"] == 2
+
+    @pytest.mark.parametrize(
+        ("body", "status", "code"),
+        [
+            ({"meals": [{"recipe_id": 99999}]}, 404, "recipe_not_found"),
+            ({"meals": [{"recipe_id": 1, "servings": 0}]}, 400, "validation_failed"),
+            ({"meal": []}, 400, "validation_failed"),
+        ],
+        ids=["unknown-recipe", "zero-servings", "unknown-field"],
+    )
+    def test_bad_plan_requests_are_coded(
+        self, api: Api, body: dict[str, Any], status: int, code: str
+    ) -> None:
+        """Each failure has its code, and no version is stored."""
+        response = api.call("POST", "/plans", body)
+
+        assert (response.status_code, _error(response)["code"]) == (status, code)
+        assert api.call("GET", "/plans").get_json() == {"plans": []}
+
+    def test_listing_a_recipe_twice_is_plan_invalid(
+        self, api: Api, db_path: str
+    ) -> None:
+        """Say how many servings instead."""
+        recipe_id = self._recipe(db_path, "Porridge", "oats")
+
+        response = api.call(
+            "POST",
+            "/plans",
+            {"meals": [{"recipe_id": recipe_id}, {"recipe_id": recipe_id}]},
+        )
+
+        assert (response.status_code, _error(response)["code"]) == (400, "plan_invalid")
+
+    def test_missing_version_is_not_found(self, api: Api) -> None:
+        """An unknown version has its own code."""
+        response = api.call("GET", "/plans/7")
+
+        assert _error(response)["code"] == "plan_not_found"
