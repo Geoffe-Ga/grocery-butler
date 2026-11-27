@@ -158,7 +158,11 @@ events (ADR 0015) live only there.
 
 ## Moving data from an older deployment
 
-If an earlier deployment holds data worth keeping: take a backup of it with
+The dogfood starts with an empty database (ADR 0021), so this is not part of
+the first deploy. Delete the old deployment and its database once the server
+is confirmed, so no copy of household data is left behind.
+
+If you later find an earlier deployment does hold data worth keeping: take a backup of it with
 `./scripts/backup.sh` (its `DATABASE_URL`), then restore that file into this
 server's database as above. Both sides are Postgres, which a restore
 requires. Then shut the old deployment down.

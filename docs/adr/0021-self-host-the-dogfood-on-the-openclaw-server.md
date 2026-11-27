@@ -49,6 +49,10 @@ OpenClaw is installed on it directly and calls its other tools over HTTP.
 8. **Backups run on the server and are copied off it** (ADR 0013). The
    database port is published on loopback for `./scripts/backup.sh`.
 
+9. **The server starts with an empty database** (Geoff, 2026-11-26). Nothing
+   is moved from the old deployment. Members, constraints and items are
+   entered in the dogfood's first week, as its protocol already asks.
+
 ## Consequences
 
 - The boundary no longer rests on what a third party's proxy reports. The
@@ -69,8 +73,9 @@ OpenClaw is installed on it directly and calls its other tools over HTTP.
   ten files of 10 MB per service. Older lines are gone.
 - The app shares a server with OpenClaw. If either exhausts memory or disk,
   both suffer.
-- Any data on an existing Railway deployment has to be moved once, with a
-  backup there and a restore here.
+- Whatever the old Railway deployment holds is left behind. Until that
+  deployment and its database are deleted, a copy of old household data
+  stays with a provider the household no longer uses.
 
 ## Alternatives considered
 
