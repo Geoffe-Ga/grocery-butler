@@ -233,3 +233,22 @@ def test_rows_with_no_name_were_deleted(upgraded: str, table: str) -> None:
 
     assert names
     assert [name for name in names if not name.strip()] == []
+
+
+def test_old_recipes_are_entirely_required_and_plan_without_a_question(
+    signed_request: Callable[..., Any], v2: V2
+) -> None:
+    """Migration 027 leaves old recipes as they were: nothing in them is optional."""
+    recipes = signed_request("GET", "/api/v1/recipes").get_json()["recipes"]
+    recipe_id = recipes[0]["id"]
+    detail = signed_request("GET", f"/api/v1/recipes/{recipe_id}").get_json()
+
+    planned = v2.post("/plans", {"meals": [{"recipe_id": recipe_id}]})
+
+    ingredients = [*detail["purchase_items"], *detail["pantry_items"]]
+    plan = planned.get_json()
+    assert _names(ingredients) == ["kidney beans", "oat milk"]
+    assert [item["is_optional"] for item in ingredients] == [False, False]
+    assert planned.status_code == 201, planned.get_data(as_text=True)
+    assert plan["meals"] == [{"recipe_id": recipe_id, "servings": 4}]
+    assert "kidney beans" in {line["display_name"].lower() for line in plan["lines"]}

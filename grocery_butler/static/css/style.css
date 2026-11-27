@@ -352,6 +352,12 @@ h2 {
     color: var(--color-out);
 }
 
+/* A recipe ingredient the recipe can be made without (ADR 0025). */
+.badge-optional {
+    background: var(--color-low-bg);
+    color: var(--color-accent-muted);
+}
+
 /* Hero section */
 .hero {
     position: relative;

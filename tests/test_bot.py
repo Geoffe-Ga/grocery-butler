@@ -1719,3 +1719,60 @@ class TestOnMessageEvent:
 
         # Should reply twice: once for high-conf, once for low-conf
         assert message.reply.call_count == 2
+
+
+class TestOptionalIngredients:
+    """The bot shows what is optional and never decides it (ADR 0025)."""
+
+    def test_recipe_detail_marks_optional_ingredients(self) -> None:
+        """Only the optional line is marked."""
+        meal = ParsedMeal(
+            name="Chicken Quesadilla",
+            servings=4,
+            known_recipe=True,
+            needs_confirmation=False,
+            purchase_items=[
+                Ingredient(
+                    ingredient="tortillas",
+                    quantity=1.0,
+                    unit="package",
+                    category=IngredientCategory.BAKERY,
+                ),
+                Ingredient(
+                    ingredient="salsa",
+                    quantity=1.0,
+                    unit="jar",
+                    category=IngredientCategory.PANTRY_DRY,
+                    is_optional=True,
+                ),
+            ],
+            pantry_items=[],
+        )
+
+        lines = _format_recipe_detail(meal).splitlines()
+
+        assert "  - 1 jar salsa (optional)" in lines
+        assert "  - 1 package tortillas" in lines
+
+    @pytest.mark.asyncio()
+    async def test_meals_with_an_undecided_optional_ingredient_says_so(
+        self, config: Config, mock_interaction: MagicMock
+    ) -> None:
+        """The reply names what is undecided instead of a generic failure."""
+        from grocery_butler.consolidator import UndecidedOptionalIngredientsError
+
+        bot = create_bot(config)
+        (cmd,) = [c for c in bot.tree.get_commands() if c.name == "meals"]
+
+        with patch(
+            "grocery_butler.bot.asyncio.to_thread",
+            side_effect=UndecidedOptionalIngredientsError(
+                {"Chicken Quesadilla": ["salsa"]}
+            ),
+        ):
+            await cmd.callback(mock_interaction, meals="chicken quesadilla")
+
+        mock_interaction.followup.send.assert_called_once()
+        reply = str(mock_interaction.followup.send.call_args)
+        assert "Chicken Quesadilla: salsa" in reply
+        assert "went wrong" not in reply

@@ -17,8 +17,10 @@ from grocery_butler.models import (
     InventoryItem,
     InventoryStatus,
     InventoryUpdate,
+    OptionalDecision,
     OrganicPreference,
     ParsedMeal,
+    PlanMeal,
     PriceSensitivity,
     ShoppingListItem,
     Unit,
@@ -724,3 +726,128 @@ class TestIngredientNamesAreNotBlank:
         item = InventoryItem(ingredient=" Olive Oil ", display_name="Olive Oil")
 
         assert item.ingredient == " Olive Oil "
+
+
+# ---------------------------------------------------------------------------
+# Optional ingredients and plan decisions (ADR 0025)
+# ---------------------------------------------------------------------------
+
+
+class TestOptionalIngredientModels:
+    """Tests for optionality on ingredients and decisions on plan meals."""
+
+    def _payload(self, **extra: object) -> dict[str, object]:
+        """Return an ingredient payload, with extra fields."""
+        return {
+            "ingredient": "Original Ruffles",
+            "quantity": 1,
+            "unit": "bag",
+            "category": "pantry_dry",
+            **extra,
+        }
+
+    @pytest.mark.parametrize("model", [Ingredient, IngredientInput])
+    def test_an_ingredient_is_required_unless_it_says_otherwise(
+        self, model: type[Ingredient]
+    ) -> None:
+        """A payload from before the field existed is a required ingredient."""
+        assert model.model_validate(self._payload()).is_optional is False
+
+    @pytest.mark.parametrize("model", [Ingredient, IngredientInput])
+    def test_an_optional_ingredient_keeps_its_other_fields(
+        self, model: type[Ingredient]
+    ) -> None:
+        """Optional is one more field, not a different kind of ingredient."""
+        parsed = model.model_validate(
+            self._payload(is_optional=True, notes="party size", is_pantry_item=True)
+        )
+
+        assert parsed.model_dump(mode="json") == {
+            "ingredient": "Original Ruffles",
+            "quantity": 1.0,
+            "unit": "bag",
+            "category": "pantry_dry",
+            "notes": "party size",
+            "is_pantry_item": True,
+            "is_optional": True,
+        }
+
+    def test_an_optional_input_still_needs_a_known_unit_and_a_quantity(self) -> None:
+        """Being optional never lets a unit or a quantity be guessed."""
+        with pytest.raises(ValidationError):
+            IngredientInput.model_validate(
+                self._payload(is_optional=True, unit="party size bag")
+            )
+        without_quantity = self._payload(is_optional=True)
+        del without_quantity["quantity"]
+        with pytest.raises(ValidationError):
+            IngredientInput.model_validate(without_quantity)
+
+    def test_optionality_must_be_a_boolean(self) -> None:
+        """A word that is not yes or no is refused."""
+        with pytest.raises(ValidationError):
+            IngredientInput.model_validate(self._payload(is_optional="sometimes"))
+
+    def test_a_meal_without_decisions_serializes_as_it_always_did(self) -> None:
+        """Older plans keep their stored form, and so their content hash."""
+        meal = PlanMeal(recipe_id=3, servings=4)
+
+        assert meal.model_dump(mode="json") == {"recipe_id": 3, "servings": 4}
+        assert meal.optional_decisions == []
+        assert meal.optional_token is None
+
+    def test_a_meal_with_decisions_serializes_them_and_never_its_token(self) -> None:
+        """The token is checked on the way in and is not part of a plan."""
+        meal = PlanMeal.model_validate(
+            {
+                "recipe_id": 3,
+                "servings": 4,
+                "optional_token": "abc",
+                "optional_decisions": [{"ingredient_id": 11, "include": True}],
+            }
+        )
+
+        assert meal.optional_token == "abc"
+        assert meal.model_dump(mode="json") == {
+            "recipe_id": 3,
+            "servings": 4,
+            "optional_decisions": [{"ingredient_id": 11, "include": True}],
+        }
+
+    def test_a_stored_meal_reads_back_equal(self) -> None:
+        """What a plan stores is what it loads."""
+        meal = PlanMeal(
+            recipe_id=3,
+            servings=4,
+            optional_decisions=[OptionalDecision(ingredient_id=11, include=False)],
+        )
+
+        assert PlanMeal.model_validate(meal.model_dump(mode="json")) == meal
+
+    @pytest.mark.parametrize(
+        "decision",
+        [
+            {"ingredient_id": 11, "include": "yes"},
+            {"ingredient_id": 11, "include": 1},
+            {"ingredient_id": "11", "include": True},
+            {"ingredient_id": True, "include": True},
+            {"ingredient_id": 11},
+            {"include": True},
+            {"ingredient_id": 11, "include": True, "amount": 2},
+        ],
+        ids=[
+            "word",
+            "number",
+            "id-as-text",
+            "id-as-boolean",
+            "no-answer",
+            "no-ingredient",
+            "extra-field",
+        ],
+    )
+    def test_a_decision_is_exactly_an_ingredient_and_a_boolean(
+        self, decision: dict[str, object]
+    ) -> None:
+        """Nothing is read as a yes or a no, and nothing else rides along."""
+        with pytest.raises(ValidationError):
+            OptionalDecision.model_validate(decision)

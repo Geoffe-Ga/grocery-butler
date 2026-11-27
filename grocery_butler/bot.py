@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from grocery_butler.config import Config
     from grocery_butler.models import (
         BrandPreference,
+        Ingredient,
         InventoryItem,
         ParsedMeal,
         ShoppingListItem,
@@ -198,6 +199,20 @@ def _format_recipes(recipes: list[dict[str, object]]) -> str:
     return _truncate("\n".join(lines))
 
 
+def _format_recipe_item(item: Ingredient) -> str:
+    """Format one recipe ingredient as a list line.
+
+    Args:
+        item: The ingredient.
+
+    Returns:
+        Its amount and name, marked ``(optional)`` when the recipe can be
+        made without it.
+    """
+    suffix = " (optional)" if item.is_optional else ""
+    return f"  - {item.quantity:g} {item.unit} {item.ingredient}{suffix}"
+
+
 def _format_recipe_detail(meal: ParsedMeal) -> str:
     """Format a single recipe's detail for display.
 
@@ -213,16 +228,14 @@ def _format_recipe_detail(meal: ParsedMeal) -> str:
         "**Purchase Items:**",
     ]
     if meal.purchase_items:
-        for item in meal.purchase_items:
-            lines.append(f"  - {item.quantity:g} {item.unit} {item.ingredient}")
+        lines.extend(_format_recipe_item(item) for item in meal.purchase_items)
     else:
         lines.append("  (none)")
 
     lines.append("")
     lines.append("**Pantry Items:**")
     if meal.pantry_items:
-        for item in meal.pantry_items:
-            lines.append(f"  - {item.quantity:g} {item.unit} {item.ingredient}")
+        lines.extend(_format_recipe_item(item) for item in meal.pantry_items)
     else:
         lines.append("  (none)")
 
@@ -273,7 +286,10 @@ def create_bot(config: Config) -> GroceryBot:
     Returns:
         Configured Discord client ready to run.
     """
-    from grocery_butler.consolidator import Consolidator
+    from grocery_butler.consolidator import (
+        Consolidator,
+        UndecidedOptionalIngredientsError,
+    )
     from grocery_butler.db import init_db
     from grocery_butler.meal_parser import MealParser
     from grocery_butler.pantry_manager import PantryManager
@@ -330,6 +346,10 @@ def create_bot(config: Config) -> GroceryBot:
             await interaction.followup.send(
                 f"Shopping list for: **{meal_summary}**\n{result}"
             )
+        except UndecidedOptionalIngredientsError as exc:
+            # An optional ingredient is never added or left off for someone
+            # (ADR 0025), and this command has no way to ask.
+            await interaction.followup.send(_truncate(str(exc)))
         except Exception:
             logger.exception("Error in /meals command")
             await interaction.followup.send(

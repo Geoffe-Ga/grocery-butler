@@ -22,6 +22,7 @@ from grocery_butler.cli import (
 )
 from grocery_butler.db import init_db
 from grocery_butler.models import (
+    Ingredient,
     IngredientCategory,
     InventoryItem,
     InventoryStatus,
@@ -1463,3 +1464,159 @@ class TestCommandsMigrateBeforeUse:
 
         assert code == 0
         assert PantryManager(fresh).get_inventory() == []
+
+
+# ------------------------------------------------------------------
+# Optional ingredients (ADR 0025)
+# ------------------------------------------------------------------
+
+
+def _quesadilla() -> ParsedMeal:
+    """Return a recipe with one required and two optional ingredients."""
+    return ParsedMeal(
+        name="Chicken Quesadilla",
+        servings=4,
+        known_recipe=True,
+        needs_confirmation=False,
+        purchase_items=[
+            Ingredient(
+                ingredient="tortillas",
+                quantity=1.0,
+                unit="package",
+                category=IngredientCategory.BAKERY,
+            ),
+            Ingredient(
+                ingredient="Casa Sanchez Medium Salsa",
+                quantity=1.0,
+                unit="jar",
+                category=IngredientCategory.PANTRY_DRY,
+                is_optional=True,
+            ),
+            Ingredient(
+                ingredient="Casa Sanchez Tortilla Chips",
+                quantity=1.0,
+                unit="bag",
+                category=IngredientCategory.PANTRY_DRY,
+                is_optional=True,
+            ),
+        ],
+        pantry_items=[],
+    )
+
+
+def _plan(db_path: str, *argv: str) -> int:
+    """Run ``plan`` against a database with no Claude client."""
+    from grocery_butler.cli import _handle_plan
+
+    with (
+        patch("grocery_butler.cli._load_config_safe") as mock_cfg,
+        patch("grocery_butler.cli._make_anthropic_client", return_value=None),
+    ):
+        cfg = MagicMock()
+        cfg.anthropic_api_key = "test"
+        cfg.database = db_path
+        cfg.default_servings = 4
+        cfg.default_units = "imperial"
+        mock_cfg.return_value = cfg
+        return _handle_plan(_build_parser().parse_args(["plan", *argv]))
+
+
+class TestPlanOptionalIngredients:
+    """``plan`` makes no list until each optional ingredient is decided."""
+
+    def test_undecided_optional_ingredients_stop_the_plan(
+        self, db_path: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Nothing is printed as a list; the choices and the flags are named."""
+        RecipeStore(db_path).save_recipe(_quesadilla())
+
+        code = _plan(db_path, "chicken quesadilla")
+
+        captured = capsys.readouterr()
+        assert code == 1
+        assert captured.out == ""
+        assert "Chicken Quesadilla: Casa Sanchez Medium Salsa" in captured.err
+        assert "Casa Sanchez Tortilla Chips" in captured.err
+        assert "--include-optional" in captured.err
+        assert "--exclude-optional" in captured.err
+
+    def test_decided_optional_ingredients_are_honoured(
+        self, db_path: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The included one is listed; the excluded one is not."""
+        RecipeStore(db_path).save_recipe(_quesadilla())
+
+        code = _plan(
+            db_path,
+            "chicken quesadilla",
+            "--include-optional",
+            "casa sanchez medium salsa",
+            "--exclude-optional",
+            "Casa Sanchez Tortilla Chips",
+        )
+
+        captured = capsys.readouterr()
+        assert code == 0
+        assert "Casa Sanchez Medium Salsa" in captured.out
+        assert "tortillas" in captured.out
+        assert "Tortilla Chips" not in captured.out
+
+    def test_an_incomplete_decision_stops_the_plan(
+        self, db_path: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Deciding one of two names the one still undecided."""
+        RecipeStore(db_path).save_recipe(_quesadilla())
+
+        code = _plan(
+            db_path,
+            "chicken quesadilla",
+            "--include-optional",
+            "Casa Sanchez Medium Salsa",
+        )
+
+        captured = capsys.readouterr()
+        assert code == 1
+        assert captured.out == ""
+        assert "Chicken Quesadilla: Casa Sanchez Tortilla Chips" in captured.err
+
+    def test_a_decision_about_something_not_optional_stops_the_plan(
+        self, db_path: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A typo is an error, not a silent no-op."""
+        RecipeStore(db_path).save_recipe(_quesadilla())
+
+        code = _plan(
+            db_path,
+            "chicken quesadilla",
+            "--include-optional",
+            "guacamole",
+            "--exclude-optional",
+            "Casa Sanchez Medium Salsa",
+            "--exclude-optional",
+            "Casa Sanchez Tortilla Chips",
+        )
+
+        captured = capsys.readouterr()
+        assert code == 1
+        assert captured.out == ""
+        assert "guacamole" in captured.err
+        assert "not an optional ingredient" in captured.err
+
+    def test_recipes_show_marks_optional_ingredients(
+        self, db_path: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A person reading the recipe can see what is optional."""
+        from grocery_butler.cli import _handle_recipes
+
+        RecipeStore(db_path).save_recipe(_quesadilla())
+
+        with patch("grocery_butler.cli._load_config_safe") as mock_cfg:
+            mock_cfg.return_value = MagicMock(database=db_path)
+            code = _handle_recipes(
+                _build_parser().parse_args(["recipes", "show", "chicken quesadilla"])
+            )
+
+        lines = capsys.readouterr().out.splitlines()
+        assert code == 0
+        assert "  1 jar Casa Sanchez Medium Salsa (optional)" in lines
+        assert "  1 package tortillas" in lines

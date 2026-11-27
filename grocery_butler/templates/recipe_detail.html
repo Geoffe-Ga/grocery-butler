@@ -18,6 +18,7 @@
             <span class="ingredient-name">{{ item.ingredient }}</span>
             <span class="ingredient-qty">{{ item.quantity }} {{ item.unit }}</span>
             <span class="ingredient-category badge">{{ item.category.value }}</span>
+            {% if item.is_optional %}<span class="badge badge-optional">optional</span>{% endif %}
         </li>
         {% endfor %}
     </ul>
@@ -33,6 +34,7 @@
             <span class="ingredient-name">{{ item.ingredient }}</span>
             <span class="ingredient-qty">{{ item.quantity }} {{ item.unit }}</span>
             <span class="ingredient-category badge">{{ item.category.value }}</span>
+            {% if item.is_optional %}<span class="badge badge-optional">optional</span>{% endif %}
         </li>
         {% endfor %}
     </ul>

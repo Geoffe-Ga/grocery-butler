@@ -811,3 +811,114 @@ class TestLegacyBlankIngredientRows:
         expected = sample_meal.purchase_items + sample_meal.pantry_items
         assert sorted(names) == sorted(i.ingredient for i in expected)
         assert "Skipped an ingredient row with no name" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Optional ingredients (ADR 0025)
+# ---------------------------------------------------------------------------
+
+
+def _with_optional_chips(meal: ParsedMeal) -> ParsedMeal:
+    """Return the meal with an optional bag of chips and an optional pantry item."""
+    return meal.model_copy(
+        update={
+            "purchase_items": [
+                *meal.purchase_items,
+                Ingredient(
+                    ingredient="tortilla chips",
+                    quantity=1.0,
+                    unit="bag",
+                    category=IngredientCategory.PANTRY_DRY,
+                    notes="for the table",
+                    is_optional=True,
+                ),
+            ],
+            "pantry_items": [
+                *meal.pantry_items,
+                Ingredient(
+                    ingredient="hot sauce",
+                    quantity=1.0,
+                    unit="dash",
+                    category=IngredientCategory.PANTRY_DRY,
+                    is_pantry_item=True,
+                    is_optional=True,
+                ),
+            ],
+        }
+    )
+
+
+class TestOptionalIngredients:
+    """A saved ingredient is required or optional, and reads back the same."""
+
+    def test_optionality_round_trips_with_every_other_field(
+        self, store: RecipeStore, sample_meal: ParsedMeal
+    ) -> None:
+        """An optional ingredient keeps its amount, unit, category and notes."""
+        meal = _with_optional_chips(sample_meal)
+
+        loaded = store.get_recipe_by_id(store.save_recipe(meal))
+
+        assert loaded is not None
+        assert loaded.purchase_items == meal.purchase_items
+        assert loaded.pantry_items == meal.pantry_items
+        assert [i.is_optional for i in loaded.purchase_items] == [False, False, True]
+        assert [i.is_optional for i in loaded.pantry_items] == [False, True]
+
+    def test_ingredients_are_required_unless_marked(
+        self, store: RecipeStore, sample_meal: ParsedMeal, db_path: str
+    ) -> None:
+        """A recipe saved without the flag stores every ingredient as required."""
+        recipe_id = store.save_recipe(sample_meal)
+
+        conn = get_connection(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT is_optional FROM recipe_ingredients WHERE recipe_id = ?",
+                (recipe_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        assert len(rows) == 3
+        assert not any(row["is_optional"] for row in rows)
+
+    def test_every_lookup_returns_optionality(
+        self, store: RecipeStore, sample_meal: ParsedMeal
+    ) -> None:
+        """By id, by name and by search, the flag is the same."""
+        recipe_id = store.save_recipe(_with_optional_chips(sample_meal))
+
+        by_id = store.get_recipe_by_id(recipe_id)
+        by_name = store.get_recipe("Chicken Tacos")
+        found = store.find_recipe("tacos")
+
+        assert by_id is not None
+        assert by_id == by_name == found
+        assert by_id.purchase_items[-1].is_optional is True
+
+    def test_updating_a_recipe_replaces_optionality(
+        self, store: RecipeStore, sample_meal: ParsedMeal
+    ) -> None:
+        """An update can make an ingredient optional or required again."""
+        recipe_id = store.save_recipe(_with_optional_chips(sample_meal))
+
+        store.update_recipe(recipe_id, sample_meal)
+
+        loaded = store.get_recipe_by_id(recipe_id)
+        assert loaded is not None
+        assert not any(
+            i.is_optional for i in [*loaded.purchase_items, *loaded.pantry_items]
+        )
+
+    def test_export_for_claude_includes_optionality(
+        self, store: RecipeStore, sample_meal: ParsedMeal
+    ) -> None:
+        """The JSON form of a recipe says which ingredients are optional."""
+        recipe_id = store.save_recipe(_with_optional_chips(sample_meal))
+
+        exported = store.export_recipe_json(recipe_id)
+
+        assert exported is not None
+        items = json.loads(exported)["purchase_items"]
+        assert [item["is_optional"] for item in items] == [False, False, True]

@@ -34,6 +34,10 @@ This skill is the playbook: what to do, in what order, and what to say.
    who is speaking, ask before changing anything.
 8. **Don't invent amounts.** A quantity is something a person stated or a
    receipt showed.
+9. **Never decide an optional ingredient yourself.** When a meal has
+   optional ingredients, ask the member about each one, and send only
+   what they said. Not asking is not a "no". See
+   [Optional ingredients](#optional-ingredients-ask-every-time).
 
 ## How to call it
 
@@ -209,7 +213,7 @@ python3 gb.py POST /api/v2/plans --member geoff --data '{"meals": [{"recipe_id":
 
 | Call | Use |
 |---|---|
-| `POST /api/v2/plans` | Build it. Body: optional `meals`, each `recipe_id` with optional `servings`. |
+| `POST /api/v2/plans` | Build it. Body: optional `meals`, each `recipe_id` with optional `servings`, and `optional_token` and `optional_decisions` when the recipe has optional ingredients (below). |
 | `GET /api/v2/plans` | Every version. |
 | `GET /api/v2/plans/latest` | The current plan with its lines. |
 | `GET /api/v2/plans/{version}` | One version. |
@@ -232,6 +236,52 @@ How to read a plan:
 
 The export needs no approval: it sends nothing anywhere. Give the member
 its `content` and say its `human_action`.
+
+### Optional ingredients: ask every time
+
+Some recipes have ingredients the household only sometimes wants, such as
+chips with sandwiches. Grocery Butler will not add them or leave them off
+by itself, and neither do you. Planning such a meal takes two calls.
+
+**1. Ask for the plan.** If a meal has optional ingredients you get error
+`optional_decisions_required` (exit 1, status 409). That is not a failure;
+it is the question to put to the member. No plan was made.
+`details.meals` has one entry per meal, each with its `recipe`, an
+`optional_token`, and `optional_ingredients` (each `ingredient_id`,
+`ingredient`, `quantity`, `unit`).
+
+**2. Ask the member, one meal at a time, naming every optional ingredient
+with its amount.** For example: "Chicken Sandwiches can come with chips.
+Add Original Ruffles (1 bag), Cheddar Cheese Ruffles (1 bag), or neither?"
+Say the amounts the response gave. Don't change them and don't add your own.
+
+**3. Send their answer.** Call it again with, on each such meal, the same
+`optional_token` and one decision for every optional ingredient:
+
+```bash
+python3 gb.py POST /api/v2/plans --member geoff --data '{"meals": [{"recipe_id": 3, "optional_token": "<the meal optional_token>", "optional_decisions": [{"ingredient_id": 11, "include": false}, {"ingredient_id": 12, "include": true}]}]}'
+```
+
+What to hold to:
+
+- **Every optional ingredient needs its own `true` or `false`.** "Neither"
+  is `false` for each. If the member answered only some, ask about the
+  rest; never fill them in.
+- **Each one is separate.** If two are alternatives and the member wants
+  one, send `true` for that one and `false` for the other. If they really
+  want both, send both `true`.
+- **Ask again for every plan.** Last week's answer is not this week's.
+  Don't reuse decisions from an earlier plan or an earlier conversation.
+- **`optional_decisions_stale`** means the recipe or the servings changed
+  after you asked. `details.meals` has the current choices: ask the member
+  again with those, and use the new `optional_token`.
+- **`optional_decisions_invalid`** means you sent a decision twice, or for
+  something that is not one of the recipe's optional ingredients. Fix the
+  request from `details.problems`; don't ask the member again for that.
+- **Once it succeeds, an included ingredient is an ordinary line** on the
+  plan, the export and any handoff. An excluded one is not there. Retrying
+  the same call with the same `--key` changes nothing.
+- A recipe with no optional ingredients plans in one call, as always.
 
 ## Handing a plan to Instacart
 
@@ -401,9 +451,10 @@ calls need no `--member` and no idempotency key.
 | Call | Use |
 |---|---|
 | `GET /api/v1/recipes`, `GET /api/v1/recipes/{id}` | Saved recipes. A recipe's `id` is what a plan's `meals` take. |
-| `POST /api/v1/recipes/save` | Body: `name`, `ingredients` (each `ingredient`, `quantity`, `unit`, `category`, optional `is_pantry_item`), optional `servings`. One measurement per ingredient: `quantity` 19 with `unit` `oz`, or 1 with `can`, never `19 oz can`. An unknown unit is a 400 naming the ingredient's position, and nothing is saved; fix the unit and send it again. The README lists the units. |
+| `POST /api/v1/recipes/save` | Body: `name`, `ingredients` (each `ingredient`, `quantity`, `unit`, `category`, optional `notes`, `is_pantry_item` and `is_optional`), optional `servings`. One measurement per ingredient: `quantity` 19 with `unit` `oz`, or 1 with `can`, never `19 oz can`. An unknown unit is a 400 naming the ingredient's position, and nothing is saved; fix the unit and send it again. The README lists the units. Set `is_optional: true` only on an ingredient the member said is optional; left out, an ingredient is required. An optional ingredient still needs the quantity and unit the member stated: if they gave none, ask. |
 | `DELETE /api/v1/recipes/{id}` | Delete a recipe. Ask first. |
-| `POST /api/v1/meals/parse` | Turn meal names into ingredient lists. Body: `text`, the meal names separated by commas or new lines. A result with `needs_confirmation` must be shown to the member before it is saved. |
+| `POST /api/v1/meals/parse` | Turn meal names into ingredient lists. Body: `text`, the meal names separated by commas or new lines. A result with `needs_confirmation` must be shown to the member before it is saved. A saved recipe's optional ingredients come back with `is_optional: true`. |
+| `POST /api/v1/shopping-list/preview` | The older, unsaved list. Prefer a plan. It answers 409, with the undecided names under `optional_ingredients` by meal, while any ingredient you send still has `is_optional: true`. Ask the member, then send each one they want with `is_optional: false` and leave out each one they don't. |
 | `GET /api/v1/inventory`, `/pantry`, `/restock`, `/brands`, `/preferences` | Older read views. Prefer the `/api/v2` calls above. |
 
 For anything else under `/api/v1`, see the README. Prefer `/api/v2`: it
@@ -437,6 +488,15 @@ not something you can do; it is an operator command.
 **"Why is rice on the list?"**
 Read the line's `reasons` from `GET /api/v2/plans/latest` and say them in
 plain words: "It's in Thursday's curry, and you asked for it on Monday."
+
+**"Plan chicken sandwiches for Friday."**
+1. Find the recipe's `id` with `GET /api/v1/recipes`.
+2. `POST /api/v2/plans` with that meal. If it answers
+   `optional_decisions_required`, nothing was planned yet.
+3. Ask: "Do you want chips with that: Original Ruffles (1 bag), Cheddar
+   Cheese Ruffles (1 bag), or neither?"
+4. Send the same call with the meal's `optional_token` and a decision for
+   every optional ingredient. Then give them the list from the export.
 
 **A photo of the fridge.**
 1. Read it. Submit what you see as an observation batch with `source: photo`.

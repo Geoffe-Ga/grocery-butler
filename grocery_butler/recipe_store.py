@@ -88,6 +88,7 @@ def _row_to_parsed_meal(
             category=IngredientCategory(row["category"]),
             notes=row["notes"] or "",
             is_pantry_item=bool(row["is_pantry_item"]),
+            is_optional=bool(row["is_optional"]),
         )
         if ing.is_pantry_item:
             pantry.append(ing)
@@ -198,8 +199,9 @@ class RecipeStore:
             conn.execute(
                 "INSERT INTO recipe_ingredients"
                 " (recipe_id, ingredient, quantity, unit, category,"
-                "  is_pantry_item, notes, quantity_per_serving, item_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  is_pantry_item, notes, quantity_per_serving, item_id,"
+                "  is_optional)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     recipe_id,
                     ing.ingredient,
@@ -210,6 +212,7 @@ class RecipeStore:
                     ing.notes or None,
                     ing.quantity / servings,
                     item_ids[ing.ingredient],
+                    ing.is_optional,
                 ),
             )
 
@@ -232,7 +235,7 @@ class RecipeStore:
             if row is None:
                 return None
             ingredients = conn.execute(
-                "SELECT * FROM recipe_ingredients WHERE recipe_id = ?",
+                "SELECT * FROM recipe_ingredients WHERE recipe_id = ? ORDER BY id",
                 (row["id"],),
             ).fetchall()
             return _row_to_parsed_meal(row, ingredients)
@@ -257,7 +260,7 @@ class RecipeStore:
             if row is None:
                 return None
             ingredients = conn.execute(
-                "SELECT * FROM recipe_ingredients WHERE recipe_id = ?",
+                "SELECT * FROM recipe_ingredients WHERE recipe_id = ? ORDER BY id",
                 (recipe_id,),
             ).fetchall()
             return _row_to_parsed_meal(row, ingredients)
@@ -380,7 +383,7 @@ class RecipeStore:
             if row is None:
                 return None
             ingredients = conn.execute(
-                "SELECT * FROM recipe_ingredients WHERE recipe_id = ?",
+                "SELECT * FROM recipe_ingredients WHERE recipe_id = ? ORDER BY id",
                 (row["id"],),
             ).fetchall()
             return _row_to_parsed_meal(row, ingredients)

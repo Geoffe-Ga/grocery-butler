@@ -1204,7 +1204,10 @@ def _register_shopping_list_routes(app: Flask) -> None:
         back to stub/simple-dedup paths otherwise), and flashes success
         only for meals that actually resolved plus a warning naming any
         that didn't, instead of unconditionally claiming success
-        (Issue #66). The resulting list is persisted via
+        (Issue #66). A meal with an optional ingredient is refused with a
+        message naming it, and nothing is saved (ADR 0025): this form has
+        no way to ask a person to include or exclude it. The resulting list
+        is persisted via
         :class:`~grocery_butler.shopping_list_store.ShoppingListStore`
         (Issue #65: previously stored in the session cookie, which caps
         out around 4KB and is scoped to a single browser). Any stale
@@ -1232,7 +1235,10 @@ def _register_shopping_list_routes(app: Flask) -> None:
         recipe_store = RecipeStore(db_path)
         pantry_mgr = PantryManager(db_path)
 
-        from grocery_butler.consolidator import Consolidator
+        from grocery_butler.consolidator import (
+            Consolidator,
+            UndecidedOptionalIngredientsError,
+        )
         from grocery_butler.meal_parser import MealParser
         from grocery_butler.shopping_list_store import ShoppingListStore
 
@@ -1242,9 +1248,19 @@ def _register_shopping_list_routes(app: Flask) -> None:
         consolidator = Consolidator(anthropic_client=client)
         pantry_staples = recipe_store.get_pantry_staple_names()
         restock_queue = pantry_mgr.get_restock_queue()
-        shopping_items = consolidator.consolidate(
-            parsed_meals, restock_queue, pantry_staples
-        )
+        try:
+            shopping_items = consolidator.consolidate(
+                parsed_meals, restock_queue, pantry_staples
+            )
+        except UndecidedOptionalIngredientsError as exc:
+            # An optional ingredient is never added or left off for someone
+            # (ADR 0025), and this form has no way to ask.
+            flash(
+                f"{exc} This page can't ask about optional ingredients yet;"
+                " plan these meals through OpenClaw.",
+                "error",
+            )
+            return redirect(url_for("shopping_list"))
 
         ShoppingListStore(db_path).save_list(shopping_items)
         session.pop("shopping_list_items", None)

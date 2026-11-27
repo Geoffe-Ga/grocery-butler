@@ -755,3 +755,166 @@ def test_recipes_delete_unknown_404(
         )
     assert response.status_code == 404
     assert "error" in response.get_json()
+
+
+# ---------------------------------------------------------------------------
+# Optional ingredients on /recipes/save and the recipe reads (ADR 0025)
+# ---------------------------------------------------------------------------
+
+
+def _sandwich_ingredients() -> list[dict[str, Any]]:
+    """Return one required ingredient and two optional ones, all measured."""
+    return [
+        {
+            "ingredient": "chicken breast",
+            "quantity": 1,
+            "unit": "lb",
+            "category": "meat",
+        },
+        {
+            "ingredient": "Original Ruffles",
+            "quantity": 1,
+            "unit": "bag",
+            "category": "pantry_dry",
+            "notes": "party size",
+            "is_optional": True,
+        },
+        {
+            "ingredient": "hot sauce",
+            "quantity": 1,
+            "unit": "dash",
+            "category": "pantry_dry",
+            "is_pantry_item": True,
+            "is_optional": True,
+        },
+    ]
+
+
+def test_recipes_save_stores_and_returns_optionality(
+    client: FlaskClient, recipe_store: RecipeStore, auth_headers: AuthHeaderFactory
+) -> None:
+    """An optional ingredient keeps every ordinary field, and says it is optional."""
+    body = _recipe_body(name="Chicken Sandwiches", ingredients=_sandwich_ingredients())
+
+    with patch.dict(os.environ, SECRET_ENV):
+        response = _post(client, "/api/v1/recipes/save", auth_headers, body)
+        path = f"/api/v1/recipes/{response.get_json()['id']}"
+        read = client.get(path, headers=auth_headers("GET", path))
+
+    assert response.status_code == 201
+    saved = response.get_json()
+    assert read.get_json() == saved
+    assert saved["purchase_items"] == [
+        {
+            "ingredient": "chicken breast",
+            "quantity": 1.0,
+            "unit": "lb",
+            "category": "meat",
+            "notes": "",
+            "is_pantry_item": False,
+            "is_optional": False,
+        },
+        {
+            "ingredient": "Original Ruffles",
+            "quantity": 1.0,
+            "unit": "bag",
+            "category": "pantry_dry",
+            "notes": "party size",
+            "is_pantry_item": False,
+            "is_optional": True,
+        },
+    ]
+    assert saved["pantry_items"] == [
+        {
+            "ingredient": "hot sauce",
+            "quantity": 1.0,
+            "unit": "dash",
+            "category": "pantry_dry",
+            "notes": "",
+            "is_pantry_item": True,
+            "is_optional": True,
+        }
+    ]
+    stored = recipe_store.get_recipe_by_id(saved["id"])
+    assert stored is not None
+    assert [i.is_optional for i in stored.purchase_items] == [False, True]
+
+
+def test_recipes_save_without_the_field_saves_required_ingredients(
+    client: FlaskClient, recipe_store: RecipeStore, auth_headers: AuthHeaderFactory
+) -> None:
+    """A client that has never heard of is_optional keeps working."""
+    with patch.dict(os.environ, SECRET_ENV):
+        response = _post(client, "/api/v1/recipes/save", auth_headers, _recipe_body())
+
+    assert response.status_code == 201
+    saved = response.get_json()
+    assert [i["is_optional"] for i in saved["purchase_items"]] == [False]
+    assert [i["is_optional"] for i in saved["pantry_items"]] == [False]
+    stored = recipe_store.get_recipe_by_id(saved["id"])
+    assert stored is not None
+    assert not any(
+        i.is_optional for i in [*stored.purchase_items, *stored.pantry_items]
+    )
+
+
+def test_recipes_save_rejects_an_optional_flag_that_is_not_a_boolean(
+    client: FlaskClient, auth_headers: AuthHeaderFactory, recipe_store: RecipeStore
+) -> None:
+    """Optionality is yes or no; anything else is a 400 and saves nothing."""
+    ingredients = _sandwich_ingredients()
+    ingredients[1]["is_optional"] = "sometimes"
+
+    with patch.dict(os.environ, SECRET_ENV):
+        response = _post(
+            client,
+            "/api/v1/recipes/save",
+            auth_headers,
+            _recipe_body(ingredients=ingredients),
+        )
+
+    assert response.status_code == 400
+    error = response.get_json()["error"]
+    assert error.startswith("invalid ingredient 2: ")
+    assert "sometimes" not in error
+    assert recipe_store.list_recipes() == []
+
+
+def test_recipes_save_still_refuses_an_unknown_unit_on_an_optional_ingredient(
+    client: FlaskClient, auth_headers: AuthHeaderFactory, recipe_store: RecipeStore
+) -> None:
+    """Being optional does not loosen the rule that units are never guessed."""
+    ingredients = _sandwich_ingredients()
+    ingredients[1]["unit"] = "party size bag"
+
+    with patch.dict(os.environ, SECRET_ENV):
+        response = _post(
+            client,
+            "/api/v1/recipes/save",
+            auth_headers,
+            _recipe_body(ingredients=ingredients),
+        )
+
+    assert response.status_code == 400
+    assert "not a supported unit" in response.get_json()["error"]
+    assert recipe_store.list_recipes() == []
+
+
+def test_recipes_save_requires_a_quantity_on_an_optional_ingredient(
+    client: FlaskClient, auth_headers: AuthHeaderFactory, recipe_store: RecipeStore
+) -> None:
+    """An optional ingredient with no stated quantity is not given one."""
+    ingredients = _sandwich_ingredients()
+    del ingredients[1]["quantity"]
+
+    with patch.dict(os.environ, SECRET_ENV):
+        response = _post(
+            client,
+            "/api/v1/recipes/save",
+            auth_headers,
+            _recipe_body(ingredients=ingredients),
+        )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"].startswith("invalid ingredient 2: ")
+    assert recipe_store.list_recipes() == []

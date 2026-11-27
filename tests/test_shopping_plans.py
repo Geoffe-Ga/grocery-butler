@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import itertools
+import json
 import os
 from contextlib import closing
 from typing import TYPE_CHECKING
@@ -20,6 +22,8 @@ from grocery_butler.models import (
     IngredientCategory,
     NeedReasonKind,
     NeedStatus,
+    OptionalDecision,
+    OptionalProblemKind,
     ParsedMeal,
     PlanMeal,
     SoftPreferenceKind,
@@ -28,6 +32,7 @@ from grocery_butler.models import (
 from grocery_butler.recipe_store import RecipeStore
 from grocery_butler.replenishment import INVENTORY_SOURCE, ReplenishmentNeeds
 from grocery_butler.shopping_plans import (
+    OptionalDecisionsError,
     PlanNotFoundError,
     RecipeNotFoundError,
     ShoppingPlans,
@@ -88,6 +93,7 @@ def _ingredient(
     category: IngredientCategory = IngredientCategory.OTHER,
     *,
     pantry: bool = False,
+    optional: bool = False,
 ) -> Ingredient:
     """Build a recipe ingredient."""
     return Ingredient(
@@ -96,6 +102,7 @@ def _ingredient(
         unit=unit,
         category=category,
         is_pantry_item=pantry,
+        is_optional=optional,
     )
 
 
@@ -711,6 +718,548 @@ class TestDeterminismAndVersions:
         assert plans.get(7) is None
         with pytest.raises(PlanNotFoundError, match="7"):
             plans.current_fingerprint(7)
+
+
+def _sandwiches(db_path: str, name: str = "Chicken Sandwiches") -> int:
+    """Save a recipe with one required ingredient and two optional ones."""
+    return _recipe(
+        db_path,
+        name,
+        2,
+        [
+            _ingredient("chicken breast", 1.0, Unit.LB, IngredientCategory.MEAT),
+            _ingredient(
+                "Original Ruffles",
+                1.0,
+                Unit.BAG,
+                IngredientCategory.PANTRY_DRY,
+                optional=True,
+            ),
+            _ingredient(
+                "Cheddar Cheese Ruffles",
+                1.0,
+                Unit.BAG,
+                IngredientCategory.PANTRY_DRY,
+                optional=True,
+            ),
+        ],
+    )
+
+
+def _decided(
+    plans: ShoppingPlans,
+    recipe_id: int,
+    include: dict[str, bool],
+    servings: int | None = None,
+) -> PlanMeal:
+    """Answer a recipe's optional ingredients by name, with its current token."""
+    (choices,) = plans.optional_choices(
+        [PlanMeal(recipe_id=recipe_id, servings=servings)]
+    )
+    ids = {c.ingredient: c.ingredient_id for c in choices.optional_ingredients}
+    return PlanMeal(
+        recipe_id=recipe_id,
+        servings=servings,
+        optional_token=choices.optional_token,
+        optional_decisions=[
+            OptionalDecision(ingredient_id=ids[name], include=wanted)
+            for name, wanted in include.items()
+        ],
+    )
+
+
+def _refusal(plans: ShoppingPlans, meals: list[PlanMeal]) -> OptionalDecisionsError:
+    """Build a plan that must be refused, and return the refusal."""
+    with pytest.raises(OptionalDecisionsError) as caught:
+        plans.build(meals, actor=ACTOR)
+    return caught.value
+
+
+class TestOptionalIngredients:
+    """An optional ingredient is planned only on a member's say-so (ADR 0025)."""
+
+    def test_a_recipe_without_optional_ingredients_hashes_as_it_always_did(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """Plans stored before optional ingredients existed stay current.
+
+        The content written out below, key for key, is what the builder
+        hashed for this recipe before this feature. If the hash moves,
+        every stored plan turns stale and every pending approval is voided.
+        """
+        porridge = _recipe(
+            db_path,
+            "Porridge",
+            2,
+            [_ingredient("oats", 1.0, Unit.CUP, IngredientCategory.PANTRY_DRY)],
+        )
+
+        plan = plans.build([PlanMeal(recipe_id=porridge, servings=4)], actor=ACTOR)
+
+        content_before_this_feature = {
+            "meals": [{"recipe_id": porridge, "servings": 4}],
+            "lines": [
+                {
+                    "item_id": plan.lines[0].item_id,
+                    "display_name": "Oats",
+                    "category": "pantry_dry",
+                    "amounts": [{"quantity": 2.0, "unit": "cup"}],
+                    "reasons": [
+                        {
+                            "kind": "recipe_demand",
+                            "source_key": f"recipe:{porridge}",
+                            "detail": {
+                                "recipe": "Porridge",
+                                "quantity": 2.0,
+                                "unit": "cup",
+                                "servings": 4,
+                            },
+                        }
+                    ],
+                    "constraints": {},
+                    "need_id": None,
+                    "hard_constraints": [],
+                }
+            ],
+            "unplanned": [],
+        }
+        canonical = json.dumps(
+            content_before_this_feature, sort_keys=True, separators=(",", ":")
+        )
+        assert plan.content_hash == hashlib.sha256(canonical.encode()).hexdigest()
+        assert plan.model_dump(mode="json")["meals"] == [
+            {"recipe_id": porridge, "servings": 4}
+        ]
+        assert plans.optional_choices(plan.meals) == []
+
+    def test_undecided_optional_ingredients_refuse_the_build_and_store_nothing(
+        self, plans: ShoppingPlans, needs: ReplenishmentNeeds, db_path: str
+    ) -> None:
+        """Nothing is assumed: no plan, and no need is moved to planned."""
+        item_id = _approved_need(db_path, needs, "oat milk", NeedReasonKind.OUT)
+        recipe_id = _sandwiches(db_path)
+
+        error = _refusal(plans, [PlanMeal(recipe_id=recipe_id)])
+
+        assert error.kind is OptionalProblemKind.MISSING
+        assert plans.list_plans() == []
+        need = needs.open_need_for_item(item_id)
+        assert need is not None
+        assert need.status is NeedStatus.APPROVED
+        assert "Chicken Sandwiches" in str(error)
+        assert "Original Ruffles" in str(error)
+        assert "Cheddar Cheese Ruffles" in str(error)
+
+    def test_the_refusal_lists_each_choice_with_its_stated_amount(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """The amounts are the recipe's own, scaled to the servings asked for."""
+        recipe_id = _sandwiches(db_path)
+
+        error = _refusal(plans, [PlanMeal(recipe_id=recipe_id, servings=4)])
+
+        (meal,) = error.meals
+        assert (meal.recipe_id, meal.recipe, meal.servings) == (
+            recipe_id,
+            "Chicken Sandwiches",
+            4,
+        )
+        assert [
+            (c.ingredient, c.quantity, c.unit, c.category, c.is_pantry_item)
+            for c in meal.optional_ingredients
+        ] == [
+            ("Original Ruffles", 2.0, Unit.BAG, IngredientCategory.PANTRY_DRY, False),
+            (
+                "Cheddar Cheese Ruffles",
+                2.0,
+                Unit.BAG,
+                IngredientCategory.PANTRY_DRY,
+                False,
+            ),
+        ]
+        assert [(p.recipe_id, p.ingredient_id, p.problem) for p in error.problems] == [
+            (recipe_id, c.ingredient_id, OptionalProblemKind.MISSING)
+            for c in meal.optional_ingredients
+        ]
+
+    def test_the_same_question_always_carries_the_same_token(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """The requirement is deterministic, so asking twice is harmless."""
+        recipe_id = _sandwiches(db_path)
+        meals = [PlanMeal(recipe_id=recipe_id)]
+
+        first = plans.optional_choices(meals)
+        second = _refusal(plans, meals).meals
+
+        assert first == second
+        assert len(first[0].optional_token) == 64
+
+    @pytest.mark.parametrize(
+        ("include", "expected"),
+        [
+            ({"Original Ruffles": False, "Cheddar Cheese Ruffles": False}, []),
+            (
+                {"Original Ruffles": True, "Cheddar Cheese Ruffles": False},
+                ["Original Ruffles"],
+            ),
+            (
+                {"Original Ruffles": False, "Cheddar Cheese Ruffles": True},
+                ["Cheddar Cheese Ruffles"],
+            ),
+            (
+                {"Original Ruffles": True, "Cheddar Cheese Ruffles": True},
+                ["Cheddar Cheese Ruffles", "Original Ruffles"],
+            ),
+        ],
+        ids=["neither", "original", "cheddar", "both"],
+    )
+    def test_only_included_optional_ingredients_reach_the_plan(
+        self,
+        plans: ShoppingPlans,
+        db_path: str,
+        include: dict[str, bool],
+        expected: list[str],
+    ) -> None:
+        """Each answer is honoured: included lines appear, excluded ones don't."""
+        recipe_id = _sandwiches(db_path)
+
+        plan = plans.build([_decided(plans, recipe_id, include)], actor=ACTOR)
+
+        names = sorted(line.display_name for line in plan.lines)
+        assert names == sorted(["Chicken Breast", *expected])
+        for name in expected:
+            line = plan.lines[_line(plan, name)]
+            assert [(a.quantity, a.unit) for a in line.amounts] == [(1.0, Unit.BAG)]
+            assert [r.kind for r in line.reasons] == [NeedReasonKind.RECIPE_DEMAND]
+
+    def test_the_plan_records_the_decisions_it_was_built_from(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """A stored plan says what was chosen, in a stable order, with no token."""
+        recipe_id = _sandwiches(db_path)
+        meal = _decided(
+            plans,
+            recipe_id,
+            {"Cheddar Cheese Ruffles": True, "Original Ruffles": False},
+        )
+
+        plan = plans.build([meal], actor=ACTOR)
+
+        stored = plans.get(plan.version)
+        assert stored == plan
+        (planned,) = plan.model_dump(mode="json")["meals"]
+        ids = sorted(d.ingredient_id for d in meal.optional_decisions)
+        assert planned == {
+            "recipe_id": recipe_id,
+            "servings": 2,
+            "optional_decisions": [
+                {"ingredient_id": ids[0], "include": False},
+                {"ingredient_id": ids[1], "include": True},
+            ],
+        }
+
+    def test_an_included_optional_ingredient_is_planned_like_a_required_one(
+        self, plans: ShoppingPlans, needs: ReplenishmentNeeds, db_path: str
+    ) -> None:
+        """It merges with other demand and carries the item's hard constraints."""
+        item_id = _approved_need(db_path, needs, "salsa", NeedReasonKind.LOW_STOCK)
+        HouseholdRules(db_path).add_hard(
+            HardConstraintKind.DO_NOT_SUBSTITUTE, "", actor=ACTOR, item_id=item_id
+        )
+        tacos = _recipe(db_path, "Tacos", 2, [_ingredient("salsa", 1.0, Unit.JAR)])
+        quesadilla = _recipe(
+            db_path,
+            "Chicken Quesadilla",
+            2,
+            [
+                _ingredient("tortillas", 1.0, Unit.PACKAGE),
+                _ingredient("salsa", 1.0, Unit.JAR, optional=True),
+            ],
+        )
+
+        plan = plans.build(
+            [
+                PlanMeal(recipe_id=tacos),
+                _decided(plans, quesadilla, {"salsa": True}),
+            ],
+            actor=ACTOR,
+        )
+
+        line = plan.lines[_line(plan, "Salsa")]
+        assert line.item_id == item_id
+        assert [(a.quantity, a.unit) for a in line.amounts] == [(2.0, Unit.JAR)]
+        assert sorted(r.source_key for r in line.reasons) == [
+            "inventory",
+            f"recipe:{tacos}",
+            f"recipe:{quesadilla}",
+        ]
+        assert [c.kind for c in line.hard_constraints] == [
+            HardConstraintKind.DO_NOT_SUBSTITUTE
+        ]
+        assert line.need_id is not None
+
+    def test_an_included_optional_pantry_item_adds_nothing_like_a_required_one(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """It is still asked about, and still left to the pantry."""
+        recipe_id = _recipe(
+            db_path,
+            "Toast",
+            1,
+            [
+                _ingredient("bread", 2.0, Unit.SLICE),
+                _ingredient("butter", 1.0, Unit.TBSP, pantry=True, optional=True),
+            ],
+        )
+
+        asked = _refusal(plans, [PlanMeal(recipe_id=recipe_id)])
+        plan = plans.build([_decided(plans, recipe_id, {"butter": True})], actor=ACTOR)
+
+        assert [c.is_pantry_item for c in asked.meals[0].optional_ingredients] == [True]
+        assert [line.display_name for line in plan.lines] == ["Bread"]
+
+    def test_meals_are_grouped_and_every_meal_must_be_answered(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """Answering one meal does not answer another."""
+        first = _sandwiches(db_path)
+        second = _sandwiches(db_path, "Pulled Chicken Sandwiches")
+        plain = _recipe(db_path, "Porridge", 2, [_ingredient("oats", 1.0, Unit.CUP)])
+        answered = _decided(
+            plans, first, {"Original Ruffles": True, "Cheddar Cheese Ruffles": False}
+        )
+
+        error = _refusal(
+            plans,
+            [PlanMeal(recipe_id=plain), PlanMeal(recipe_id=second), answered],
+        )
+
+        assert error.kind is OptionalProblemKind.MISSING
+        assert [meal.recipe_id for meal in error.meals] == [first, second]
+        assert {p.recipe_id for p in error.problems} == {second}
+        assert "Pulled Chicken Sandwiches" in str(error)
+        assert plans.list_plans() == []
+
+    def test_an_incomplete_answer_is_refused_naming_what_is_missing(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """One of two decided is not decided."""
+        recipe_id = _sandwiches(db_path)
+        meal = _decided(plans, recipe_id, {"Original Ruffles": True})
+
+        error = _refusal(plans, [meal])
+
+        assert error.kind is OptionalProblemKind.MISSING
+        assert "Cheddar Cheese Ruffles" in str(error)
+        assert "Original Ruffles" not in str(error)
+        assert len(error.problems) == 1
+        assert plans.list_plans() == []
+
+    def test_a_decision_about_something_else_is_refused(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """An id that is not one of the recipe's optional ingredients is unknown."""
+        recipe_id = _sandwiches(db_path)
+        meal = _decided(
+            plans, recipe_id, {"Original Ruffles": True, "Cheddar Cheese Ruffles": True}
+        )
+        meal.optional_decisions.append(
+            OptionalDecision(ingredient_id=9999, include=True)
+        )
+
+        error = _refusal(plans, [meal])
+
+        assert error.kind is OptionalProblemKind.UNKNOWN
+        assert [(p.ingredient_id, p.problem) for p in error.problems] == [
+            (9999, OptionalProblemKind.UNKNOWN)
+        ]
+        assert "9999" in str(error)
+        assert plans.list_plans() == []
+
+    def test_a_required_ingredient_cannot_be_excluded(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """Only optional ingredients take a decision."""
+        recipe_id = _sandwiches(db_path)
+        meal = _decided(
+            plans, recipe_id, {"Original Ruffles": True, "Cheddar Cheese Ruffles": True}
+        )
+        with closing(get_connection(db_path)) as conn:
+            required = conn.execute(
+                "SELECT id FROM recipe_ingredients WHERE ingredient = ?",
+                ("chicken breast",),
+            ).fetchone()["id"]
+        meal.optional_decisions.append(
+            OptionalDecision(ingredient_id=required, include=False)
+        )
+
+        error = _refusal(plans, [meal])
+
+        assert error.kind is OptionalProblemKind.UNKNOWN
+
+    def test_two_decisions_for_one_ingredient_are_refused(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """Even two that agree: one decision per ingredient."""
+        recipe_id = _sandwiches(db_path)
+        meal = _decided(
+            plans, recipe_id, {"Original Ruffles": True, "Cheddar Cheese Ruffles": True}
+        )
+        repeated = meal.optional_decisions[0]
+        meal.optional_decisions.append(repeated.model_copy(update={"include": False}))
+
+        error = _refusal(plans, [meal])
+
+        assert error.kind is OptionalProblemKind.DUPLICATE
+        assert [(p.ingredient_id, p.problem) for p in error.problems] == [
+            (repeated.ingredient_id, OptionalProblemKind.DUPLICATE)
+        ]
+        assert plans.list_plans() == []
+
+    def test_an_answer_to_a_question_that_has_changed_is_stale(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """The recipe was edited after the member was asked; ask again."""
+        recipe_id = _sandwiches(db_path)
+        meal = _decided(
+            plans, recipe_id, {"Original Ruffles": True, "Cheddar Cheese Ruffles": True}
+        )
+        with closing(get_connection(db_path)) as conn:
+            conn.execute(
+                "UPDATE recipe_ingredients SET quantity_per_serving = 2"
+                " WHERE ingredient = ?",
+                ("Original Ruffles",),
+            )
+            conn.commit()
+
+        error = _refusal(plans, [meal])
+
+        assert error.kind is OptionalProblemKind.STALE
+        assert [(p.ingredient_id, p.problem) for p in error.problems] == [
+            (None, OptionalProblemKind.STALE)
+        ]
+        assert error.meals[0].optional_token != meal.optional_token
+        assert error.meals[0].optional_ingredients[0].quantity == 4.0
+        assert plans.list_plans() == []
+
+    def test_an_answer_given_for_other_servings_is_stale(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """The amounts the member agreed to were for a different meal size."""
+        recipe_id = _sandwiches(db_path)
+        meal = _decided(
+            plans, recipe_id, {"Original Ruffles": True, "Cheddar Cheese Ruffles": True}
+        )
+
+        error = _refusal(plans, [meal.model_copy(update={"servings": 6})])
+
+        assert error.kind is OptionalProblemKind.STALE
+
+    def test_decisions_without_a_token_are_stale(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """A decision must say which question it answers."""
+        recipe_id = _sandwiches(db_path)
+        meal = _decided(
+            plans, recipe_id, {"Original Ruffles": True, "Cheddar Cheese Ruffles": True}
+        )
+
+        error = _refusal(plans, [meal.model_copy(update={"optional_token": None})])
+
+        assert error.kind is OptionalProblemKind.STALE
+        assert "optional_token" in str(error)
+
+    def test_decisions_for_a_recipe_with_nothing_optional_are_stale(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """The optional ingredient was removed after the member was asked."""
+        recipe_id = _sandwiches(db_path)
+        meal = _decided(
+            plans, recipe_id, {"Original Ruffles": True, "Cheddar Cheese Ruffles": True}
+        )
+        with closing(get_connection(db_path)) as conn:
+            conn.execute("UPDATE recipe_ingredients SET is_optional = ?", (False,))
+            conn.commit()
+
+        error = _refusal(plans, [meal])
+
+        assert error.kind is OptionalProblemKind.STALE
+        assert error.meals == []
+
+    def test_confirming_twice_stores_one_version(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """A retried confirmation changes nothing, whatever order it lists."""
+        recipe_id = _sandwiches(db_path)
+        meal = _decided(
+            plans,
+            recipe_id,
+            {"Original Ruffles": True, "Cheddar Cheese Ruffles": False},
+        )
+        shuffled = meal.model_copy(
+            update={"optional_decisions": list(reversed(meal.optional_decisions))}
+        )
+
+        first = plans.build([meal], actor=ACTOR)
+        again = plans.build([shuffled], actor=ACTOR)
+
+        assert again == first
+        assert len(plans.list_plans()) == 1
+
+    def test_a_different_answer_is_a_new_version(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """Changing your mind is a change to the plan, never an edit of it."""
+        recipe_id = _sandwiches(db_path)
+        yes = {"Original Ruffles": True, "Cheddar Cheese Ruffles": False}
+        no = {"Original Ruffles": False, "Cheddar Cheese Ruffles": False}
+
+        first = plans.build([_decided(plans, recipe_id, yes)], actor=ACTOR)
+        second = plans.build([_decided(plans, recipe_id, no)], actor=ACTOR)
+
+        assert (first.version, second.version) == (1, 2)
+        assert plans.get(1) == first
+
+    def test_a_stored_plan_stays_current_until_its_choices_change(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """A new optional ingredient makes the plan stale, and reading it works."""
+        recipe_id = _sandwiches(db_path)
+        plan = plans.build(
+            [
+                _decided(
+                    plans,
+                    recipe_id,
+                    {"Original Ruffles": True, "Cheddar Cheese Ruffles": False},
+                )
+            ],
+            actor=ACTOR,
+        )
+        before = plans.current_fingerprint(plan.version)
+        with closing(get_connection(db_path)) as conn:
+            conn.execute(
+                "UPDATE recipe_ingredients SET is_optional = ? WHERE ingredient = ?",
+                (True, "chicken breast"),
+            )
+            conn.commit()
+
+        after = plans.current_fingerprint(plan.version)
+
+        assert before == plan.content_hash
+        assert after != plan.content_hash
+        assert len(after) == 64
+
+    def test_previewing_asks_the_same_question(
+        self, plans: ShoppingPlans, db_path: str
+    ) -> None:
+        """A preview assumes nothing either."""
+        recipe_id = _sandwiches(db_path)
+
+        with pytest.raises(OptionalDecisionsError) as caught:
+            plans.preview([PlanMeal(recipe_id=recipe_id)])
+
+        assert caught.value.kind is OptionalProblemKind.MISSING
 
 
 _PG_URL = os.environ.get("TEST_DATABASE_URL", "")

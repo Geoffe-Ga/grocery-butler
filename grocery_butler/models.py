@@ -16,8 +16,13 @@ from typing import Annotated, Any
 from pydantic import (
     AfterValidator,
     BaseModel,
+    ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    StrictInt,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -481,7 +486,13 @@ IngredientName = Annotated[str, AfterValidator(_require_name)]
 
 
 class Ingredient(BaseModel):
-    """A single ingredient with quantity and category."""
+    """A single ingredient with quantity and category.
+
+    ``is_optional`` marks an ingredient the recipe can be made without
+    (ADR 0025). It defaults to required. An optional ingredient is never
+    bought on its own authority: a member includes or excludes it each
+    time the recipe is planned.
+    """
 
     ingredient: IngredientName
     quantity: float
@@ -489,6 +500,7 @@ class Ingredient(BaseModel):
     category: IngredientCategory
     notes: str = ""
     is_pantry_item: bool = False
+    is_optional: bool = False
 
     @field_validator("unit", mode="before")
     @classmethod
@@ -1090,14 +1102,106 @@ class ObservationBatch(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class OptionalDecision(BaseModel):
+    """A member's answer about one optional recipe ingredient (ADR 0025).
+
+    ``ingredient_id`` is the id the confirmation requirement gave for the
+    ingredient, and must be a real integer. ``include`` must be a real
+    boolean: nothing is read as a yes or a no.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ingredient_id: StrictInt
+    include: StrictBool
+
+
 class PlanMeal(BaseModel):
     """A saved recipe a member wants to shop for.
 
     ``servings`` defaults to the recipe's own default when omitted.
+
+    ``optional_decisions`` answers the recipe's optional ingredients, one
+    decision each, and ``optional_token`` says which question they answer
+    (ADR 0025). The token is checked when a plan is built and is never
+    stored or returned. A meal with no decisions serializes exactly as it
+    did before optional ingredients existed, so older plans keep their
+    content hash.
     """
 
     recipe_id: int
     servings: int | None = Field(default=None, ge=1)
+    optional_decisions: list[OptionalDecision] = Field(default_factory=list)
+    optional_token: str | None = Field(default=None, exclude=True)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_decisions(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        """Leave ``optional_decisions`` out when there are none.
+
+        Args:
+            handler: Pydantic's own serializer for this model.
+
+        Returns:
+            The meal's data, without an empty ``optional_decisions``.
+        """
+        data: dict[str, Any] = handler(self)
+        if not data.get("optional_decisions"):
+            data.pop("optional_decisions", None)
+        return data
+
+
+class OptionalIngredientChoice(BaseModel):
+    """One optional ingredient a member has to decide on for a meal.
+
+    The amount is the recipe's own, scaled to the servings asked for. It
+    is never estimated.
+    """
+
+    ingredient_id: int
+    ingredient: str
+    quantity: float
+    unit: Unit
+    category: IngredientCategory
+    notes: str
+    is_pantry_item: bool
+
+
+class MealOptionalChoices(BaseModel):
+    """The optional ingredients of one meal on a plan request (ADR 0025).
+
+    ``optional_token`` fingerprints this exact question: the recipe, the
+    servings and every optional ingredient with its amount. Decisions sent
+    with a different token are stale.
+    """
+
+    recipe_id: int
+    recipe: str
+    servings: int
+    optional_token: str
+    optional_ingredients: list[OptionalIngredientChoice]
+
+
+class OptionalProblemKind(StrEnum):
+    """Why a set of optional-ingredient decisions was refused."""
+
+    MISSING = "missing"
+    UNKNOWN = "unknown"
+    DUPLICATE = "duplicate"
+    STALE = "stale"
+
+
+class OptionalDecisionProblem(BaseModel):
+    """One thing wrong with the decisions sent for a meal.
+
+    ``ingredient_id`` is None for a stale answer, which concerns the whole
+    meal.
+    """
+
+    recipe_id: int
+    ingredient_id: int | None
+    problem: OptionalProblemKind
 
 
 class PlanAmount(BaseModel):

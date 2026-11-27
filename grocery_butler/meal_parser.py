@@ -66,6 +66,9 @@ def _parse_ingredient(data: object) -> Ingredient | None:
         The ingredient, or ``None`` if the entry is not an object or has
         no name. A nameless ingredient can't be bought or stocked, so it
         is dropped here and the meal is flagged for a person to check.
+        The ingredient is always required: whether something is optional
+        is a person's call when they save the recipe (ADR 0025), so an
+        ``is_optional`` in the model's output is not read.
     """
     if not isinstance(data, dict):
         return None
