@@ -110,7 +110,8 @@ Three things constrain the answer:
   ingredients gives them new ids, so that plan reads as stale even if
   nothing a person would notice changed. Stale is the safe direction.
 - The dashboard cannot plan a meal that has optional ingredients, and its
-  add-recipe form cannot mark one. Both wait on the form rewrite in #260.
+  add-recipe form cannot mark one. The form was being reworked under #260
+  while this was built, so both are left as follow-up work.
 
 ### Neutral
 
