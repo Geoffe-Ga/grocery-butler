@@ -36,7 +36,7 @@
                 <div class="form-group">
                     <label for="ing_unit_0">Unit</label>
                     <input type="text" id="ing_unit_0" name="ing_unit_0"
-                           placeholder="e.g. lb">
+                           list="unit-options" placeholder="e.g. lb">
                 </div>
                 <div class="form-group">
                     <label for="ing_category_0">Category</label>
@@ -54,6 +54,13 @@
                 </div>
             </div>
         </div>
+
+        <datalist id="unit-options">
+            {% for unit in units %}
+            <option value="{{ unit }}"></option>
+            {% endfor %}
+        </datalist>
+        <p><small>One measurement per ingredient: 19 oz or 1 can, not "19 oz can".</small></p>
 
         <div class="page-actions">
             <button type="button" id="add-ingredient-row" class="btn btn-secondary">

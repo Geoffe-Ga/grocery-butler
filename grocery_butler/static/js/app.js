@@ -189,7 +189,7 @@ function initAddIngredientRow() {
             "</div>" +
             '<div class="form-group">' +
             '<label for="ing_unit_' + idx + '">Unit</label>' +
-            '<input type="text" id="ing_unit_' + idx + '" name="ing_unit_' + idx + '" placeholder="e.g. lb">' +
+            '<input type="text" id="ing_unit_' + idx + '" name="ing_unit_' + idx + '" list="unit-options" placeholder="e.g. lb">' +
             "</div>" +
             '<div class="form-group">' +
             '<label for="ing_category_' + idx + '">Category</label>' +
