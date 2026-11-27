@@ -155,6 +155,7 @@ class TestForms:
 
         page.locator("#add-ingredient-row").click()
         expect(page.locator(".ingredient-row")).to_have_count(2)
+        expect(page.locator("#ing_unit_1")).to_have_attribute("list", "unit-options")
         page.locator("#ing_name_1").fill("kidney beans")
         page.locator("#ing_unit_1").fill("can")
         page.locator("#ing_category_1").select_option("pantry_dry")

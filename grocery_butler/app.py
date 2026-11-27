@@ -33,7 +33,8 @@ from grocery_butler.models import (
     IngredientCategory,
     InventoryItem,
     InventoryStatus,
-    parse_unit,
+    Unit,
+    parse_unit_strict,
 )
 from grocery_butler.observability import init_observability
 from grocery_butler.pantry_manager import PantryManager
@@ -855,6 +856,7 @@ def _register_recipe_routes(app: Flask) -> None:
                 "recipe_add.html",
                 active_page="recipes",
                 categories=categories,
+                units=[unit.value for unit in Unit],
             )
 
         return _handle_recipe_add_post(app)
@@ -929,7 +931,12 @@ def _handle_recipe_add_post(app: Flask) -> Response:
         flash("Servings must be a number.", "error")
         return redirect(url_for("recipe_add"))
 
-    ingredients = _parse_ingredient_form_rows()
+    try:
+        ingredients = _parse_ingredient_form_rows()
+    except ValueError as exc:
+        # The message names the row and the rule, never the value typed.
+        flash(str(exc), "error")
+        return redirect(url_for("recipe_add"))
 
     if not ingredients:
         flash("At least one ingredient is required.", "error")
@@ -959,8 +966,15 @@ def _handle_recipe_add_post(app: Flask) -> Response:
 def _parse_ingredient_form_rows() -> list[Ingredient]:
     """Parse ingredient rows from the add recipe form.
 
+    A member's unit is a confirmed write, so it is parsed strictly: an
+    unknown unit is refused instead of being stored as ``each``.
+
     Returns:
         List of Ingredient models from form data.
+
+    Raises:
+        ValueError: If a row's unit is not a supported unit. The message
+            says which ingredient, counting from one as the form shows them.
     """
     from grocery_butler.models import Ingredient
 
@@ -979,7 +993,11 @@ def _parse_ingredient_form_rows() -> list[Ingredient]:
 
         qty = _parse_float(request.form.get(f"ing_qty_{idx}", "0").strip(), 0.0)
 
-        unit = request.form.get(f"ing_unit_{idx}", "").strip()
+        try:
+            unit = parse_unit_strict(request.form.get(f"ing_unit_{idx}", ""))
+        except ValueError as exc:
+            msg = f"Ingredient {idx + 1}: {exc}"
+            raise ValueError(msg) from exc
         cat_raw = request.form.get(f"ing_category_{idx}", "other").strip()
         is_pantry = request.form.get(f"ing_pantry_{idx}") == "on"
 
@@ -989,7 +1007,7 @@ def _parse_ingredient_form_rows() -> list[Ingredient]:
             Ingredient(
                 ingredient=ing_name.lower(),
                 quantity=qty,
-                unit=parse_unit(unit),
+                unit=unit,
                 category=category,
                 is_pantry_item=is_pantry,
             )

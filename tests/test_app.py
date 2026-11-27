@@ -976,6 +976,72 @@ class TestRecipeAdd:
         )
         assert response.status_code == 200
 
+    def test_recipe_add_post_unknown_unit_saves_nothing(
+        self, client: FlaskClient, recipe_store: RecipeStore
+    ) -> None:
+        """An unknown unit is refused with the row named, and nothing is saved.
+
+        Regression for issue #258: ``19 oz can`` used to be stored as
+        ``1 each``, silently dropping the package size.
+        """
+        response = client.post(
+            "/recipes/add",
+            data={
+                "name": "Chili",
+                "servings": "4",
+                "ing_name_0": "onion",
+                "ing_qty_0": "1",
+                "ing_unit_0": "each",
+                "ing_category_0": "produce",
+                "ing_name_1": "crushed tomatoes",
+                "ing_qty_1": "1",
+                "ing_unit_1": "19 oz can",
+                "ing_category_1": "pantry_dry",
+            },
+            follow_redirects=True,
+        )
+        html = response.data.decode()
+        assert "Ingredient 2: That is not a supported unit." in html
+        assert "Add Recipe" in html
+        assert recipe_store.list_recipes() == []
+
+    @pytest.mark.parametrize(
+        ("unit", "stored_unit"),
+        [("oz", Unit.OZ), ("Cups", Unit.CUP), ("gallon", Unit.GAL), ("", Unit.EACH)],
+    )
+    def test_recipe_add_post_normalizes_known_units(
+        self,
+        client: FlaskClient,
+        recipe_store: RecipeStore,
+        unit: str,
+        stored_unit: Unit,
+    ) -> None:
+        """A canonical unit, an alias or a blank unit still saves."""
+        client.post(
+            "/recipes/add",
+            data={
+                "name": "Unit Test",
+                "servings": "4",
+                "ing_name_0": "stuff",
+                "ing_qty_0": "1",
+                "ing_unit_0": unit,
+                "ing_category_0": "other",
+            },
+        )
+        saved = recipe_store.find_recipe("unit test")
+        assert saved is not None
+        assert [i.unit for i in saved.purchase_items] == [stored_unit]
+
+    def test_recipe_add_form_suggests_the_supported_units(
+        self, client: FlaskClient
+    ) -> None:
+        """The unit box offers every supported unit as a suggestion."""
+        html = client.get("/recipes/add").data.decode()
+        assert 'list="unit-options"' in html
+        assert '<datalist id="unit-options">' in html
+        for unit in Unit:
+            assert f'<option value="{unit.value}">' in html
+
 
 # ---------------------------------------------------------------------------
 # TestRecipeDelete
