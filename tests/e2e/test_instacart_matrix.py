@@ -309,3 +309,58 @@ def test_an_answer_that_is_not_a_link_stores_no_link(
         attempt, client.get("/handoff").get_data(as_text=True), "invalid_response"
     )
     assert len(provider.calls) == 1
+
+
+@pytest.mark.usefixtures("development")
+def test_soft_preferences_are_filtered_or_said_once(
+    v2: V2, provider: FakeProvider
+) -> None:
+    """Organic becomes a filter; what has no filter is one note (issue #215).
+
+    The preferences are set for the whole household, so they land on both
+    lines of a plan built from real needs. Instacart is sent ``ORGANIC`` on
+    each line and no word about store brands or the brand to avoid. The
+    attempt tells the member once, naming both items.
+    """
+    for name in ("oat milk", "butter"):
+        item_id = v2.ok("POST", "/items", {"name": name})["id"]
+        v2.ok("POST", "/needs", {"item_id": item_id})
+    v2.ok("POST", "/soft-preferences", {"kind": "organic"})
+    v2.ok("POST", "/soft-preferences", {"kind": "generic"})
+    v2.ok("POST", "/soft-preferences", {"kind": "avoid_brand", "value": "Kerrygold"})
+    plan = v2.ok("POST", "/plans", {})
+    version = plan["version"]
+    export = v2.ok("GET", f"/plans/{version}/export")
+    draft = v2.ok("POST", f"/plans/{version}/handoffs", {"adapter": "instacart"})
+    v2.ok(
+        "POST",
+        f"/handoffs/{draft['id']}/approve",
+        {"payload_hash": draft["payload_hash"]},
+    )
+
+    attempt = _execute(v2, draft["id"])
+    named = ", ".join(
+        f"{line['display_name']} (prefer the store brand; avoid Kerrygold)"
+        for line in plan["lines"]
+    )
+
+    (call,) = provider.calls
+    sent = json.loads(call["body"])
+    assert [line["filters"]["health_filters"] for line in sent["line_items"]] == [
+        ["ORGANIC"],
+        ["ORGANIC"],
+    ]
+    assert "Kerrygold" not in call["body"].decode()
+    assert "store brand" not in call["body"].decode()
+    assert attempt["status"] == "created"
+    assert sorted(line["display_name"] for line in plan["lines"]) == [
+        "Butter",
+        "Oat Milk",
+    ]
+    assert attempt["needs_your_check"] == [
+        f"These preferences can't be applied here, so check as you shop: {named}"
+    ]
+    assert (
+        export["content"].count("[prefer organic, the store brand; avoid Kerrygold]")
+        == 2
+    )

@@ -26,7 +26,7 @@ from contextlib import closing
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from grocery_butler.db import get_connection
 from grocery_butler.household_items import HouseholdItemStore, ItemNotFoundError
@@ -39,6 +39,7 @@ from grocery_butler.models import (
     Unit,
 )
 from grocery_butler.observability import audit
+from grocery_butler.plan_preferences import is_product_code
 from grocery_butler.replenishment import ReplenishmentNeeds
 
 if TYPE_CHECKING:
@@ -62,7 +63,7 @@ _SELECT_RECEIPTS = (
 _SELECT_LINES = (
     "SELECT id, receipt_id, name, outcome, quantity, unit, item_id,"
     " substitute_name, substitute_item_id, notes, decision, fulfils_need,"
-    " observation_id FROM receipt_lines WHERE receipt_id = ? ORDER BY id"
+    " observation_id, upc FROM receipt_lines WHERE receipt_id = ? ORDER BY id"
 )
 _SELECT_ATTEMPT = "SELECT plan_version FROM fulfillment_attempts WHERE id = ?"
 
@@ -122,6 +123,28 @@ class NewReceiptLine(BaseModel):
     unit: Unit | None = None
     substitute_name: str | None = Field(default=None, min_length=1, max_length=200)
     notes: str = Field(default="", max_length=500)
+    upc: str | None = None
+
+    @field_validator("upc")
+    @classmethod
+    def _upc_is_a_product_code(cls, value: str | None) -> str | None:
+        """Accept only a code that could be sent to a retailer as it stands.
+
+        Args:
+            value: The code as the receipt gave it, or None.
+
+        Returns:
+            The code, unchanged.
+
+        Raises:
+            ValueError: If it is not 12 or 14 ASCII digits.
+        """
+        if value is None:
+            return None
+        if not is_product_code(value):
+            msg = "A product code (upc) must be 12 or 14 digits."
+            raise ValueError(msg)
+        return value
 
     @model_validator(mode="after")
     def _substitute_goes_with_substituted(self) -> NewReceiptLine:
@@ -166,6 +189,7 @@ class ReceiptLine(BaseModel):
     fulfils_need: bool | None
     observation_id: int | None
     needs_review: bool
+    upc: str | None = None
 
 
 class Receipt(BaseModel):
@@ -192,6 +216,8 @@ class LineReview(BaseModel):
     the wrong one. For a substituted line, ``substitute_item_id`` names
     what arrived and ``fulfils_need`` says whether it will do: true closes
     the original item's need, false leaves the original still wanted.
+    ``remember_upc`` saves the line's product code on the item, and is only
+    allowed on a confirmed line that was received and has a code (ADR 0023).
     """
 
     line_id: int
@@ -199,6 +225,7 @@ class LineReview(BaseModel):
     item_id: int | None = None
     substitute_item_id: int | None = None
     fulfils_need: bool | None = None
+    remember_upc: bool = False
 
 
 class ReceiptNotFoundError(LookupError):
@@ -278,6 +305,7 @@ def _row_to_line(row: Any) -> ReceiptLine:
         decision=LineDecision(row["decision"]),
         fulfils_need=None if fulfils is None else bool(fulfils),
         observation_id=row["observation_id"],
+        upc=row["upc"],
         needs_review=row["item_id"] is None or substituted,
     )
 
@@ -319,6 +347,42 @@ class _Effect(BaseModel):
     fulfils_need: bool | None = None
     item_id: int | None = None
     substitute_item_id: int | None = None
+    verify_upc: str | None = None
+
+
+def _check_remember_upc(line: ReceiptLine, review: LineReview) -> None:
+    """Refuse to learn a product code from anything but solid evidence.
+
+    A code is saved only from a line the member confirmed, that was
+    received as asked, and that came with a code (ADR 0023). A skipped
+    line was not vouched for, an ordered line has not arrived, and a
+    substituted line's code belongs to a different product.
+
+    Args:
+        line: The receipt line.
+        review: The member's decision about it.
+
+    Raises:
+        ReceiptReviewError: If the review asks to remember a code the
+            line can't vouch for.
+    """
+    if not review.remember_upc:
+        return
+    if review.action is not LineAction.CONFIRM:
+        msg = (
+            f"Line {line.id}: to remember a product code, confirm the line."
+            " A skipped line teaches nothing."
+        )
+        raise ReceiptReviewError(msg)
+    if line.outcome is not LineOutcome.RECEIVED:
+        msg = (
+            f"Line {line.id}: only a line that was received as asked can teach"
+            f" a product code; this one was {line.outcome.value}."
+        )
+        raise ReceiptReviewError(msg)
+    if line.upc is None:
+        msg = f"Line {line.id} has no product code to remember."
+        raise ReceiptReviewError(msg)
 
 
 class Reconciliations:
@@ -508,8 +572,8 @@ class Reconciliations:
             for line, (item_id, substitute_id) in zip(lines, matches, strict=True):
                 conn.execute(
                     "INSERT INTO receipt_lines (receipt_id, name, outcome, quantity,"
-                    " unit, item_id, substitute_name, substitute_item_id, notes)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " unit, item_id, substitute_name, substitute_item_id, notes,"
+                    " upc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         receipt_id,
                         line.name,
@@ -520,6 +584,7 @@ class Reconciliations:
                         line.substitute_name,
                         substitute_id,
                         line.notes,
+                        line.upc,
                     ),
                 )
             conn.commit()
@@ -643,6 +708,7 @@ class Reconciliations:
         Raises:
             ReceiptReviewError: If the decision can't be applied.
         """
+        _check_remember_upc(line, review)
         if review.action is LineAction.SKIP:
             return _Effect(line_id=line.id, decision=LineDecision.SKIPPED)
         item_id = self._item_for(line, review)
@@ -661,6 +727,7 @@ class Reconciliations:
             need_item_id=item_id,
             need_target=target,
             item_id=item_id,
+            verify_upc=line.upc if review.remember_upc else None,
         )
 
     def _effects(
@@ -769,6 +836,15 @@ class Reconciliations:
                     evidence_ref=receipt.evidence_ref,
                     notes=f"Receipt {receipt.id}, line {line.id}: {line.outcome.value}",
                 ),
+            )
+        if effect.verify_upc is not None and effect.item_id is not None:
+            self._items.verify_upc_in(
+                conn,
+                effect.item_id,
+                effect.verify_upc,
+                actor=actor,
+                verified_at=self._clock().isoformat(),
+                evidence={"receipt_id": receipt.id, "line_id": line.id},
             )
         conn.execute(
             "UPDATE receipt_lines SET decision = ?, item_id = ?,"

@@ -10,31 +10,42 @@
               "unit": "cup"
             }
           ],
+          "avoid_brands": [],
+          "generic": false,
           "item": "Buttermilk",
           "must": [
             "no peanut",
             "vegetarian",
             "no substitutes"
           ],
+          "organic": false,
           "preferred_brand": "Clover",
           "preferred_size": "1 qt",
           "reasons": [
             "running low",
             "for Biscuits, Pancakes"
-          ]
+          ],
+          "verified_upc": "012345678905"
         },
         {
           "amounts": [],
+          "avoid_brands": [
+            "Silk",
+            "Planet Oat"
+          ],
+          "generic": true,
           "item": "Oat Milk",
           "must": [
             "no peanut",
             "vegetarian"
           ],
+          "organic": true,
           "preferred_brand": null,
           "preferred_size": null,
           "reasons": [
             "out"
-          ]
+          ],
+          "verified_upc": null
         },
         {
           "amounts": [
@@ -47,13 +58,17 @@
               "unit": "jar"
             }
           ],
+          "avoid_brands": [],
+          "generic": false,
           "item": "Yogurt",
           "must": [],
+          "organic": false,
           "preferred_brand": null,
           "preferred_size": null,
           "reasons": [
             "for Curry, Parfait"
-          ]
+          ],
+          "verified_upc": null
         }
       ]
     },
@@ -67,14 +82,18 @@
               "unit": "lb"
             }
           ],
+          "avoid_brands": [],
+          "generic": false,
           "item": "Rice",
           "must": [],
+          "organic": false,
           "preferred_brand": null,
           "preferred_size": null,
           "reasons": [
             "requested",
             "for Curry"
-          ]
+          ],
+          "verified_upc": null
         }
       ]
     },
@@ -83,13 +102,17 @@
       "lines": [
         {
           "amounts": [],
+          "avoid_brands": [],
+          "generic": false,
           "item": "Birthday Candles",
           "must": [],
+          "organic": false,
           "preferred_brand": null,
           "preferred_size": null,
           "reasons": [
             "requested"
-          ]
+          ],
+          "verified_upc": null
         }
       ]
     }

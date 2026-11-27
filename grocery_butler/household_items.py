@@ -174,6 +174,9 @@ def _row_to_item(row: Any) -> HouseholdItem:
         target_quantity=_optional(row, "target_quantity"),
         target_unit=Unit(unit) if unit else None,
         cadence_days=_optional(row, "cadence_days"),
+        verified_upc=_optional(row, "verified_upc"),
+        upc_verified_by=_optional(row, "upc_verified_by"),
+        upc_verified_at=_optional(row, "upc_verified_at"),
         active=bool(row["active"]),
         merged_into_id=row["merged_into_id"],
     )
@@ -471,6 +474,40 @@ class HouseholdItemStore:
             conn.commit()
             return self._require(conn, item_id)
 
+    def verify_upc_in(
+        self,
+        conn: DatabaseConnection,
+        item_id: int,
+        upc: str,
+        *,
+        actor: str,
+        verified_at: str,
+        evidence: dict[str, Any],
+    ) -> None:
+        """Record a product code a member confirmed, inside a caller's write.
+
+        The only way a code reaches an item (ADR 0023). The caller is the
+        receipt review: it owns the transaction and commits it, so the
+        code is saved with the confirmation that vouches for it or not at
+        all.
+
+        Args:
+            conn: The caller's open write connection.
+            item_id: The canonical item the confirmed line is for.
+            upc: The code from the receipt line.
+            actor: The member who confirmed the line.
+            verified_at: When they confirmed it, as ISO text.
+            evidence: Where the code came from, for the item's history.
+        """
+        conn.execute(_VERIFY_UPC, (upc, actor, verified_at, item_id))
+        self._record(
+            conn,
+            item_id,
+            ItemEventType.UPC_VERIFIED,
+            {"upc": upc, **evidence},
+            actor,
+        )
+
     def merge(self, source_id: int, target_id: int, *, actor: str) -> None:
         """Merge one item into another, reversibly.
 
@@ -756,7 +793,16 @@ _UPDATE_STATEMENTS: dict[str, str] = {
     " updated_at = CURRENT_TIMESTAMP WHERE id = ?",
     "cadence_days": "UPDATE household_items SET cadence_days = ?,"
     " updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    # Only ever written with NULL from here: the model accepts nothing else.
+    "verified_upc": "UPDATE household_items SET verified_upc = ?,"
+    " upc_verified_by = NULL, upc_verified_at = NULL,"
+    " updated_at = CURRENT_TIMESTAMP WHERE id = ?",
 }
+
+_VERIFY_UPC = (
+    "UPDATE household_items SET verified_upc = ?, upc_verified_by = ?,"
+    " upc_verified_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+)
 
 
 def backfill_item_links(db_path: str) -> None:

@@ -35,6 +35,7 @@ from grocery_butler.models import (
     UnplannedIngredient,
     parse_unit,
 )
+from grocery_butler.plan_preferences import line_preferences
 from grocery_butler.replenishment import ReplenishmentNeeds
 from grocery_butler.units import convert, dimension_of
 
@@ -541,14 +542,6 @@ class ShoppingPlans:
             hard constraint that applies to the item (ADR 0012).
         """
         item = entry.item
-        constraints = {
-            key: value
-            for key, value in (
-                ("preferred_brand", item.preferred_brand),
-                ("preferred_size", item.preferred_size),
-            )
-            if value
-        }
         return PlanLine(
             item_id=item.id,
             display_name=item.display_name,
@@ -564,7 +557,9 @@ class ShoppingPlans:
                 key=lambda amount: amount.unit.value,
             ),
             reasons=sorted(entry.reasons, key=lambda r: (r.kind.value, r.source_key)),
-            constraints=constraints,
+            constraints=line_preferences(
+                self._rules.soft_for_item(item.id), item.verified_upc
+            ),
             need_id=entry.need_id,
             hard_constraints=[
                 PlanHardConstraint(

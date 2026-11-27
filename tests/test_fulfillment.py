@@ -13,6 +13,7 @@ import datetime as dt
 import io
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -103,7 +104,7 @@ def _line(
     amounts: list[tuple[float, Unit]],
     reasons: list[PlanReason],
     must: list[PlanHardConstraint] | None = None,
-    **constraints: str,
+    **constraints: Any,
 ) -> PlanLine:
     """Build a plan line."""
     return PlanLine(
@@ -144,6 +145,7 @@ def plan() -> ShoppingPlan:
                 [PEANUT, VEGETARIAN, NO_SUBSTITUTES],
                 preferred_brand="Clover",
                 preferred_size="1 qt",
+                verified_upc="012345678905",
             ),
             _line(
                 2,
@@ -152,6 +154,9 @@ def plan() -> ShoppingPlan:
                 [],
                 [_reason(NeedReasonKind.OUT)],
                 [PEANUT, VEGETARIAN],
+                organic=True,
+                generic=True,
+                avoid_brands=["Silk", "Planet Oat"],
             ),
             _line(
                 3,
@@ -214,6 +219,38 @@ class TestExportGoldenFiles:
         assert rows[1]["item"] == "Oat Milk"
         assert rows[1]["quantity"] == ""
 
+    def test_every_soft_preference_is_shown_in_every_format(
+        self, plan: ShoppingPlan
+    ) -> None:
+        """Organic, store brand and brands to avoid reach the list (#215)."""
+        artifacts = ExportAdapter().create_handoff(plan).artifacts
+
+        rows = list(csv.DictReader(io.StringIO(artifacts["csv"])))
+        oat_milk = json.loads(artifacts["json"])["categories"][0]["lines"][1]
+        assert (
+            "Oat Milk: the usual (out)"
+            " [prefer organic, the store brand; avoid Silk, Planet Oat]"
+        ) in artifacts["text"]
+        assert (oat_milk["organic"], oat_milk["generic"]) == (True, True)
+        assert oat_milk["avoid_brands"] == ["Silk", "Planet Oat"]
+        assert rows[1]["other_preferences"] == (
+            "organic; prefer the store brand; avoid Silk, Planet Oat"
+        )
+        assert rows[0]["other_preferences"] == ""
+
+    def test_a_verified_product_code_is_shown_in_every_format(
+        self, plan: ShoppingPlan
+    ) -> None:
+        """Someone shopping from the list can match the exact product."""
+        artifacts = ExportAdapter().create_handoff(plan).artifacts
+
+        rows = list(csv.DictReader(io.StringIO(artifacts["csv"])))
+        buttermilk = json.loads(artifacts["json"])["categories"][0]["lines"][0]
+        assert "[prefer Clover, 1 qt; UPC 012345678905]" in artifacts["text"]
+        assert buttermilk["verified_upc"] == "012345678905"
+        assert rows[0]["verified_upc"] == "012345678905"
+        assert rows[1]["verified_upc"] == ""
+
     def test_empty_plan_exports_cleanly(self, plan: ShoppingPlan) -> None:
         """Nothing to buy is still a valid export."""
         empty = plan.model_copy(update={"lines": []})
@@ -222,7 +259,8 @@ class TestExportGoldenFiles:
 
         assert artifacts["text"] == "Shopping plan v3\n\nNothing to buy.\n"
         assert artifacts["csv"].splitlines() == [
-            "category,item,quantity,unit,reasons,preferred_brand,preferred_size,must"
+            "category,item,quantity,unit,reasons,preferred_brand,preferred_size,"
+            "other_preferences,verified_upc,must"
         ]
         assert json.loads(artifacts["json"])["categories"] == []
 
