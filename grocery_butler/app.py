@@ -841,23 +841,18 @@ def _register_recipe_routes(app: Flask) -> None:
         )
 
     @app.route("/recipes/add", methods=["GET", "POST"])
-    def recipe_add() -> str | Response:
+    def recipe_add() -> str | Response | tuple[str, int]:
         """Handle recipe add form display and submission.
 
         GET: Render the add recipe form.
         POST: Process form data and create a new recipe.
 
         Returns:
-            Rendered form HTML or redirect to recipe detail.
+            Rendered form HTML, a redirect to the new recipe's detail page,
+            or the form filled in again with a 400 if it was refused.
         """
         if request.method == "GET":
-            categories = [cat.value for cat in IngredientCategory]
-            return render_template(
-                "recipe_add.html",
-                active_page="recipes",
-                categories=categories,
-                units=[unit.value for unit in Unit],
-            )
+            return _render_recipe_add_form(_BLANK_RECIPE_FORM)
 
         return _handle_recipe_add_post(app)
 
@@ -908,14 +903,92 @@ def _register_recipe_routes(app: Flask) -> None:
         return redirect(url_for("recipes"))
 
 
-def _handle_recipe_add_post(app: Flask) -> Response:
+# A fresh add-recipe form: no name, four servings, one empty ingredient row.
+_BLANK_RECIPE_ROW: dict[str, str | bool] = {
+    "name": "",
+    "qty": "1",
+    "unit": "",
+    "category": "",
+    "pantry": False,
+}
+_BLANK_RECIPE_FORM: dict[str, Any] = {
+    "name": "",
+    "servings": "4",
+    "rows": [_BLANK_RECIPE_ROW],
+}
+
+
+def _render_recipe_add_form(values: dict[str, Any]) -> str:
+    """Render the add-recipe form holding the given values.
+
+    Args:
+        values: The recipe ``name``, ``servings`` and ingredient ``rows`` to
+            show, each as the text to put in its field.
+
+    Returns:
+        Rendered form HTML.
+    """
+    return render_template(
+        "recipe_add.html",
+        active_page="recipes",
+        categories=[cat.value for cat in IngredientCategory],
+        units=[unit.value for unit in Unit],
+        form=values,
+    )
+
+
+def _submitted_recipe_form() -> dict[str, Any]:
+    """Collect what the member typed into the add-recipe form, unparsed.
+
+    Every submitted ingredient row is kept in its position, blank ones
+    included, so a row keeps the number an error message gave it.
+
+    Returns:
+        The recipe ``name``, ``servings`` and ingredient ``rows`` as typed.
+        There is always at least one row, so the form has one to fill.
+    """
+    rows: list[dict[str, str | bool]] = []
+    idx = 0
+    while f"ing_name_{idx}" in request.form:
+        rows.append(
+            {
+                "name": request.form.get(f"ing_name_{idx}", ""),
+                "qty": request.form.get(f"ing_qty_{idx}", ""),
+                "unit": request.form.get(f"ing_unit_{idx}", ""),
+                "category": request.form.get(f"ing_category_{idx}", ""),
+                "pantry": request.form.get(f"ing_pantry_{idx}") == "on",
+            }
+        )
+        idx += 1
+    return {
+        "name": request.form.get("name", ""),
+        "servings": request.form.get("servings", ""),
+        "rows": rows or [_BLANK_RECIPE_ROW],
+    }
+
+
+def _refuse_recipe_add(message: str) -> tuple[str, int]:
+    """Show the add-recipe form again with an error, keeping what was typed.
+
+    Args:
+        message: What was wrong, shown above the form.
+
+    Returns:
+        The filled-in form and a 400 status. Nothing has been saved.
+    """
+    flash(message, "error")
+    return _render_recipe_add_form(_submitted_recipe_form()), 400
+
+
+def _handle_recipe_add_post(app: Flask) -> Response | tuple[str, int]:
     """Process the recipe add form POST submission.
 
     Args:
         app: Flask application instance.
 
     Returns:
-        Redirect to the new recipe detail or back to the form.
+        A redirect to the new recipe's detail page, or the form filled in
+        again with a 400 if the submission was refused.
     """
     from grocery_butler.models import ParsedMeal
 
@@ -923,24 +996,20 @@ def _handle_recipe_add_post(app: Flask) -> Response:
     servings_raw = request.form.get("servings", "4").strip()
 
     if not name:
-        flash("Recipe name is required.", "error")
-        return redirect(url_for("recipe_add"))
+        return _refuse_recipe_add("Recipe name is required.")
 
     servings = _parse_int(servings_raw)
     if servings is None:
-        flash("Servings must be a number.", "error")
-        return redirect(url_for("recipe_add"))
+        return _refuse_recipe_add("Servings must be a number.")
 
     try:
         ingredients = _parse_ingredient_form_rows()
     except ValueError as exc:
         # The message names the row and the rule, never the value typed.
-        flash(str(exc), "error")
-        return redirect(url_for("recipe_add"))
+        return _refuse_recipe_add(str(exc))
 
     if not ingredients:
-        flash("At least one ingredient is required.", "error")
-        return redirect(url_for("recipe_add"))
+        return _refuse_recipe_add("At least one ingredient is required.")
 
     meal = ParsedMeal(
         name=name,
@@ -957,8 +1026,7 @@ def _handle_recipe_add_post(app: Flask) -> Response:
     try:
         recipe_id = recipe_store.save_recipe(meal)
     except IntegrityError:
-        flash(f"A recipe named '{name}' already exists.", "error")
-        return redirect(url_for("recipe_add"))
+        return _refuse_recipe_add(f"A recipe named '{name}' already exists.")
     flash(f"Recipe '{name}' saved.", "success")
     return redirect(url_for("recipe_detail", recipe_id=recipe_id))
 
