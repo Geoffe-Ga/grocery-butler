@@ -29,7 +29,9 @@ from grocery_butler.plan_preferences import (
     PREFERRED_BRAND,
     PREFERRED_SIZE,
     VERIFIED_UPC,
+    labelled,
     unfiltered_phrases,
+    wanted,
 )
 
 if TYPE_CHECKING:
@@ -181,20 +183,18 @@ def _preference_text(line: PlanLine) -> str:
         For example `` [prefer Brand, Size, organic; avoid Other; UPC
         012345678905]``, or an empty string when there are none.
     """
-    wanted = [
-        str(line.constraints[key])
-        for key in (PREFERRED_BRAND, PREFERRED_SIZE)
-        if line.constraints.get(key)
+    held = line.constraints
+    preferred = [
+        held.get(PREFERRED_BRAND),
+        held.get(PREFERRED_SIZE),
+        *wanted(held, ORGANIC, "organic"),
+        *wanted(held, GENERIC, "the store brand"),
     ]
-    wanted += ["organic"] if line.constraints.get(ORGANIC) is True else []
-    wanted += ["the store brand"] if line.constraints.get(GENERIC) is True else []
-    avoided = [str(brand) for brand in line.constraints.get(AVOID_BRANDS) or []]
-    upc = line.constraints.get(VERIFIED_UPC)
-    parts = (
-        ([f"prefer {', '.join(wanted)}"] if wanted else [])
-        + ([f"avoid {', '.join(avoided)}"] if avoided else [])
-        + ([f"UPC {upc}"] if upc else [])
-    )
+    parts = [
+        *labelled("prefer", preferred),
+        *labelled("avoid", held.get(AVOID_BRANDS) or []),
+        *labelled("UPC", [held.get(VERIFIED_UPC)]),
+    ]
     return f" [{'; '.join(parts)}]" if parts else ""
 
 
@@ -207,8 +207,10 @@ def _other_preferences(line: PlanLine) -> list[str]:
     Returns:
         ``organic`` if wanted, then the preferences no filter expresses.
     """
-    organic = ["organic"] if line.constraints.get(ORGANIC) is True else []
-    return organic + unfiltered_phrases(line.constraints)
+    return [
+        *wanted(line.constraints, ORGANIC, "organic"),
+        *unfiltered_phrases(line.constraints),
+    ]
 
 
 def _grouped(plan: ShoppingPlan) -> list[tuple[str, list[PlanLine]]]:

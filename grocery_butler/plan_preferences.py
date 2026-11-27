@@ -31,6 +31,13 @@ UPC_LENGTHS = (12, 14)
 ITEM_SOURCE = "item"
 
 
+def _values(
+    preferences: Iterable[SoftPreference], kind: SoftPreferenceKind
+) -> list[str]:
+    """Return the non-empty values of one kind of preference, in order."""
+    return [p.value for p in preferences if p.kind is kind and p.value]
+
+
 def _first_choice(
     preferences: Iterable[SoftPreference], kind: SoftPreferenceKind
 ) -> str | None:
@@ -44,10 +51,10 @@ def _first_choice(
         The item's own value if it has one, else the first by name, else
         None.
     """
-    wanted = [p for p in preferences if p.kind is kind and p.value]
-    own = [p.value for p in wanted if p.source == ITEM_SOURCE]
-    candidates = own or sorted(p.value for p in wanted)
-    return candidates[0] if candidates else None
+    known = list(preferences)
+    own = _values((p for p in known if p.source == ITEM_SOURCE), kind)
+    candidates = own or sorted(_values(known, kind))
+    return next(iter(candidates), None)
 
 
 def line_preferences(
@@ -69,18 +76,43 @@ def line_preferences(
     """
     known = list(preferences)
     kinds = {p.kind for p in known}
-    avoided = sorted(
-        {p.value for p in known if p.kind is SoftPreferenceKind.AVOID_BRAND and p.value}
-    )
     found: dict[str, Any] = {
         PREFERRED_BRAND: _first_choice(known, SoftPreferenceKind.BRAND),
         PREFERRED_SIZE: _first_choice(known, SoftPreferenceKind.SIZE),
         ORGANIC: SoftPreferenceKind.ORGANIC in kinds,
         GENERIC: SoftPreferenceKind.GENERIC in kinds,
-        AVOID_BRANDS: avoided,
+        AVOID_BRANDS: sorted(set(_values(known, SoftPreferenceKind.AVOID_BRAND))),
         VERIFIED_UPC: verified_upc,
     }
     return {key: value for key, value in found.items() if value}
+
+
+def wanted(constraints: Mapping[str, Any], key: str, phrase: str) -> list[str]:
+    """Return a phrase if a yes-or-no preference is set on a line.
+
+    Args:
+        constraints: A plan line's ``constraints``.
+        key: ``organic`` or ``generic``.
+        phrase: The words for it.
+
+    Returns:
+        ``[phrase]`` when the preference is true, otherwise an empty list.
+    """
+    return [phrase] if constraints.get(key) is True else []
+
+
+def labelled(label: str, values: Iterable[object]) -> list[str]:
+    """Join values under a label, or return nothing when there are none.
+
+    Args:
+        label: For example ``prefer`` or ``avoid``.
+        values: What to list. Empty values are left out.
+
+    Returns:
+        ``["avoid A, B"]``, or an empty list.
+    """
+    shown = ", ".join(str(value) for value in values if value)
+    return [f"{label} {shown}"] if shown else []
 
 
 def unfiltered_phrases(constraints: Mapping[str, Any]) -> list[str]:
@@ -95,11 +127,10 @@ def unfiltered_phrases(constraints: Mapping[str, Any]) -> list[str]:
     Returns:
         A short phrase for each such preference; empty when there are none.
     """
-    phrases = ["prefer the store brand"] if constraints.get(GENERIC) is True else []
-    avoided = [str(brand) for brand in constraints.get(AVOID_BRANDS) or []]
-    if avoided:
-        phrases.append(f"avoid {', '.join(avoided)}")
-    return phrases
+    return [
+        *wanted(constraints, GENERIC, "prefer the store brand"),
+        *labelled("avoid", constraints.get(AVOID_BRANDS) or []),
+    ]
 
 
 def is_product_code(value: str) -> bool:
