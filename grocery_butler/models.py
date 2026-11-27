@@ -283,6 +283,28 @@ _UNIT_ALIASES: dict[str, Unit] = {
 }
 
 
+# What a strict caller is told. It names the rule, not the rejected value.
+_UNKNOWN_UNIT_MESSAGE = (
+    "That is not a supported unit. Give one measurement per ingredient, "
+    "such as 19 oz or 1 can, not a compound size."
+)
+
+
+def _lookup_unit(raw: str) -> Unit | None:
+    """Look a unit string up among the canonical values and aliases.
+
+    Args:
+        raw: Raw unit string; case and surrounding whitespace are ignored.
+
+    Returns:
+        The matching Unit, or None if the string is not a known unit.
+    """
+    cleaned = raw.strip().lower()
+    with suppress(ValueError):
+        return Unit(cleaned)
+    return _UNIT_ALIASES.get(cleaned)
+
+
 def parse_unit(raw: str) -> Unit:
     """Parse a raw unit string into a Unit enum member.
 
@@ -300,14 +322,47 @@ def parse_unit(raw: str) -> Unit:
     """
     if not raw or not raw.strip():
         return Unit.EACH
-    cleaned = raw.strip().lower()
-    with suppress(ValueError):
-        return Unit(cleaned)
-    result = _UNIT_ALIASES.get(cleaned)
+    result = _lookup_unit(raw)
     if result is not None:
         return result
     logger.warning("parse_unit: unknown unit %r; falling back to Unit.EACH", raw)
     return Unit.EACH
+
+
+def parse_unit_strict(raw: object) -> Unit:
+    """Parse a unit for a confirmed write, refusing what it does not know.
+
+    Accepts the same canonical values and aliases as :func:`parse_unit`,
+    ignoring case and surrounding whitespace. A blank string still means
+    :attr:`Unit.EACH`, since "no unit" is a legitimate count. Anything else
+    raises instead of becoming ``each``: a caller that sends ``"19 oz can"``
+    must be told, because storing ``1 each`` would silently drop the size.
+
+    The messages describe the rule and never repeat the value, so they are
+    safe to return to an API caller. Nothing is logged for the same reason.
+
+    Args:
+        raw: The unit as the caller gave it.
+
+    Returns:
+        Matching Unit enum member.
+
+    Raises:
+        ValueError: If ``raw`` is not text, or is a nonblank unknown unit.
+    """
+    # A Unit member is itself text (StrEnum), so it takes the same path.
+    text = raw if isinstance(raw, str) else None
+    if text is None:
+        # ValueError, not TypeError: pydantic reports only the former as a
+        # validation error, and the caller sent bad data either way.
+        msg = "unit must be text."
+        raise ValueError(msg)
+    if not text.strip():
+        return Unit.EACH
+    result = _lookup_unit(text)
+    if result is None:
+        raise ValueError(_UNKNOWN_UNIT_MESSAGE)
+    return result
 
 
 def coerce_category(raw: object) -> IngredientCategory:
@@ -447,6 +502,36 @@ class Ingredient(BaseModel):
             Normalized Unit enum member.
         """
         return _coerce_unit(v)
+
+
+class IngredientInput(Ingredient):
+    """An ingredient a caller is asking to save, validated strictly.
+
+    :class:`Ingredient` is permissive because it also reads LLM output and
+    legacy rows, where an unknown unit degrades to ``each``. A confirmed
+    write gets no such guess: an unknown unit is a validation error
+    (see :func:`parse_unit_strict`).
+
+    An ingredient holds exactly one measurement: a quantity and a unit.
+    Send ``19 oz`` or ``1 can``. A package count together with a package
+    size (``1 x 19 oz can``) cannot be represented.
+    """
+
+    @field_validator("unit", mode="before")
+    @classmethod
+    def _normalize_unit(cls, v: object) -> Unit:
+        """Parse the unit strictly, replacing the permissive parent rule.
+
+        Args:
+            v: Raw value (string, Unit, or other).
+
+        Returns:
+            Normalized Unit enum member.
+
+        Raises:
+            ValueError: If the unit is not text or is not a known unit.
+        """
+        return parse_unit_strict(v)
 
 
 class ParsedMeal(BaseModel):

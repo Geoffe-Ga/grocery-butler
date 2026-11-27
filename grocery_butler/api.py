@@ -26,6 +26,7 @@ from grocery_butler.models import (
     BrandPreference,
     Ingredient,
     IngredientCategory,
+    IngredientInput,
     InventoryItem,
     InventoryStatus,
     ParsedMeal,
@@ -310,11 +311,13 @@ def _parse_ingredient_payloads(raw_ingredients: Any) -> list[Ingredient]:
 def _parse_ingredient_payload(position: int, item: Any) -> Ingredient:
     """Validate one ingredient payload, or abort 400 saying which and why.
 
-    The reason is pydantic's message, which describes the rule that failed
-    and never repeats the value that failed it.
+    Validation is strict (``IngredientInput``): an unknown unit is refused
+    rather than stored as ``each``. The reason is the validator's message,
+    which describes the rule that failed and never repeats the value that
+    failed it.
     """
     try:
-        return Ingredient.model_validate(item)
+        return IngredientInput.model_validate(item)
     except ValidationError as exc:
         reason = str(exc.errors()[0]["msg"]).removeprefix("Value error, ")
         abort(400, description=f"invalid ingredient {position}: {reason}")

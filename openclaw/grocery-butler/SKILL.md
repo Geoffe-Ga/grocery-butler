@@ -397,7 +397,7 @@ calls need no `--member` and no idempotency key.
 | Call | Use |
 |---|---|
 | `GET /api/v1/recipes`, `GET /api/v1/recipes/{id}` | Saved recipes. A recipe's `id` is what a plan's `meals` take. |
-| `POST /api/v1/recipes/save` | Body: `name`, `ingredients` (each `ingredient`, `quantity`, `unit`, `category`, optional `is_pantry_item`), optional `servings`. |
+| `POST /api/v1/recipes/save` | Body: `name`, `ingredients` (each `ingredient`, `quantity`, `unit`, `category`, optional `is_pantry_item`), optional `servings`. One measurement per ingredient: `quantity` 19 with `unit` `oz`, or 1 with `can`, never `19 oz can`. An unknown unit is a 400 naming the ingredient's position, and nothing is saved; fix the unit and send it again. The README lists the units. |
 | `DELETE /api/v1/recipes/{id}` | Delete a recipe. Ask first. |
 | `POST /api/v1/meals/parse` | Turn meal names into ingredient lists. Body: `text`, the meal names separated by commas or new lines. A result with `needs_confirmation` must be shown to the member before it is saved. |
 | `GET /api/v1/inventory`, `/pantry`, `/restock`, `/brands`, `/preferences` | Older read views. Prefer the `/api/v2` calls above. |

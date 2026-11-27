@@ -35,6 +35,7 @@ from grocery_butler.models import (
     InventoryItem,
     InventoryStatus,
     ParsedMeal,
+    Unit,
 )
 from grocery_butler.pantry_manager import PantryManager
 from grocery_butler.recipe_store import RecipeStore
@@ -592,6 +593,103 @@ def test_recipes_save_error_does_not_echo_the_payload(
     error = response.get_json()["error"]
     assert error.startswith("invalid ingredient 1: ")
     assert "two-and-a-bit" not in error
+
+
+def _one_ingredient(unit: Any) -> list[dict[str, Any]]:
+    """Return a one-ingredient list measured in the given unit."""
+    return [
+        {
+            "ingredient": "crushed tomatoes",
+            "quantity": 1,
+            "unit": unit,
+            "category": "pantry_dry",
+        }
+    ]
+
+
+def test_recipes_save_rejects_an_unknown_unit(
+    client: FlaskClient, auth_headers: AuthHeaderFactory, recipe_store: RecipeStore
+) -> None:
+    """A compound size is a 400 naming the ingredient, and saves nothing.
+
+    Regression: ``"19 oz can"`` used to be stored as ``1 each``, silently
+    dropping the 19 oz package size.
+    """
+    ingredients = [
+        {"ingredient": "penne", "quantity": 1, "unit": "lb", "category": "pantry_dry"},
+        *_one_ingredient("19 oz can"),
+    ]
+    before = recipe_store.list_recipes()
+
+    with patch.dict(os.environ, SECRET_ENV):
+        response = _post(
+            client,
+            "/api/v1/recipes/save",
+            auth_headers,
+            _recipe_body(ingredients=ingredients),
+        )
+
+    assert response.status_code == 400
+    error = response.get_json()["error"]
+    assert error.startswith("invalid ingredient 2: ")
+    assert "not a supported unit" in error
+    assert "19 oz can" not in error
+    assert recipe_store.list_recipes() == before
+
+
+@pytest.mark.parametrize("unit", [None, 19, ["oz"]])
+def test_recipes_save_rejects_a_non_text_unit(
+    client: FlaskClient,
+    auth_headers: AuthHeaderFactory,
+    recipe_store: RecipeStore,
+    unit: Any,
+) -> None:
+    """A unit that is not text is a 400, not a stringified guess."""
+    with patch.dict(os.environ, SECRET_ENV):
+        response = _post(
+            client,
+            "/api/v1/recipes/save",
+            auth_headers,
+            _recipe_body(ingredients=_one_ingredient(unit)),
+        )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "invalid ingredient 1: unit must be text."}
+    assert recipe_store.list_recipes() == []
+
+
+@pytest.mark.parametrize(
+    ("unit", "stored_unit"),
+    [
+        ("oz", Unit.OZ),
+        ("cups", Unit.CUP),
+        ("gallon", Unit.GAL),
+        ("  Cans ", Unit.CAN),
+        ("", Unit.EACH),
+    ],
+)
+def test_recipes_save_normalizes_known_units(
+    client: FlaskClient,
+    auth_headers: AuthHeaderFactory,
+    recipe_store: RecipeStore,
+    unit: str,
+    stored_unit: Unit,
+) -> None:
+    """Canonical units and aliases save, stored as the canonical unit."""
+    with patch.dict(os.environ, SECRET_ENV):
+        response = _post(
+            client,
+            "/api/v1/recipes/save",
+            auth_headers,
+            _recipe_body(ingredients=_one_ingredient(unit)),
+        )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["purchase_items"][0]["unit"] == stored_unit.value
+    stored = recipe_store.get_recipe_by_id(payload["id"])
+    assert stored is not None
+    assert [i.unit for i in stored.purchase_items] == [stored_unit]
 
 
 @pytest.mark.parametrize("servings", ["four", 0, -2, True])

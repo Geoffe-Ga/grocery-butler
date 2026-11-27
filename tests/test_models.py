@@ -13,6 +13,7 @@ from grocery_butler.models import (
     BrandPreferenceType,
     Ingredient,
     IngredientCategory,
+    IngredientInput,
     InventoryItem,
     InventoryStatus,
     InventoryUpdate,
@@ -26,6 +27,7 @@ from grocery_butler.models import (
     coerce_category,
     coerce_category_optional,
     parse_unit,
+    parse_unit_strict,
 )
 
 # ---------------------------------------------------------------------------
@@ -274,6 +276,101 @@ class TestParseUnitWarningLogging:
             result = parse_unit("")
         assert result == Unit.EACH
         assert len(caplog.records) == 0
+
+
+class TestParseUnitStrict:
+    """Tests for parse_unit_strict, the parser for confirmed writes."""
+
+    @pytest.mark.parametrize("unit", list(Unit))
+    def test_every_canonical_value_is_accepted(self, unit: Unit) -> None:
+        """Each canonical unit value parses to its own member."""
+        assert parse_unit_strict(unit.value) is unit
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("cups", Unit.CUP),
+            ("gallon", Unit.GAL),
+            ("pounds", Unit.LB),
+            ("pkg", Unit.PACKAGE),
+            ("fluid ounce", Unit.FL_OZ),
+        ],
+    )
+    def test_documented_aliases_normalize(self, raw: str, expected: Unit) -> None:
+        """An alias resolves to its canonical unit."""
+        assert parse_unit_strict(raw) is expected
+
+    def test_case_and_whitespace_are_ignored(self) -> None:
+        """Surrounding whitespace and letter case do not matter."""
+        assert parse_unit_strict("  Cups\n") is Unit.CUP
+
+    def test_unit_member_passes_through(self) -> None:
+        """A Unit member is returned unchanged."""
+        assert parse_unit_strict(Unit.OZ) is Unit.OZ
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t"])
+    def test_blank_is_a_count(self, blank: str) -> None:
+        """A blank unit is a legitimate "no unit", so it means each."""
+        assert parse_unit_strict(blank) is Unit.EACH
+
+    @pytest.mark.parametrize("raw", ["19 oz can", "foobar", "fl oz", "ozs"])
+    def test_unknown_unit_raises_without_echoing_it(self, raw: str) -> None:
+        """An unknown unit is refused, and the message never repeats it."""
+        with pytest.raises(ValueError, match="not a supported unit") as excinfo:
+            parse_unit_strict(raw)
+        assert raw not in str(excinfo.value)
+
+    @pytest.mark.parametrize("raw", [None, 5, 1.5, ["oz"]])
+    def test_non_text_unit_raises(self, raw: object) -> None:
+        """A unit that is not text is refused rather than stringified."""
+        with pytest.raises(ValueError, match="unit must be text"):
+            parse_unit_strict(raw)
+
+    def test_unknown_unit_logs_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The caller is told, so the untrusted value stays out of the log."""
+        with (
+            caplog.at_level(logging.WARNING, logger="grocery_butler.models"),
+            pytest.raises(ValueError, match="not a supported unit"),
+        ):
+            parse_unit_strict("19 oz can")
+        assert caplog.records == []
+
+
+class TestIngredientInput:
+    """Tests for IngredientInput, the strict model for confirmed writes."""
+
+    def _payload(self, unit: object) -> dict[str, object]:
+        """Return an ingredient payload with the given unit."""
+        return {
+            "ingredient": "tomatoes",
+            "quantity": 1,
+            "unit": unit,
+            "category": "pantry_dry",
+        }
+
+    def test_is_an_ingredient(self) -> None:
+        """A validated input is usable wherever an Ingredient is."""
+        parsed = IngredientInput.model_validate(self._payload("cups"))
+        assert isinstance(parsed, Ingredient)
+        assert parsed.unit is Unit.CUP
+
+    def test_unknown_unit_is_a_validation_error(self) -> None:
+        """An unknown unit fails validation instead of becoming each."""
+        with pytest.raises(ValidationError) as excinfo:
+            IngredientInput.model_validate(self._payload("19 oz can"))
+        errors = excinfo.value.errors()
+        assert [e["loc"] for e in errors] == [("unit",)]
+        assert "not a supported unit" in errors[0]["msg"]
+
+    def test_ingredient_itself_stays_permissive(self) -> None:
+        """Legacy and LLM ingestion still falls back to each."""
+        assert Ingredient.model_validate(self._payload("19 oz can")).unit is Unit.EACH
+
+    def test_blank_name_is_still_refused(self) -> None:
+        """The inherited name rule still applies."""
+        payload = self._payload("oz") | {"ingredient": "  "}
+        with pytest.raises(ValidationError):
+            IngredientInput.model_validate(payload)
 
 
 class TestCoerceUnit:
