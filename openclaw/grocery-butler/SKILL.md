@@ -69,6 +69,10 @@ argument.
   again with the same `--key`. You get the first answer back and nothing
   happens twice. Never retry a change with a new key.
 - **Don't retry** a `4xx` without fixing what it names.
+- **`401` with `bad signature`:** your secret and Grocery Butler's differ.
+  You cannot fix this by retrying or by signing a request yourself. Tell
+  the member, and point them at "When something is wrong" in
+  `docs/operations/vps-deployment.md`.
 
 ## Who is in the household
 
