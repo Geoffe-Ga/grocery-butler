@@ -10,12 +10,15 @@
               "unit": "cup"
             }
           ],
+          "avoid_brands": [],
+          "generic": false,
           "item": "Buttermilk",
           "must": [
             "no peanut",
             "vegetarian",
             "no substitutes"
           ],
+          "organic": false,
           "preferred_brand": "Clover",
           "preferred_size": "1 qt",
           "reasons": [
@@ -25,11 +28,17 @@
         },
         {
           "amounts": [],
+          "avoid_brands": [
+            "Silk",
+            "Planet Oat"
+          ],
+          "generic": true,
           "item": "Oat Milk",
           "must": [
             "no peanut",
             "vegetarian"
           ],
+          "organic": true,
           "preferred_brand": null,
           "preferred_size": null,
           "reasons": [
@@ -47,8 +56,11 @@
               "unit": "jar"
             }
           ],
+          "avoid_brands": [],
+          "generic": false,
           "item": "Yogurt",
           "must": [],
+          "organic": false,
           "preferred_brand": null,
           "preferred_size": null,
           "reasons": [
@@ -67,8 +79,11 @@
               "unit": "lb"
             }
           ],
+          "avoid_brands": [],
+          "generic": false,
           "item": "Rice",
           "must": [],
+          "organic": false,
           "preferred_brand": null,
           "preferred_size": null,
           "reasons": [
@@ -83,8 +98,11 @@
       "lines": [
         {
           "amounts": [],
+          "avoid_brands": [],
+          "generic": false,
           "item": "Birthday Candles",
           "must": [],
+          "organic": false,
           "preferred_brand": null,
           "preferred_size": null,
           "reasons": [

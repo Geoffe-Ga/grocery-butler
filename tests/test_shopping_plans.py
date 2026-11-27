@@ -22,6 +22,7 @@ from grocery_butler.models import (
     NeedStatus,
     ParsedMeal,
     PlanMeal,
+    SoftPreferenceKind,
     Unit,
 )
 from grocery_butler.recipe_store import RecipeStore
@@ -412,6 +413,45 @@ class TestBuildFromMeals:
                 [PlanMeal(recipe_id=recipe_id), PlanMeal(recipe_id=recipe_id)],
                 actor=ACTOR,
             )
+
+
+class TestSoftPreferencesOnLines:
+    """A plan line carries every soft preference that applies to it (#215)."""
+
+    def test_household_and_item_preferences_reach_the_line(
+        self, plans: ShoppingPlans, needs: ReplenishmentNeeds, db_path: str
+    ) -> None:
+        """Household-wide ones on every line, item ones on their own line."""
+        milk_id = _approved_need(db_path, needs, "oat milk", NeedReasonKind.OUT)
+        _approved_need(db_path, needs, "eggs", NeedReasonKind.OUT)
+        rules = HouseholdRules(db_path)
+        rules.add_soft(SoftPreferenceKind.ORGANIC, "", actor=ACTOR)
+        rules.add_soft(SoftPreferenceKind.GENERIC, "", actor=ACTOR, item_id=milk_id)
+        rules.add_soft(
+            SoftPreferenceKind.AVOID_BRAND, "Silk", actor=ACTOR, item_id=milk_id
+        )
+
+        plan = plans.build([], actor=ACTOR)
+
+        assert plan.lines[_line(plan, "Eggs")].constraints == {"organic": True}
+        assert plan.lines[_line(plan, "Oat Milk")].constraints == {
+            "organic": True,
+            "generic": True,
+            "avoid_brands": ["Silk"],
+        }
+
+    def test_a_new_preference_makes_a_new_plan_version(
+        self, plans: ShoppingPlans, needs: ReplenishmentNeeds, db_path: str
+    ) -> None:
+        """What a line asks for is part of the plan an approval is bound to."""
+        _approved_need(db_path, needs, "oat milk", NeedReasonKind.OUT)
+        first = plans.build([], actor=ACTOR)
+
+        HouseholdRules(db_path).add_soft(SoftPreferenceKind.ORGANIC, "", actor=ACTOR)
+        second = plans.build([], actor=ACTOR)
+
+        assert second.version == first.version + 1
+        assert second.content_hash != first.content_hash
 
 
 class TestHardConstraintsOnLines:
