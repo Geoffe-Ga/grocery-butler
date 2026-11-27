@@ -16,7 +16,10 @@ before you deploy it.
 
 ## What the server needs
 
-- Docker with the compose plugin (`docker compose version` prints a version).
+- Docker with the compose plugin (`docker compose version` prints a version),
+  running, and usable by your account: `docker ps` prints a header row and no
+  error. If it doesn't, see the first two rows of
+  [When something is wrong](#when-something-is-wrong).
 - Tailscale, signed in to the household's tailnet, with HTTPS certificates
   turned on for the tailnet (Tailscale admin console, DNS page).
 - `git`, and for backups `gpg` and Python 3.11 or newer.
@@ -68,15 +71,35 @@ before you deploy it.
 
    ```bash
    curl --silent --output /dev/null --write-out '%{http_code}\n' http://127.0.0.1:8000/
-   docker compose logs app | grep network_guard
    ```
 
-   You want `200`, and a startup line
-   `network_guard_enabled allowed_cidrs=127.0.0.0/8,::1/128,172.30.198.1/32`.
-   If you get `403`, the log has a `network_guard_rejected` line whose
-   `remote_addr` is the address Docker really delivers requests from. Stop
-   and report that address rather than widening the list by guesswork: it
-   means the assumption in ADR 0021 is wrong for this server.
+   You want `200`: the guard admits a request made on the server. If you
+   get `403`, `docker compose logs app | grep network_guard_rejected` shows
+   a line whose `remote_addr` is the address Docker really delivers requests
+   from. Stop and report that address rather than widening the list by
+   guesswork: it means the assumption in ADR 0021 is wrong for this server.
+
+   Then check the guard keeps something out. This asks from a second
+   container on the same Docker network, an address that is not on the
+   allow-list. It uses the image you just built:
+
+   ```bash
+   docker run --rm --network grocery-butler_internal --entrypoint python grocery-butler-app -c "
+   import urllib.request, urllib.error
+   try:
+       print(urllib.request.urlopen('http://app:8000/').status)
+   except urllib.error.HTTPError as e:
+       print(e.code)
+   "
+   docker compose logs app | grep network_guard_rejected
+   ```
+
+   You want `403`, then a `network_guard_rejected path=/ remote_addr=172.30.198.x`
+   line. A `200` here means the guard is not enforcing: stop and report it.
+
+   The guard's own startup line (`network_guard_enabled ...`) is logged at
+   info level, which gunicorn does not print, so don't look for it. A
+   rejection is a warning and does show.
 
 6. **Put the dashboard on the tailnet.**
 
@@ -91,7 +114,7 @@ before you deploy it.
 
 7. **Check the public side is closed.** From a device that is *not* on the
    tailnet, the server's public address must not answer on port 8000 or
-   5432. On the server, `sudo ss -ltnp | grep -E ':(8000|5432)\b'` should
+   5432 (or your `DB_HOST_PORT`). On the server, `sudo ss -ltnp | grep -E ':(8000|5432)\b'` should
    list only `127.0.0.1`.
 
 8. **Point OpenClaw at it.** Set OpenClaw's Grocery Butler base URL to
@@ -219,9 +242,12 @@ requires. Then shut the old deployment down.
 
 | What you see | What to do |
 |---|---|
+| `permission denied while trying to connect to the docker API` | Your account is not in the `docker` group. `sudo usermod -aG docker "$USER"`, then log out and back in. Being in that group is as good as root on the server; use `sudo docker ...` each time instead if you'd rather not. |
+| `Cannot connect to the Docker daemon` | The daemon is not running. `sudo systemctl enable --now docker.socket`, then `sudo systemctl start docker`. If the log (`sudo journalctl -u docker -n 40`) says `no sockets found via socket activation`, it is the socket unit that was stopped; run `sudo systemctl reset-failed docker` first. |
 | `docker compose up` says a variable must be set | Fill it in `deploy/vps/.env`. |
 | The app container keeps restarting | `docker compose logs app`. A missing secret or a failed migration is named on the last lines. |
 | `403` from `127.0.0.1:8000` | Step 5 above. |
 | The tailnet address doesn't load | `tailscale serve status`, and check HTTPS certificates are on for the tailnet. |
 | `docker compose up` says a pool or subnet overlaps | Another Docker network on the server already uses `172.30.198.0/24`. Report it rather than editing one side: the subnet, its gateway and the guard's allow-list in `compose.yaml` must change together, and a test holds them to each other. |
-| Port 5432 is already in use | Set `DB_HOST_PORT` in `.env` to a free port and use it in `DATABASE_URL` for backups. |
+| `failed to bind host port 127.0.0.1:5432` | Another Postgres on the server has the port. Add `DB_HOST_PORT=5433` (or any free port) to `deploy/vps/.env` and run `docker compose up --detach` again. Use that port in the `DATABASE_URL` in `backup.env`, and in step 7's check. Nothing inside Docker changes. |
+| `failed to bind host port 127.0.0.1:8000` | Something else on the server uses 8000. Report it rather than changing the port by hand: the port is also in the compose file, `tailscale serve` and OpenClaw's base URL. |

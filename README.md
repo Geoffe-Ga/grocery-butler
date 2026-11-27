@@ -1152,7 +1152,8 @@ allow-list of CIDR ranges.
   `403`: a JSON `{"error": "forbidden"}` body for `/api/*` paths, an HTML
   error page otherwise.
 - **Observability.** At startup the guard logs the resolved allow-list
-  (`network_guard_enabled allowed_cidrs=...`), or
+  (`network_guard_enabled allowed_cidrs=...`, at info level, which gunicorn
+  does not print in production; rejections and warnings do show), or
   `network_guard_disabled` if the kill switch is set, or
   `network_guard_empty_allowlist` (warning) if the resolved list is
   empty. Every rejection logs
@@ -1255,7 +1256,8 @@ of these two.
 `./scripts/compose-smoke.sh` starts the real deployment (the app image and
 Postgres from `deploy/vps/compose.yaml`) under a throwaway project name,
 with secrets generated for the run, and checks it over HTTP: both
-containers healthy, the dashboard admitted by the network guard, a signed
+containers healthy, the dashboard admitted by the network guard and a
+request from another container refused by it, a signed
 API call written to Postgres and read back, the same call refused without
 a token, the data still there after a restart, and both ports bound to
 `127.0.0.1`. Every other test runs the app in-process, so this is the only

@@ -32,6 +32,7 @@ case " $* " in
         [[ "$*" == *"--build"* ]] && exit "${STUB_UP:-0}"
         exit "${STUB_REUP:-0}" ;;
     *" exec "*) echo "smoke.1790000000.stubsignature"; exit "${STUB_EXEC:-0}" ;;
+    *" run "*) echo "${STUB_ELSEWHERE:-403}" ;;
     *" port app "*) echo "${STUB_APP_ADDRESS:-127.0.0.1:8000}" ;;
     *" port db "*) echo "${STUB_DB_ADDRESS:-127.0.0.1:5432}" ;;
     *" logs "*) echo "stub container logs" ;;
@@ -125,6 +126,7 @@ class TestAHealthyStack:
         for line in (
             "Both containers are healthy",
             "The guard admits a request from this machine",
+            "The guard refuses a request from another address",
             "A signed request creates a member",
             "The same request without a token is refused",
             "The member survived a restart",
@@ -160,6 +162,14 @@ class TestAHealthyStack:
         assert "POSTGRES_PASSWORD" not in result.stdout + result.stderr
         assert "RUBOTPAUL_SHARED_SECRET" not in result.stdout + result.stderr
 
+    def test_the_guard_is_asked_from_a_second_container(self, stubs: Path) -> None:
+        """A new container on the same network, not the app container itself."""
+        _run(stubs)
+
+        log = (stubs / "docker.log").read_text(encoding="utf-8")
+        assert log.count(" run --rm --no-deps --entrypoint python app -c ") == 1
+        assert "http://app:8000/" in log
+
     def test_the_token_is_minted_in_the_app_container(self, stubs: Path) -> None:
         """Where the code and the secret already are, not on the host."""
         _run(stubs)
@@ -192,6 +202,11 @@ class TestEachFailureStopsTheRun:
                 {"STUB_ROOT": "403"},
                 "The guard admits a request from this machine: expected 200, got 403",
             ),
+            (
+                {"STUB_ELSEWHERE": "200"},
+                "The guard refuses a request from another address:"
+                " expected 403, got 200",
+            ),
             ({"STUB_EXEC": "1"}, "Could not mint a token"),
             (
                 {"STUB_CREATE": "500"},
@@ -216,6 +231,7 @@ class TestEachFailureStopsTheRun:
             "never-healthy",
             "health-unreachable",
             "guard-rejects",
+            "guard-admits-everyone",
             "no-token",
             "create-fails",
             "unsigned-accepted",

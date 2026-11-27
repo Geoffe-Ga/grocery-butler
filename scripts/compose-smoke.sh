@@ -8,7 +8,8 @@
 #   1. Both containers become healthy (the app migrates Postgres on boot).
 #   2. /health answers.
 #   3. The dashboard answers 200, not 403: the network boundary guard admits
-#      the address Docker really delivers requests from (ADR 0021, #110).
+#      the address Docker really delivers requests from (ADR 0021, #110). The
+#      same request from a second container is refused with 403.
 #   4. A signed API call writes a member and a second one reads it back.
 #   5. The same call without a token is refused.
 #   6. The member is still there after the app restarts.
@@ -105,6 +106,22 @@ echo "✓ Both containers are healthy"
 
 expect "/health answers" 200 "$(http "$BASE/health")"
 expect "The guard admits a request from this machine" 200 "$(http "$BASE/")"
+
+# The same request from a second container on the compose network comes from
+# an address that is not on the allow-list. A guard that only ever says yes
+# would pass the check above; this one shows it can say no.
+from_elsewhere() {
+    "${COMPOSE[@]}" run --rm --no-deps --entrypoint python app -c '
+import urllib.error
+import urllib.request
+try:
+    print(urllib.request.urlopen("http://app:8000/").status)
+except urllib.error.HTTPError as refused:
+    print(refused.code)
+'
+}
+OTHER="$(from_elsewhere)" || fail "Could not ask from a second container."
+expect "The guard refuses a request from another address" 403 "$OTHER"
 
 MEMBERS_PATH="/api/v2/members"
 BODY="{\"key\": \"$MEMBER\", \"display_name\": \"Smoke test\"}"
