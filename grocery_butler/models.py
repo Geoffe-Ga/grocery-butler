@@ -89,6 +89,7 @@ class ItemEventType(StrEnum):
     ALIAS_REMOVED = "alias_removed"
     MERGED = "merged"
     UNMERGED = "unmerged"
+    UPC_VERIFIED = "upc_verified"
 
 
 class StockState(StrEnum):
@@ -600,6 +601,8 @@ class HouseholdItem(BaseModel):
 
     ``name`` is the normalized, unique key. ``merged_into_id`` is set when
     this item was merged into another; readers then use that item instead.
+    ``verified_upc`` is a product code a member confirmed on a receipt line,
+    with who confirmed it and when (ADR 0023). It is never inferred.
     """
 
     id: int
@@ -613,6 +616,9 @@ class HouseholdItem(BaseModel):
     target_quantity: float | None = None
     target_unit: Unit | None = None
     cadence_days: int | None = None
+    verified_upc: str | None = None
+    upc_verified_by: str | None = None
+    upc_verified_at: str | None = None
     active: bool = True
     merged_into_id: int | None = None
 
@@ -621,7 +627,9 @@ class HouseholdItemUpdate(BaseModel):
     """Fields of a household item a caller may change.
 
     Only fields that were explicitly set are applied, so ``None`` clears a
-    field and an omitted field is left alone.
+    field and an omitted field is left alone. ``verified_upc`` can only be
+    cleared here: a code is learned from a confirmed receipt line and
+    nowhere else (ADR 0023).
     """
 
     display_name: str | None = None
@@ -633,6 +641,7 @@ class HouseholdItemUpdate(BaseModel):
     target_quantity: float | None = Field(default=None, gt=0)
     target_unit: Unit | None = None
     cadence_days: int | None = Field(default=None, ge=1, le=365)
+    verified_upc: None = None
 
 
 class ItemEvent(BaseModel):

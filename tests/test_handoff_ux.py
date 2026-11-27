@@ -281,6 +281,35 @@ class TestWording:
         ]
         assert checks_for({}) == []
 
+    def test_unfiltered_preferences_are_one_note_however_many_lines(self) -> None:
+        """A household-wide preference is said once, not on every line (#215)."""
+        payload = {
+            "issues": [
+                {
+                    "kind": "preference_not_applied",
+                    "display_name": "Oat Milk",
+                    "detail": "prefer the store brand; avoid Silk",
+                },
+                {
+                    "kind": "unsupported_unit",
+                    "display_name": "Garlic",
+                    "detail": "No unit for 3 clove.",
+                },
+                {
+                    "kind": "preference_not_applied",
+                    "display_name": "Butter",
+                    "detail": "prefer the store brand",
+                },
+            ]
+        }
+
+        assert checks_for(payload) == [
+            "Garlic: No unit for 3 clove",
+            "These preferences can't be applied here, so check as you shop:"
+            " Oat Milk (prefer the store brand; avoid Silk),"
+            " Butter (prefer the store brand)",
+        ]
+
     def test_no_checks_means_a_short_sentence(self) -> None:
         """With nothing to check, the sentence says so by saying less."""
         payload = {"adapter_display_name": "Instacart"}

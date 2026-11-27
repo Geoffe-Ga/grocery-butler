@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from grocery_butler.fulfillment.handoffs import AttemptStatus
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from grocery_butler.fulfillment.handoffs import HandoffAttempt
 
@@ -56,6 +56,8 @@ _HEADLINES = {
 }
 _MAX_NAMED = 3
 _CONSTRAINT_ISSUE = "hard_constraint_unrepresentable"
+_PREFERENCE_ISSUE = "preference_not_applied"
+_PREFERENCE_NOTE = "These preferences can't be applied here, so check as you shop: "
 
 
 def _constraint_check(entry: Mapping[str, Any]) -> str:
@@ -97,12 +99,37 @@ def checks_for(payload: Mapping[str, Any]) -> list[str]:
     constraints = [
         _constraint_check(entry) for entry in payload.get("unenforced_constraints", [])
     ]
+    reported = payload.get("issues", [])
     issues = [
         _issue_check(issue)
-        for issue in payload.get("issues", [])
-        if issue.get("kind") != _CONSTRAINT_ISSUE
+        for issue in reported
+        if issue.get("kind") not in (_CONSTRAINT_ISSUE, _PREFERENCE_ISSUE)
     ]
-    return list(dict.fromkeys(constraints + issues))
+    return list(dict.fromkeys(constraints + issues + _preference_note(reported)))
+
+
+def _preference_note(issues: Iterable[Mapping[str, Any]]) -> list[str]:
+    """Say once which soft preferences the handoff could not apply.
+
+    A preference set for the whole household lands on every line. One
+    clause naming the items keeps the list readable, where a clause per
+    line would bury anything else worth checking (issue #215).
+
+    Args:
+        issues: The payload's ``issues``.
+
+    Returns:
+        One clause listing each affected item with its preferences, or
+        nothing when every preference was applied.
+    """
+    affected = list(
+        dict.fromkeys(
+            f"{issue.get('display_name', 'an item')} ({issue.get('detail', '')})"
+            for issue in issues
+            if issue.get("kind") == _PREFERENCE_ISSUE
+        )
+    )
+    return [_PREFERENCE_NOTE + ", ".join(affected)] if affected else []
 
 
 def summarize(attempt: HandoffAttempt, payload: Mapping[str, Any]) -> str:

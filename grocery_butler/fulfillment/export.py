@@ -22,6 +22,17 @@ from grocery_butler.fulfillment.base import (
     unenforced_constraints,
 )
 from grocery_butler.models import HardConstraintKind, NeedReasonKind
+from grocery_butler.plan_preferences import (
+    AVOID_BRANDS,
+    GENERIC,
+    ORGANIC,
+    PREFERRED_BRAND,
+    PREFERRED_SIZE,
+    VERIFIED_UPC,
+    labelled,
+    unfiltered_phrases,
+    wanted,
+)
 
 if TYPE_CHECKING:
     from grocery_butler.models import PlanLine, ShoppingPlan
@@ -46,6 +57,8 @@ _CSV_COLUMNS = (
     "reasons",
     "preferred_brand",
     "preferred_size",
+    "other_preferences",
+    "verified_upc",
     "must",
 )
 
@@ -161,20 +174,43 @@ def _amount_text(line: PlanLine) -> str:
 
 
 def _preference_text(line: PlanLine) -> str:
-    """Summarize a line's brand and size preferences.
+    """Summarize every soft preference on a line.
 
     Args:
         line: A plan line.
 
     Returns:
-        `` [prefer Brand, Size]``, or an empty string when there are none.
+        For example `` [prefer Brand, Size, organic; avoid Other; UPC
+        012345678905]``, or an empty string when there are none.
     """
-    wanted = [
-        str(line.constraints[key])
-        for key in ("preferred_brand", "preferred_size")
-        if line.constraints.get(key)
+    held = line.constraints
+    preferred = [
+        held.get(PREFERRED_BRAND),
+        held.get(PREFERRED_SIZE),
+        *wanted(held, ORGANIC, "organic"),
+        *wanted(held, GENERIC, "the store brand"),
     ]
-    return f" [prefer {', '.join(wanted)}]" if wanted else ""
+    parts = [
+        *labelled("prefer", preferred),
+        *labelled("avoid", held.get(AVOID_BRANDS) or []),
+        *labelled("UPC", [held.get(VERIFIED_UPC)]),
+    ]
+    return f" [{'; '.join(parts)}]" if parts else ""
+
+
+def _other_preferences(line: PlanLine) -> list[str]:
+    """List a line's preferences beyond brand and size, for one CSV cell.
+
+    Args:
+        line: A plan line.
+
+    Returns:
+        ``organic`` if wanted, then the preferences no filter expresses.
+    """
+    return [
+        *wanted(line.constraints, ORGANIC, "organic"),
+        *unfiltered_phrases(line.constraints),
+    ]
 
 
 def _grouped(plan: ShoppingPlan) -> list[tuple[str, list[PlanLine]]]:
@@ -257,8 +293,12 @@ def render_json(plan: ShoppingPlan) -> str:
                         for amount in line.amounts
                     ],
                     "reasons": _reasons(line),
-                    "preferred_brand": line.constraints.get("preferred_brand"),
-                    "preferred_size": line.constraints.get("preferred_size"),
+                    "preferred_brand": line.constraints.get(PREFERRED_BRAND),
+                    "preferred_size": line.constraints.get(PREFERRED_SIZE),
+                    "organic": line.constraints.get(ORGANIC) is True,
+                    "generic": line.constraints.get(GENERIC) is True,
+                    "avoid_brands": list(line.constraints.get(AVOID_BRANDS) or []),
+                    "verified_upc": line.constraints.get(VERIFIED_UPC),
                     "must": _must(line),
                 }
                 for line in lines
@@ -303,8 +343,10 @@ def render_csv(plan: ShoppingPlan) -> str:
                         quantity,
                         unit,
                         "; ".join(_reasons(line)),
-                        str(line.constraints.get("preferred_brand") or ""),
-                        str(line.constraints.get("preferred_size") or ""),
+                        str(line.constraints.get(PREFERRED_BRAND) or ""),
+                        str(line.constraints.get(PREFERRED_SIZE) or ""),
+                        "; ".join(_other_preferences(line)),
+                        str(line.constraints.get(VERIFIED_UPC) or ""),
                         "; ".join(_must(line)),
                     )
                 )

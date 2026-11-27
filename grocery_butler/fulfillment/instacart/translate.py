@@ -32,6 +32,16 @@ from grocery_butler.fulfillment.instacart.models import (
     ProductsLinkRequest,
 )
 from grocery_butler.models import Unit
+from grocery_butler.plan_preferences import (
+    AVOID_BRANDS,
+    GENERIC,
+    ORGANIC,
+    PREFERRED_BRAND,
+    PREFERRED_SIZE,
+    VERIFIED_UPC,
+    is_product_code,
+    unfiltered_phrases,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -63,12 +73,13 @@ UNIT_MAP: dict[Unit, tuple[str, float]] = {
 }
 
 ORGANIC_FILTER = "ORGANIC"
-UPC_LENGTHS = (12, 14)
 
-_BRAND = "preferred_brand"
-_SIZE = "preferred_size"
-_ORGANIC = "organic"
-_KNOWN_PREFERENCES = frozenset({_BRAND, _SIZE, _ORGANIC})
+_BRAND = PREFERRED_BRAND
+_SIZE = PREFERRED_SIZE
+_ORGANIC = ORGANIC
+_KNOWN_PREFERENCES = frozenset(
+    {_BRAND, _SIZE, _ORGANIC, GENERIC, AVOID_BRANDS, VERIFIED_UPC}
+)
 
 
 class IssueKind(StrEnum):
@@ -76,6 +87,7 @@ class IssueKind(StrEnum):
 
     UNSUPPORTED_UNIT = "unsupported_unit"
     AMBIGUOUS_MAPPING = "ambiguous_mapping"
+    PREFERENCE_NOT_APPLIED = "preference_not_applied"
     HARD_CONSTRAINT_UNREPRESENTABLE = "hard_constraint_unrepresentable"
     FILTER_DROPPED_BY_UPC = "filter_dropped_by_upc"
     INVALID_UPC = "invalid_upc"
@@ -236,7 +248,7 @@ def _upc(
     if line.item_id not in verified_upcs:
         return None, None
     upc = verified_upcs[line.item_id]
-    if not (upc.isascii() and upc.isdigit() and len(upc) in UPC_LENGTHS):
+    if not is_product_code(upc):
         return None, "The stored UPC is not 12 or 14 digits, so it was not sent."
     if upc in used:
         return None, (
@@ -295,6 +307,12 @@ def _translate_line(
         )
         for name in unknown
     )
+    # A store brand and a brand to avoid have no filter. They are left out
+    # of the request and reported, so the handoff can say once what to check
+    # (decided on 2026-11-26; issue #215).
+    unfiltered = unfiltered_phrases(line.constraints)
+    if unfiltered:
+        found.append((IssueKind.PREFERENCE_NOT_APPLIED, "; ".join(unfiltered)))
     found.extend(
         (
             IssueKind.HARD_CONSTRAINT_UNREPRESENTABLE,
@@ -325,14 +343,19 @@ def translate(
     Args:
         plan: The stored plan version.
         link_days: How many days the link should stay valid, 1 to 365.
-        verified_upcs: UPCs the household has verified, by item id. Only
-            these are ever sent; none is invented.
+        verified_upcs: Extra verified UPCs by item id, added to the ones
+            the plan's own lines carry. Only verified codes are ever sent;
+            none is invented.
 
     Returns:
         The request (None for a plan with no lines) and every issue, in
         plan order.
     """
-    upcs = verified_upcs or {}
+    upcs = {
+        line.item_id: str(line.constraints[VERIFIED_UPC])
+        for line in plan.lines
+        if line.constraints.get(VERIFIED_UPC)
+    } | dict(verified_upcs or {})
     used: set[str] = set()
     items: list[LineItem] = []
     issues: list[TranslationIssue] = []

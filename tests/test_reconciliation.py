@@ -23,6 +23,8 @@ from grocery_butler.fulfillment.instacart.transport import FakeTransport
 from grocery_butler.household_items import HouseholdItemStore
 from grocery_butler.inventory_ledger import InventoryLedger
 from grocery_butler.models import (
+    HouseholdItemUpdate,
+    ItemEventType,
     NeedReasonKind,
     NeedStatus,
     ObservationSource,
@@ -692,6 +694,140 @@ class TestReview:
         assert len(results) == 4
         assert len(applied) == 1
         assert home.observation_count() == before + 1
+
+
+UPC = "012345678905"
+
+
+class TestVerifiedUpc:
+    """A product code is learned only from a receipt line a member confirms.
+
+    The code is the receipt's, the confirmation is a person's, and saving
+    it is their choice on that line (ADR 0023).
+    """
+
+    def test_a_receipt_line_keeps_the_code_it_came_with(self, home: Household) -> None:
+        """Submitting stores the code on the line and nowhere else."""
+        receipt = home.submit(_line("carrots", LineOutcome.RECEIVED, upc=UPC))
+
+        assert receipt.lines[0].upc == UPC
+        assert home.items.get(home.ids["carrots"]).verified_upc is None
+
+    @pytest.mark.parametrize(
+        "code", ["12345", "01234567890x", "0123456789012", " 012345678905"]
+    )
+    def test_a_code_that_is_not_12_or_14_digits_is_refused(self, code: str) -> None:
+        """A malformed code never reaches a receipt, so it can't be learned."""
+        with pytest.raises(ValidationError, match="12 or 14 digits"):
+            _line("carrots", LineOutcome.RECEIVED, upc=code)
+
+    def test_confirming_without_asking_saves_nothing(self, home: Household) -> None:
+        """Remembering the code is opt-in, line by line."""
+        receipt = home.submit(_line("carrots", LineOutcome.RECEIVED, upc=UPC))
+
+        home.confirm_all(receipt)
+
+        assert home.items.get(home.ids["carrots"]).verified_upc is None
+
+    def test_confirming_and_asking_saves_the_code_with_who_and_when(
+        self, home: Household
+    ) -> None:
+        """The item records the code, the member and the time."""
+        receipt = home.submit(_line("carrots", LineOutcome.RECEIVED, upc=UPC))
+
+        home.confirm_all(receipt, remember_upc=True)
+
+        item = home.items.get(home.ids["carrots"])
+        assert item.verified_upc == UPC
+        assert item.upc_verified_by == ACTOR
+        assert item.upc_verified_at == NOW.isoformat()
+        history = home.items.history(item.id)
+        assert history[-1].event_type is ItemEventType.UPC_VERIFIED
+        assert history[-1].detail == {
+            "upc": UPC,
+            "receipt_id": receipt.id,
+            "line_id": receipt.lines[0].id,
+        }
+
+    def test_the_code_goes_on_the_item_the_member_named(self, home: Household) -> None:
+        """A line the receipt worded oddly is saved against the corrected item."""
+        receipt = home.submit(_line("ORG CARROT 2LB", LineOutcome.RECEIVED, upc=UPC))
+        review = LineReview(
+            line_id=receipt.lines[0].id,
+            action=LineAction.CONFIRM,
+            item_id=home.ids["carrots"],
+            remember_upc=True,
+        )
+
+        home.receipts.resolve(receipt.id, [review], actor=ACTOR)
+
+        assert home.items.get(home.ids["carrots"]).verified_upc == UPC
+
+    @pytest.mark.parametrize(
+        ("line", "reason"),
+        [
+            (_line("carrots", LineOutcome.RECEIVED), "has no product code"),
+            (
+                _line("carrots", LineOutcome.ORDERED, upc=UPC),
+                "only a line that was received",
+            ),
+            (
+                _line(
+                    "carrots",
+                    LineOutcome.SUBSTITUTED,
+                    substitute_name="parsnips",
+                    upc=UPC,
+                ),
+                "only a line that was received",
+            ),
+        ],
+        ids=["no-code", "only-ordered", "substituted"],
+    )
+    def test_a_code_can_only_be_learned_from_a_received_line_that_has_one(
+        self, home: Household, line: NewReceiptLine, reason: str
+    ) -> None:
+        """Anything else is refused, and the whole review changes nothing."""
+        receipt = home.submit(line)
+        review = LineReview(
+            line_id=receipt.lines[0].id,
+            action=LineAction.CONFIRM,
+            remember_upc=True,
+            substitute_item_id=None,
+            fulfils_need=None,
+        )
+
+        with pytest.raises(ReceiptReviewError, match=reason):
+            home.receipts.resolve(receipt.id, [review], actor=ACTOR)
+
+        assert home.items.get(home.ids["carrots"]).verified_upc is None
+        assert home.receipts.get(receipt.id).status is ReceiptStatus.OPEN
+
+    def test_a_skipped_line_can_not_teach_a_code(self, home: Household) -> None:
+        """Skipping means the member did not vouch for the line."""
+        receipt = home.submit(_line("carrots", LineOutcome.RECEIVED, upc=UPC))
+        review = LineReview(
+            line_id=receipt.lines[0].id, action=LineAction.SKIP, remember_upc=True
+        )
+
+        with pytest.raises(ReceiptReviewError, match="confirm the line"):
+            home.receipts.resolve(receipt.id, [review], actor=ACTOR)
+
+    def test_a_member_can_clear_a_code(self, home: Household) -> None:
+        """Packaging changes; a wrong code must be removable."""
+        receipt = home.submit(_line("carrots", LineOutcome.RECEIVED, upc=UPC))
+        home.confirm_all(receipt, remember_upc=True)
+
+        cleared = home.items.update(
+            home.ids["carrots"], HouseholdItemUpdate(verified_upc=None), actor=ACTOR
+        )
+
+        assert (cleared.verified_upc, cleared.upc_verified_by) == (None, None)
+        assert cleared.upc_verified_at is None
+
+    def test_a_code_can_not_be_typed_in(self) -> None:
+        """The only way in is a confirmed receipt."""
+        with pytest.raises(ValidationError):
+            HouseholdItemUpdate.model_validate({"verified_upc": UPC})
 
 
 class TestListing:
