@@ -1043,6 +1043,143 @@ class TestRecipeAdd:
             assert f'<option value="{unit.value}">' in html
 
 
+class TestRecipeAddKeepsWhatWasTyped:
+    """A refused add-recipe form comes back filled in (issue #260)."""
+
+    @staticmethod
+    def _form(**overrides: str) -> dict[str, str]:
+        """Return a two-ingredient form post, with optional overrides."""
+        data = {
+            "name": "Chili",
+            "servings": "6",
+            "ing_name_0": "Onion",
+            "ing_qty_0": "2",
+            "ing_unit_0": "each",
+            "ing_category_0": "produce",
+            "ing_name_1": "crushed tomatoes",
+            "ing_qty_1": "1.5",
+            "ing_unit_1": "can",
+            "ing_category_1": "pantry_dry",
+            "ing_pantry_1": "on",
+        }
+        data.update(overrides)
+        return data
+
+    @staticmethod
+    def _assert_rows_kept(html: str, unit_1: str = "can") -> None:
+        """Assert both ingredient rows are rendered as they were typed."""
+        assert 'name="ing_name_0" value="Onion"' in html
+        assert 'name="ing_qty_0" step="0.01" value="2"' in html
+        assert 'name="ing_unit_0" value="each"' in html
+        assert 'name="ing_name_1" value="crushed tomatoes"' in html
+        assert 'name="ing_qty_1" step="0.01" value="1.5"' in html
+        assert f'name="ing_unit_1" value="{unit_1}"' in html
+        assert 'name="ing_pantry_1" checked' in html
+        assert 'name="ing_pantry_0" checked' not in html
+        assert html.count('<option value="produce" selected>') == 1
+        assert html.count('<option value="pantry_dry" selected>') == 1
+        assert html.count('class="form-row ingredient-row"') == 2
+
+    def test_unknown_unit_returns_the_filled_form(
+        self, client: FlaskClient, recipe_store: RecipeStore
+    ) -> None:
+        """A bad unit is a 400 showing the error and everything typed."""
+        response = client.post("/recipes/add", data=self._form(ing_unit_1="19 oz can"))
+        html = response.data.decode()
+        assert response.status_code == 400
+        assert "Ingredient 2: That is not a supported unit." in html
+        assert 'name="name" value="Chili"' in html
+        assert 'name="servings" value="6"' in html
+        self._assert_rows_kept(html, unit_1="19 oz can")
+        assert recipe_store.list_recipes() == []
+
+    def test_duplicate_name_returns_the_filled_form(
+        self, client: FlaskClient, recipe_store: RecipeStore, sample_meal: ParsedMeal
+    ) -> None:
+        """A name that is taken keeps the ingredients for a second try."""
+        recipe_store.save_recipe(sample_meal)
+        response = client.post("/recipes/add", data=self._form(name="Test Pasta"))
+        html = response.data.decode()
+        assert response.status_code == 400
+        assert "already exists" in html
+        assert 'name="name" value="Test Pasta"' in html
+        self._assert_rows_kept(html)
+        assert len(recipe_store.list_recipes()) == 1
+
+    def test_missing_name_returns_the_filled_form(self, client: FlaskClient) -> None:
+        """A missing recipe name keeps the ingredients."""
+        response = client.post("/recipes/add", data=self._form(name="  "))
+        html = response.data.decode()
+        assert response.status_code == 400
+        assert "Recipe name is required." in html
+        self._assert_rows_kept(html)
+
+    def test_bad_servings_returns_the_filled_form(self, client: FlaskClient) -> None:
+        """Bad servings keep the name and the ingredients."""
+        response = client.post("/recipes/add", data=self._form(servings="lots"))
+        html = response.data.decode()
+        assert response.status_code == 400
+        assert "Servings must be a number." in html
+        assert 'name="name" value="Chili"' in html
+        self._assert_rows_kept(html)
+
+    def test_no_ingredients_returns_one_blank_row(self, client: FlaskClient) -> None:
+        """With no ingredient typed, the form still offers a row to fill."""
+        response = client.post("/recipes/add", data={"name": "Empty", "servings": "3"})
+        html = response.data.decode()
+        assert response.status_code == 400
+        assert "At least one ingredient is required." in html
+        assert 'name="name" value="Empty"' in html
+        assert 'name="servings" value="3"' in html
+        assert html.count('class="form-row ingredient-row"') == 1
+        assert 'name="ing_name_0" value=""' in html
+
+    def test_a_blank_row_between_two_keeps_its_place(self, client: FlaskClient) -> None:
+        """Rows come back in the positions the error message counts from."""
+        data = {
+            "name": "Gappy",
+            "servings": "2",
+            "ing_name_0": "",
+            "ing_qty_0": "1",
+            "ing_unit_0": "",
+            "ing_category_0": "other",
+            "ing_name_1": "rice",
+            "ing_qty_1": "1",
+            "ing_unit_1": "scoop",
+            "ing_category_1": "pantry_dry",
+        }
+        html = client.post("/recipes/add", data=data).data.decode()
+        assert "Ingredient 2: That is not a supported unit." in html
+        assert 'name="ing_name_0" value=""' in html
+        assert 'name="ing_name_1" value="rice"' in html
+        assert 'name="ing_unit_1" value="scoop"' in html
+
+    def test_typed_values_are_escaped(self, client: FlaskClient) -> None:
+        """What was typed is put back as text, never as markup."""
+        response = client.post(
+            "/recipes/add",
+            data=self._form(
+                name='"><script>alert(1)</script>', ing_unit_1="<b>cup</b>"
+            ),
+        )
+        html = response.data.decode()
+        assert "<script>alert(1)</script>" not in html
+        assert "<b>cup</b>" not in html
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+
+    def test_get_renders_one_blank_row_with_defaults(self, client: FlaskClient) -> None:
+        """A fresh form is unchanged: one empty row, four servings."""
+        response = client.get("/recipes/add")
+        html = response.data.decode()
+        assert response.status_code == 200
+        assert 'name="name" value=""' in html
+        assert 'name="servings" value="4"' in html
+        assert html.count('class="form-row ingredient-row"') == 1
+        assert 'name="ing_qty_0" step="0.01" value="1"' in html
+        assert " selected>" not in html
+        assert " checked" not in html
+
+
 # ---------------------------------------------------------------------------
 # TestRecipeDelete
 # ---------------------------------------------------------------------------

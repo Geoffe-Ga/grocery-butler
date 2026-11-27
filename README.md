@@ -542,7 +542,7 @@ routes are server-rendered HTML except where noted.
 |--------|------|-------------|
 | `GET` | `/recipes` | List saved recipes with ingredient counts. |
 | `GET` | `/recipes/add` | Render the add-recipe form. |
-| `POST` | `/recipes/add` | Form: `name`, `servings`, repeated `ing_name_N`, `ing_qty_N`, `ing_unit_N`, `ing_category_N`, `ing_pantry_N`. A unit the system does not know is refused with the ingredient named, and nothing is saved (same units as `/api/v1/recipes/save`). |
+| `POST` | `/recipes/add` | Form: `name`, `servings`, repeated `ing_name_N`, `ing_qty_N`, `ing_unit_N`, `ing_category_N`, `ing_pantry_N`. A unit the system does not know is refused with the ingredient named, and nothing is saved (same units as `/api/v1/recipes/save`). A refused form comes back with a 400 and everything that was typed still in it. |
 | `GET` | `/recipes/<id>` | Recipe detail page. |
 | `POST` | `/recipes/<id>/delete` | Delete recipe. |
 
