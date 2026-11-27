@@ -169,6 +169,43 @@ class TestForms:
             "kidney beans",
         ]
 
+    def test_a_refused_recipe_can_be_corrected_and_saved(
+        self, page: Page, db_path: str, problems: PageProblems
+    ) -> None:
+        """After a bad unit the form is still filled in, and still works."""
+        problems.expect("status of 400")
+        page.goto("/recipes/add")
+        page.locator("#name").fill("Chili")
+        page.locator("#ing_name_0").fill("onion")
+        page.locator("#ing_unit_0").fill("each")
+        page.locator("#add-ingredient-row").click()
+        page.locator("#ing_name_1").fill("crushed tomatoes")
+        page.locator("#ing_unit_1").fill("19 oz can")
+        page.locator("form button[type=submit]", has_text="Save Recipe").click()
+
+        expect(page.locator(".flash-error")).to_contain_text("Ingredient 2")
+        expect(page.locator("#name")).to_have_value("Chili")
+        expect(page.locator("#ing_name_0")).to_have_value("onion")
+        expect(page.locator("#ing_name_1")).to_have_value("crushed tomatoes")
+        expect(page.locator("#ing_unit_1")).to_have_value("19 oz can")
+        assert RecipeStore(db_path).find_recipe("chili") is None
+
+        page.locator("#ing_unit_1").fill("can")
+        page.locator("#add-ingredient-row").click()
+        expect(page.locator(".ingredient-row")).to_have_count(3)
+        page.locator("#ing_name_2").fill("kidney beans")
+        page.locator("#ing_unit_2").fill("can")
+        page.locator("form button[type=submit]", has_text="Save Recipe").click()
+
+        expect(page.locator("body")).to_contain_text("Recipe 'Chili' saved.")
+        saved = RecipeStore(db_path).find_recipe("chili")
+        assert saved is not None
+        assert sorted(i.ingredient for i in saved.purchase_items) == [
+            "crushed tomatoes",
+            "kidney beans",
+            "onion",
+        ]
+
     @pytest.mark.parametrize(
         ("answer", "still_there"), [("dismiss", True), ("accept", False)]
     )
