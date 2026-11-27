@@ -57,6 +57,12 @@ OpenClaw is installed on it directly and calls its other tools over HTTP.
    is moved from the old deployment. Members, constraints and items are
    entered in the dogfood's first week, as its protocol already asks.
 
+10. **Verified on the server on 2026-11-27.** A request made on the server
+    was admitted (200). The same request from a second container on the
+    compose network, at `172.30.198.4`, was refused (403) and logged. Both
+    published ports were bound to `127.0.0.1`. The compose smoke test now
+    makes both requests on every run.
+
 ## Consequences
 
 - The boundary no longer rests on what a third party's proxy reports. The

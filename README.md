@@ -622,6 +622,16 @@ unchanged. The blueprint lives in `grocery_butler/api.py` and is registered by
   `expired`, or `failed` (a claimed action whose execution failed). Rows
   from the retired Safeway order flow remain in the audit table as history.
 
+### OpenClaw skill
+
+`openclaw/grocery-butler/` is what OpenClaw reads to operate Grocery Butler:
+`SKILL.md`, a playbook of what to do, in what order and what to say, and
+`gb.py`, a standard-library script that signs each request. OpenClaw picks
+the skill up from this checkout, so `git pull` on the server updates it.
+`tests/test_openclaw_skill.py` holds the playbook to `docs/api/v2.md` (every
+capability, no phantom ones), runs the script against the real app, and
+holds its tokens to the published vectors.
+
 ### OpenClaw Capability API (/api/v2)
 
 The successor to `/api/v1`, served beside it from `grocery_butler/api_v2.py`.
@@ -1152,7 +1162,8 @@ allow-list of CIDR ranges.
   `403`: a JSON `{"error": "forbidden"}` body for `/api/*` paths, an HTML
   error page otherwise.
 - **Observability.** At startup the guard logs the resolved allow-list
-  (`network_guard_enabled allowed_cidrs=...`), or
+  (`network_guard_enabled allowed_cidrs=...`, at info level, which gunicorn
+  does not print in production; rejections and warnings do show), or
   `network_guard_disabled` if the kill switch is set, or
   `network_guard_empty_allowlist` (warning) if the resolved list is
   empty. Every rejection logs
@@ -1255,7 +1266,8 @@ of these two.
 `./scripts/compose-smoke.sh` starts the real deployment (the app image and
 Postgres from `deploy/vps/compose.yaml`) under a throwaway project name,
 with secrets generated for the run, and checks it over HTTP: both
-containers healthy, the dashboard admitted by the network guard, a signed
+containers healthy, the dashboard admitted by the network guard and a
+request from another container refused by it, a signed
 API call written to Postgres and read back, the same call refused without
 a token, the data still there after a restart, and both ports bound to
 `127.0.0.1`. Every other test runs the app in-process, so this is the only
