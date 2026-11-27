@@ -117,33 +117,81 @@ Take a backup first whenever the pull includes a new file under
 
 ## Backups
 
+A timer on the server takes an encrypted backup every night and keeps the
+newest fourteen. Once a week you copy one off the server. The nightly copy
+covers a mistake or a bad migration; only the weekly copy covers losing the
+server.
+
 The backup scripts run on the server, outside the containers, and reach
-Postgres on its loopback port. Set them up once:
+Postgres on its loopback port.
+
+### Set it up once
 
 ```bash
-cd grocery-butler
+cd ~/grocery-butler
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt -e .
+
+mkdir -p ~/.config/grocery-butler ~/.config/systemd/user
+cp deploy/vps/backup.env.example ~/.config/grocery-butler/backup.env
+chmod 600 ~/.config/grocery-butler/backup.env
 ```
 
-Then, each time:
+Open `~/.config/grocery-butler/backup.env` in an editor and fill in the
+three values. The passphrase also goes in your password manager: lose it and
+the backups can't be read. It sits on the server so the timer can run
+unattended. That costs little, because anyone who has the server already
+has the live database; the passphrase protects the copies that leave it.
+
+The units expect the checkout at `~/grocery-butler`. Install and start the
+timer, and let it run while you are logged out:
 
 ```bash
-cd grocery-butler
-. .venv/bin/activate
-export BACKUP_PASSPHRASE   # set its value from your password manager
-export DATABASE_URL="postgresql://butler:$(grep '^POSTGRES_PASSWORD=' deploy/vps/.env | cut -d= -f2)@127.0.0.1:5432/grocery_butler"
-./scripts/backup.sh "backups/$(date -u +%Y-%m-%d).json.gpg"
+cp deploy/vps/systemd/grocery-butler-backup.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now grocery-butler-backup.timer
+sudo loginctl enable-linger "$USER"
 ```
 
-Copy the file off the server (for example with `scp`, run from your own
-machine). A backup that lives only on the server is lost with the server.
-The rest, including the restore drill, is in the
-[data lifecycle runbook](data-lifecycle.md).
+Run it once by hand to see it work, and check the result:
 
-To restore, stop the app first so nothing writes: `docker compose stop app`,
-run `./scripts/restore.sh` as that runbook describes, then
-`docker compose start app`.
+```bash
+systemctl --user start grocery-butler-backup.service
+systemctl --user status grocery-butler-backup.service
+ls -l "$(grep '^BACKUP_DIR=' ~/.config/grocery-butler/backup.env | cut -d= -f2)"
+```
+
+### Every week
+
+1. **Check the timer ran.** `systemctl --user list-timers grocery-butler-backup.timer`
+   shows the last and next run, and the newest file in the backup directory
+   should be dated today or yesterday. A failed night shows in
+   `journalctl --user -u grocery-butler-backup.service`.
+2. **Copy the newest backup off the server**, from your own machine:
+
+   ```bash
+   scp <server>:<backup directory>/<newest file> ~/grocery-butler-backups/
+   ```
+
+3. **Write the file's date in the week's log.** A backup that lives only on
+   the server is lost with the server.
+
+### Before a deploy that includes a migration
+
+Take one by hand first, so it has a name the nightly pruning leaves alone:
+
+```bash
+cd ~/grocery-butler && . .venv/bin/activate
+set -a; . ~/.config/grocery-butler/backup.env; set +a
+./scripts/backup.sh "$BACKUP_DIR/before-$(date -u +%Y-%m-%d)-deploy.json.gpg"
+```
+
+### Restore
+
+Stop the app first so nothing writes: `docker compose stop app`. Run
+`./scripts/restore.sh` as the [data lifecycle runbook](data-lifecycle.md)
+describes, then `docker compose start app`. That runbook also has the
+restore drill.
 
 ## Logs
 
@@ -158,7 +206,11 @@ events (ADR 0015) live only there.
 
 ## Moving data from an older deployment
 
-If an earlier deployment holds data worth keeping: take a backup of it with
+The dogfood starts with an empty database (ADR 0021), so this is not part of
+the first deploy. Delete the old deployment and its database once the server
+is confirmed, so no copy of household data is left behind.
+
+If you later find an earlier deployment does hold data worth keeping: take a backup of it with
 `./scripts/backup.sh` (its `DATABASE_URL`), then restore that file into this
 server's database as above. Both sides are Postgres, which a restore
 requires. Then shut the old deployment down.

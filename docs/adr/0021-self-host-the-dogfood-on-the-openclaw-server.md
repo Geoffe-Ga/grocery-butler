@@ -46,8 +46,16 @@ OpenClaw is installed on it directly and calls its other tools over HTTP.
 7. **A deploy is a person running two commands** on the server: `git pull`,
    then `docker compose up --detach --build`. The entrypoint migrates before
    gunicorn starts, as before. Nothing deploys on a push.
-8. **Backups run on the server and are copied off it** (ADR 0013). The
-   database port is published on loopback for `./scripts/backup.sh`.
+8. **Backups run on the server and are copied off it** (ADR 0013). A
+   systemd timer takes an encrypted backup every night and keeps the newest
+   fourteen; a person copies one off the server every week (Geoff,
+   2026-11-26). The passphrase therefore lives in a file on the server,
+   readable only by its owner. The database port is published on loopback
+   for the backup scripts.
+
+9. **The server starts with an empty database** (Geoff, 2026-11-26). Nothing
+   is moved from the old deployment. Members, constraints and items are
+   entered in the dogfood's first week, as its protocol already asks.
 
 ## Consequences
 
@@ -69,8 +77,9 @@ OpenClaw is installed on it directly and calls its other tools over HTTP.
   ten files of 10 MB per service. Older lines are gone.
 - The app shares a server with OpenClaw. If either exhausts memory or disk,
   both suffer.
-- Any data on an existing Railway deployment has to be moved once, with a
-  backup there and a restore here.
+- Whatever the old Railway deployment holds is left behind. Until that
+  deployment and its database are deleted, a copy of old household data
+  stays with a provider the household no longer uses.
 
 ## Alternatives considered
 

@@ -1076,6 +1076,8 @@ repository's `Dockerfile`, and Postgres. The step-by-step runbook is
 - **OpenClaw calls `http://127.0.0.1:8000/api/v1`** on the same server.
 - **People open the dashboard over the tailnet**, at the HTTPS address
   `tailscale serve` gives it.
+- **Backups are nightly and encrypted**, kept on the server by a systemd
+  timer (`deploy/vps/systemd/`). Someone copies one off the server each week.
 - **A deploy is manual:** `git pull`, then
   `docker compose up --detach --build`. See
   [Process Topology](#process-topology) for how the container boots: it

@@ -86,7 +86,7 @@ Notes:
 | `unsupported_retailer_api_check` | pass / fail |
 | `changes_total` | |
 | `changes_with_actor_and_source` | |
-| `backup_taken` | yes / no |
+| `backup_taken` (copied off the server; give the file's date) | yes, dated ____ / no |
 | `restore_drill_done` (weeks 1 and 4) | yes / no / not this week |
 | `support_minutes` (time spent fixing or working around the tool) | |
 

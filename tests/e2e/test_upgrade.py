@@ -37,6 +37,13 @@ pytestmark = pytest.mark.e2e
 #: The last schema version before canonical household items existed.
 LAST_OLD_VERSION = 9
 
+#: One literal query per table that held an ``ingredient`` name before items.
+BLANK_NAME_QUERIES = {
+    "recipe_ingredients": "SELECT ingredient FROM recipe_ingredients",
+    "household_inventory": "SELECT ingredient FROM household_inventory",
+    "pantry_staples": "SELECT ingredient FROM pantry_staples",
+}
+
 OLD_ROWS: list[tuple[str, tuple[Any, ...]]] = [
     (
         "INSERT INTO recipes (id, name, display_name, default_servings)"
@@ -80,6 +87,10 @@ OLD_ROWS: list[tuple[str, tuple[Any, ...]]] = [
         "INSERT INTO household_inventory (ingredient, display_name, status)"
         " VALUES (?, ?, ?)",
         (" ", "Unnamed", "low"),
+    ),
+    (
+        "INSERT INTO pantry_staples (ingredient, display_name) VALUES (?, ?)",
+        ("\t", "Unnamed staple"),
     ),
     (
         "INSERT INTO brand_preferences (match_target, match_type, brand,"
@@ -207,3 +218,18 @@ def test_the_upgraded_household_survives_export_delete_and_restore(
         item["name"]: item["state"]["state"] for item in before
     }
     assert v2.ok("GET", "/needs")["needs"] == needs_before
+
+
+@pytest.mark.parametrize(
+    "table", ["recipe_ingredients", "household_inventory", "pantry_staples"]
+)
+def test_rows_with_no_name_were_deleted(upgraded: str, table: str) -> None:
+    """Migration 025 removes them; nothing nameless is left to skip over."""
+    with closing(get_connection(upgraded)) as conn:
+        names = [
+            row["ingredient"]
+            for row in conn.execute(BLANK_NAME_QUERIES[table]).fetchall()
+        ]
+
+    assert names
+    assert [name for name in names if not name.strip()] == []
