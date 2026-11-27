@@ -45,9 +45,15 @@ before you deploy it.
    ```
 
    Open `.env` in an editor and fill in the three required values. Generate
-   each with `openssl rand -hex 32`. `RUBOTPAUL_SHARED_SECRET` must be the
-   same value OpenClaw uses. Don't paste any of them into a chat, an issue
-   or a commit.
+   `POSTGRES_PASSWORD` and `FLASK_SECRET_KEY` with `openssl rand -hex 32`.
+
+   `RUBOTPAUL_SHARED_SECRET` is different: use the value OpenClaw already holds.
+   OpenClaw signs every request with its own copy, and a freshly generated
+   value here is one it doesn't have, so every call would be refused with
+   `401 bad signature`. Generate a new one only if OpenClaw has none, and
+   then give OpenClaw the same value. Step 8 checks the two match.
+
+   Don't paste any of them into a chat, an issue or a commit.
 
 3. **Start it.**
 
@@ -121,7 +127,21 @@ before you deploy it.
    `openclaw/grocery-butler/` from this checkout: `SKILL.md` tells it what to
    do, and `gb.py` beside it signs each request, reading the shared secret
    from `deploy/vps/.env`. Check it works with
-   `python3 openclaw/grocery-butler/gb.py GET /api/v2/items`. If you configure a
+   `python3 openclaw/grocery-butler/gb.py GET /api/v2/items`.
+
+   That command run from your own shell proves only that the file and the
+   app agree. OpenClaw's service may carry its own `RUBOTPAUL_SHARED_SECRET`
+   in its environment, and `gb.py` uses that one first. Compare the two
+   without printing either; the fingerprints must be the same:
+
+   ```bash
+   PID=$(pgrep -f openclaw | head -1)
+   sudo cat /proc/$PID/environ | tr '\0' '\n' | grep '^RUBOTPAUL_SHARED_SECRET=' | cut -d= -f2- | tr -d '\n' | sha256sum | cut -c1-8
+   grep '^RUBOTPAUL_SHARED_SECRET=' deploy/vps/.env | cut -d= -f2- | tr -d '\n' | sha256sum | cut -c1-8
+   ```
+
+   If the first prints the fingerprint of nothing (`e3b0c442`), OpenClaw has
+   no copy of its own and reads the file: nothing to do. If you configure a
    client by hand instead, set its base URL to
    `http://127.0.0.1:8000/api/v1` (and `http://127.0.0.1:8000/api/v2` for
    the capability API). Plain HTTP is right here: the request never leaves
@@ -252,6 +272,7 @@ requires. Then shut the old deployment down.
 | `docker compose up` says a variable must be set | Fill it in `deploy/vps/.env`. |
 | The app container keeps restarting | `docker compose logs app`. A missing secret or a failed migration is named on the last lines. |
 | `403` from `127.0.0.1:8000` | Step 5 above. |
+| OpenClaw gets `401 bad signature` (`auth_failed reason=bad signature` in `docker compose logs app`) | OpenClaw and the app hold different secrets. Run the fingerprint check in step 8. Put OpenClaw's value in `deploy/vps/.env`, then `docker compose up --detach`. Change the app's side, not OpenClaw's: other tools may share OpenClaw's value. |
 | The tailnet address doesn't load | `tailscale serve status`, and check HTTPS certificates are on for the tailnet. |
 | `docker compose up` says a pool or subnet overlaps | Another Docker network on the server already uses `172.30.198.0/24`. Report it rather than editing one side: the subnet, its gateway and the guard's allow-list in `compose.yaml` must change together, and a test holds them to each other. |
 | `failed to bind host port 127.0.0.1:5432` | Another Postgres on the server has the port. Add `DB_HOST_PORT=5433` (or any free port) to `deploy/vps/.env` and run `docker compose up --detach` again. Use that port in the `DATABASE_URL` in `backup.env`, and in step 7's check. Nothing inside Docker changes. |

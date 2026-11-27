@@ -255,3 +255,21 @@ class TestTheRunbook:
     def test_it_names_each_step(self, phrase: str) -> None:
         """Start, expose on the tailnet, verify the guard, back up, protect."""
         assert phrase in RUNBOOK.read_text(encoding="utf-8")
+
+    def test_the_signing_secret_is_copied_from_openclaw_not_generated(self) -> None:
+        """A fresh value here is one OpenClaw doesn't hold: every call gets 401."""
+        text = RUNBOOK.read_text(encoding="utf-8")
+        step = text[
+            text.index("**Write the secrets file.**") : text.index("**Start it.**")
+        ]
+
+        assert "already holds" in step
+        assert "bad signature" in text
+        assert "sha256sum" in text
+
+    def test_the_example_env_file_says_to_reuse_openclaws_secret(self) -> None:
+        """The comment beside the variable gives the same instruction."""
+        text = ENV_EXAMPLE.read_text(encoding="utf-8")
+        comment = text[: text.index("RUBOTPAUL_SHARED_SECRET=")].rsplit("\n\n", 1)[-1]
+
+        assert "already" in comment
