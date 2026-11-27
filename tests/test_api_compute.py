@@ -391,3 +391,93 @@ class TestAnthropicClientHelper:
             factory.return_value = object()
             assert api._anthropic_client() is factory.return_value
         factory.assert_called_once_with("sk-test")
+
+
+# ---------------------------------------------------------------------------
+# Optional ingredients on the preview (ADR 0025)
+# ---------------------------------------------------------------------------
+
+
+def _meal_with_optional_salsa() -> dict[str, Any]:
+    """Return a meal payload with one required and one optional ingredient."""
+    meal = _make_meal("Chicken Quesadilla").model_dump(mode="json")
+    meal["purchase_items"].append(
+        {
+            "ingredient": "Casa Sanchez Medium Salsa",
+            "quantity": 1.0,
+            "unit": "jar",
+            "category": "pantry_dry",
+            "is_optional": True,
+        }
+    )
+    return meal
+
+
+@patch.dict(os.environ, {**SECRET_ENV, "ANTHROPIC_API_KEY": ""})
+class TestPreviewOptionalIngredients:
+    """The preview never decides an optional ingredient for the caller."""
+
+    def test_an_undecided_optional_ingredient_is_a_409_naming_it(
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
+    ) -> None:
+        """No list comes back, and the body says what to decide, by meal."""
+        response = _post(
+            client,
+            auth_headers,
+            "/api/v1/shopping-list/preview",
+            {"meals": [_meal_with_optional_salsa()]},
+        )
+
+        payload = response.get_json()
+        assert response.status_code == 409
+        assert payload["optional_ingredients"] == {
+            "Chicken Quesadilla": ["Casa Sanchez Medium Salsa"]
+        }
+        assert "need a decision" in payload["error"]
+        assert "items" not in payload
+
+    def test_sending_it_as_required_includes_it(
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
+    ) -> None:
+        """Including is explicit: the caller clears the flag."""
+        meal = _meal_with_optional_salsa()
+        meal["purchase_items"][-1]["is_optional"] = False
+
+        response = _post(
+            client, auth_headers, "/api/v1/shopping-list/preview", {"meals": [meal]}
+        )
+
+        assert response.status_code == 200
+        assert sorted(i["ingredient"] for i in response.get_json()["items"]) == [
+            "Casa Sanchez Medium Salsa",
+            "pasta",
+        ]
+
+    def test_removing_it_excludes_it(
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
+    ) -> None:
+        """Excluding is explicit: the caller takes the ingredient out."""
+        meal = _meal_with_optional_salsa()
+        meal["purchase_items"].pop()
+
+        response = _post(
+            client, auth_headers, "/api/v1/shopping-list/preview", {"meals": [meal]}
+        )
+
+        assert response.status_code == 200
+        assert [i["ingredient"] for i in response.get_json()["items"]] == ["pasta"]
+
+    def test_a_meal_payload_without_the_field_still_previews(
+        self, client: FlaskClient, auth_headers: AuthHeaderFactory
+    ) -> None:
+        """An older client that never sends is_optional is unaffected."""
+        meal = _make_meal().model_dump(mode="json")
+        for item in meal["purchase_items"]:
+            del item["is_optional"]
+
+        response = _post(
+            client, auth_headers, "/api/v1/shopping-list/preview", {"meals": [meal]}
+        )
+
+        assert response.status_code == 200
+        assert [i["ingredient"] for i in response.get_json()["items"]] == ["pasta"]

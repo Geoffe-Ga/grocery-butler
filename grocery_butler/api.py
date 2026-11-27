@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 from grocery_butler.auth_middleware import require_bearer
 from grocery_butler.claude_utils import make_anthropic_client
-from grocery_butler.consolidator import Consolidator
+from grocery_butler.consolidator import Consolidator, UndecidedOptionalIngredientsError
 from grocery_butler.db.adapter import IntegrityError
 from grocery_butler.meal_parser import MealParser
 from grocery_butler.models import (
@@ -263,17 +263,25 @@ def post_meals_parse() -> Response:
 
 
 @api_v1.post("/shopping-list/preview")
-def post_shopping_list_preview() -> Response:
-    """Consolidate meals into a shopping list without persisting anything."""
+def post_shopping_list_preview() -> Response | tuple[Response, int]:
+    """Consolidate meals into a shopping list without persisting anything.
+
+    A meal that still carries an optional ingredient is a 409 naming it
+    (ADR 0025). The caller decides: send the ingredient with
+    ``is_optional`` false to include it, or leave it out of the meal.
+    """
     body = _json_body()
     meals = _parse_meal_payloads(body.get("meals", []))
     include_restock = bool(body.get("include_restock", True))
     restock_queue = _pantry_manager().get_restock_queue() if include_restock else []
-    items = _consolidator().consolidate(
-        meals=meals,
-        restock_queue=restock_queue,
-        pantry_staples=_recipe_store().get_pantry_staple_names(),
-    )
+    try:
+        items = _consolidator().consolidate(
+            meals=meals,
+            restock_queue=restock_queue,
+            pantry_staples=_recipe_store().get_pantry_staple_names(),
+        )
+    except UndecidedOptionalIngredientsError as err:
+        return jsonify(error=str(err), optional_ingredients=err.undecided), 409
     return jsonify(items=[item.model_dump(mode="json") for item in items])
 
 

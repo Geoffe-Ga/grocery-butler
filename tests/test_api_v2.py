@@ -2282,3 +2282,375 @@ class TestConstraints:
             404,
             "constraint_not_found",
         )
+
+
+class TestPlansWithOptionalIngredients:
+    """A plan is built only once each optional ingredient is decided (ADR 0025)."""
+
+    @pytest.fixture()
+    def recipe_id(self, db_path: str, app: Flask) -> int:
+        """Save Chicken Sandwiches: chicken, and two optional bags of Ruffles."""
+        from grocery_butler.models import (
+            Ingredient,
+            IngredientCategory,
+            ParsedMeal,
+            Unit,
+        )
+        from grocery_butler.recipe_store import RecipeStore
+
+        def chips(name: str) -> Ingredient:
+            """Build one optional bag of chips."""
+            return Ingredient(
+                ingredient=name,
+                quantity=1.0,
+                unit=Unit.BAG,
+                category=IngredientCategory.PANTRY_DRY,
+                notes="party size",
+                is_optional=True,
+            )
+
+        return RecipeStore(db_path).save_recipe(
+            ParsedMeal(
+                name="Chicken Sandwiches",
+                servings=2,
+                known_recipe=True,
+                needs_confirmation=False,
+                purchase_items=[
+                    Ingredient(
+                        ingredient="chicken breast",
+                        quantity=1.0,
+                        unit=Unit.LB,
+                        category=IngredientCategory.MEAT,
+                    ),
+                    chips("Original Ruffles"),
+                    chips("Cheddar Cheese Ruffles"),
+                ],
+                pantry_items=[],
+            )
+        )
+
+    def _asked(self, api: Api, recipe_id: int) -> dict[str, Any]:
+        """Ask for the plan undecided and return the meal's requirement."""
+        response = api.call("POST", "/plans", {"meals": [{"recipe_id": recipe_id}]})
+        (meal,) = _error(response)["details"]["meals"]
+        requirement: dict[str, Any] = meal
+        return requirement
+
+    def _answer(
+        self, requirement: dict[str, Any], include: dict[str, bool]
+    ) -> dict[str, Any]:
+        """Build the request body that answers a requirement by ingredient name."""
+        ids = {
+            choice["ingredient"]: choice["ingredient_id"]
+            for choice in requirement["optional_ingredients"]
+        }
+        return {
+            "meals": [
+                {
+                    "recipe_id": requirement["recipe_id"],
+                    "optional_token": requirement["optional_token"],
+                    "optional_decisions": [
+                        {"ingredient_id": ids[name], "include": wanted}
+                        for name, wanted in include.items()
+                    ],
+                }
+            ]
+        }
+
+    def test_an_undecided_plan_is_refused_with_the_choices_and_stores_nothing(
+        self, api: Api, recipe_id: int
+    ) -> None:
+        """The refusal is the confirmation requirement, grouped by meal."""
+        response = api.call("POST", "/plans", {"meals": [{"recipe_id": recipe_id}]})
+
+        error = _error(response)
+        (meal,) = error["details"]["meals"]
+        ids = [choice["ingredient_id"] for choice in meal["optional_ingredients"]]
+        assert (response.status_code, error["code"]) == (
+            409,
+            "optional_decisions_required",
+        )
+        assert "Original Ruffles, Cheddar Cheese Ruffles" in error["message"]
+        assert meal == {
+            "recipe_id": recipe_id,
+            "recipe": "Chicken Sandwiches",
+            "servings": 2,
+            "optional_token": meal["optional_token"],
+            "optional_ingredients": [
+                {
+                    "ingredient_id": ids[0],
+                    "ingredient": "Original Ruffles",
+                    "quantity": 1.0,
+                    "unit": "bag",
+                    "category": "pantry_dry",
+                    "notes": "party size",
+                    "is_pantry_item": False,
+                },
+                {
+                    "ingredient_id": ids[1],
+                    "ingredient": "Cheddar Cheese Ruffles",
+                    "quantity": 1.0,
+                    "unit": "bag",
+                    "category": "pantry_dry",
+                    "notes": "party size",
+                    "is_pantry_item": False,
+                },
+            ],
+        }
+        assert error["details"]["problems"] == [
+            {"recipe_id": recipe_id, "ingredient_id": ids[0], "problem": "missing"},
+            {"recipe_id": recipe_id, "ingredient_id": ids[1], "problem": "missing"},
+        ]
+        assert api.call("GET", "/plans").get_json() == {"plans": []}
+        assert api.call("GET", "/plans/latest").status_code == 404
+
+    def test_asking_twice_gives_the_same_requirement(
+        self, api: Api, recipe_id: int
+    ) -> None:
+        """The requirement is deterministic, so a retry of the ask is safe."""
+        assert self._asked(api, recipe_id) == self._asked(api, recipe_id)
+
+    def test_a_confirmed_plan_holds_what_was_included_and_nothing_excluded(
+        self, api: Api, recipe_id: int
+    ) -> None:
+        """The answer is honoured on the plan and on its export."""
+        requirement = self._asked(api, recipe_id)
+        body = self._answer(
+            requirement, {"Original Ruffles": False, "Cheddar Cheese Ruffles": True}
+        )
+
+        response = api.call("POST", "/plans", body)
+
+        plan = response.get_json()
+        export = api.call("GET", f"/plans/{plan['version']}/export").get_json()
+        assert response.status_code == 201
+        assert plan["is_current"] is True
+        assert sorted(line["display_name"] for line in plan["lines"]) == [
+            "Cheddar Cheese Ruffles",
+            "Chicken Breast",
+        ]
+        assert plan["meals"] == [
+            {
+                "recipe_id": recipe_id,
+                "servings": 2,
+                "optional_decisions": sorted(
+                    body["meals"][0]["optional_decisions"],
+                    key=lambda decision: decision["ingredient_id"],
+                ),
+            }
+        ]
+        assert "Cheddar Cheese Ruffles" in export["content"]
+        assert "Original Ruffles" not in export["content"]
+
+    def test_retrying_a_confirmation_with_its_key_replays_it(
+        self, api: Api, recipe_id: int
+    ) -> None:
+        """The same request with the same key changes nothing the second time."""
+        body = self._answer(
+            self._asked(api, recipe_id),
+            {"Original Ruffles": True, "Cheddar Cheese Ruffles": False},
+        )
+
+        first = api.call("POST", "/plans", body, key="confirm-ruffles-01")
+        again = api.call("POST", "/plans", body, key="confirm-ruffles-01")
+
+        assert (first.status_code, again.status_code) == (201, 201)
+        assert again.headers[REPLAY_HEADER] == "true"
+        assert again.get_json() == first.get_json()
+        assert len(api.call("GET", "/plans").get_json()["plans"]) == 1
+
+    def test_confirming_again_with_a_new_key_keeps_the_same_version(
+        self, api: Api, recipe_id: int
+    ) -> None:
+        """The same answer is the same plan, so nothing new is stored."""
+        body = self._answer(
+            self._asked(api, recipe_id),
+            {"Original Ruffles": True, "Cheddar Cheese Ruffles": False},
+        )
+
+        first = api.call("POST", "/plans", body)
+        again = api.call("POST", "/plans", body)
+
+        assert (first.status_code, again.status_code) == (201, 200)
+        assert again.get_json()["version"] == first.get_json()["version"] == 1
+
+    def test_a_refused_request_does_not_use_up_its_key(
+        self, api: Api, recipe_id: int
+    ) -> None:
+        """A refusal changed nothing, so its key is free for the real request."""
+        undecided = {"meals": [{"recipe_id": recipe_id}]}
+
+        first = api.call("POST", "/plans", undecided, key="plan-dinner-0001")
+        second = api.call("POST", "/plans", undecided, key="plan-dinner-0001")
+
+        assert (first.status_code, second.status_code) == (409, 409)
+        assert REPLAY_HEADER not in second.headers
+
+    def test_an_incomplete_answer_is_refused_and_stores_nothing(
+        self, api: Api, recipe_id: int
+    ) -> None:
+        """Deciding one of two is not deciding."""
+        requirement = self._asked(api, recipe_id)
+        body = self._answer(requirement, {"Original Ruffles": True})
+
+        response = api.call("POST", "/plans", body)
+
+        error = _error(response)
+        cheddar = requirement["optional_ingredients"][1]["ingredient_id"]
+        assert (response.status_code, error["code"]) == (
+            409,
+            "optional_decisions_required",
+        )
+        assert error["details"]["problems"] == [
+            {"recipe_id": recipe_id, "ingredient_id": cheddar, "problem": "missing"}
+        ]
+        assert "Cheddar Cheese Ruffles" in error["message"]
+        assert api.call("GET", "/plans").get_json() == {"plans": []}
+
+    def test_an_unknown_ingredient_is_invalid(self, api: Api, recipe_id: int) -> None:
+        """A decision must name one of the recipe's optional ingredients."""
+        body = self._answer(
+            self._asked(api, recipe_id),
+            {"Original Ruffles": True, "Cheddar Cheese Ruffles": True},
+        )
+        body["meals"][0]["optional_decisions"].append(
+            {"ingredient_id": 987654, "include": True}
+        )
+
+        response = api.call("POST", "/plans", body)
+
+        error = _error(response)
+        assert (response.status_code, error["code"]) == (
+            400,
+            "optional_decisions_invalid",
+        )
+        assert error["details"]["problems"] == [
+            {"recipe_id": recipe_id, "ingredient_id": 987654, "problem": "unknown"}
+        ]
+        assert api.call("GET", "/plans").get_json() == {"plans": []}
+
+    def test_a_repeated_decision_is_invalid(self, api: Api, recipe_id: int) -> None:
+        """One decision per ingredient, even when two agree."""
+        body = self._answer(
+            self._asked(api, recipe_id),
+            {"Original Ruffles": True, "Cheddar Cheese Ruffles": True},
+        )
+        repeated = body["meals"][0]["optional_decisions"][0]
+        body["meals"][0]["optional_decisions"].append(dict(repeated))
+
+        response = api.call("POST", "/plans", body)
+
+        error = _error(response)
+        assert (response.status_code, error["code"]) == (
+            400,
+            "optional_decisions_invalid",
+        )
+        assert error["details"]["problems"] == [
+            {
+                "recipe_id": recipe_id,
+                "ingredient_id": repeated["ingredient_id"],
+                "problem": "duplicate",
+            }
+        ]
+        assert api.call("GET", "/plans").get_json() == {"plans": []}
+
+    def test_an_answer_to_a_changed_recipe_is_stale(
+        self, api: Api, recipe_id: int, db_path: str
+    ) -> None:
+        """The refusal carries the current choices and a new token."""
+        from contextlib import closing
+
+        from grocery_butler.db import get_connection
+
+        requirement = self._asked(api, recipe_id)
+        body = self._answer(
+            requirement, {"Original Ruffles": True, "Cheddar Cheese Ruffles": True}
+        )
+        with closing(get_connection(db_path)) as conn:
+            conn.execute(
+                "UPDATE recipe_ingredients SET quantity_per_serving = 1"
+                " WHERE ingredient = ?",
+                ("Original Ruffles",),
+            )
+            conn.commit()
+
+        response = api.call("POST", "/plans", body)
+
+        error = _error(response)
+        (meal,) = error["details"]["meals"]
+        assert (response.status_code, error["code"]) == (
+            409,
+            "optional_decisions_stale",
+        )
+        assert meal["optional_token"] != requirement["optional_token"]
+        assert meal["optional_ingredients"][0]["quantity"] == 2.0
+        assert error["details"]["problems"] == [
+            {"recipe_id": recipe_id, "ingredient_id": None, "problem": "stale"}
+        ]
+        assert api.call("GET", "/plans").get_json() == {"plans": []}
+
+    def test_decisions_without_the_token_are_stale(
+        self, api: Api, recipe_id: int
+    ) -> None:
+        """An answer has to say which question it answers."""
+        body = self._answer(
+            self._asked(api, recipe_id),
+            {"Original Ruffles": True, "Cheddar Cheese Ruffles": True},
+        )
+        del body["meals"][0]["optional_token"]
+
+        response = api.call("POST", "/plans", body)
+
+        assert (response.status_code, _error(response)["code"]) == (
+            409,
+            "optional_decisions_stale",
+        )
+
+    @pytest.mark.parametrize(
+        "decision",
+        [
+            {"ingredient_id": 1, "include": "yes"},
+            {"ingredient_id": 1},
+            {"ingredient_id": 1, "include": True, "why": "party"},
+            {"include": True},
+        ],
+        ids=["not-a-boolean", "no-answer", "unknown-field", "no-ingredient"],
+    )
+    def test_a_malformed_decision_fails_validation(
+        self, api: Api, recipe_id: int, decision: dict[str, Any]
+    ) -> None:
+        """Include is true or false; nothing else is read as an answer."""
+        body = {"meals": [{"recipe_id": recipe_id, "optional_decisions": [decision]}]}
+
+        response = api.call("POST", "/plans", body)
+
+        assert (response.status_code, _error(response)["code"]) == (
+            400,
+            "validation_failed",
+        )
+        assert api.call("GET", "/plans").get_json() == {"plans": []}
+
+    def test_a_stored_plan_reads_as_stale_when_its_recipe_gains_a_choice(
+        self, api: Api, recipe_id: int, db_path: str
+    ) -> None:
+        """Reading still works; the plan says it no longer reflects the recipe."""
+        from contextlib import closing
+
+        from grocery_butler.db import get_connection
+
+        body = self._answer(
+            self._asked(api, recipe_id),
+            {"Original Ruffles": True, "Cheddar Cheese Ruffles": False},
+        )
+        api.call("POST", "/plans", body)
+        with closing(get_connection(db_path)) as conn:
+            conn.execute(
+                "UPDATE recipe_ingredients SET is_optional = ? WHERE ingredient = ?",
+                (True, "chicken breast"),
+            )
+            conn.commit()
+
+        response = api.call("GET", "/plans/latest")
+
+        assert response.status_code == 200
+        assert response.get_json()["is_current"] is False

@@ -61,8 +61,6 @@ NOT_YET_END_TO_END: dict[Route, str] = {
     ("POST", "/api/v2/observation-batches/<int:batch_id>/reject"): _ONE_AT_A_TIME,
     ("POST", "/api/v2/observations/<int:observation_id>/correct"): _ONE_AT_A_TIME,
     ("POST", "/api/v2/observations/<int:observation_id>/retract"): _ONE_AT_A_TIME,
-    ("GET", "/api/v2/plans"): _ONE_AT_A_TIME,
-    ("GET", "/api/v2/plans/latest"): _ONE_AT_A_TIME,
     ("GET", "/api/v2/receipts"): _ONE_AT_A_TIME,
     ("GET", "/api/v2/receipts/<int:receipt_id>"): _ONE_AT_A_TIME,
     ("POST", "/api/v2/receipts/<int:receipt_id>/reject"): _ONE_AT_A_TIME,

@@ -85,6 +85,7 @@ from grocery_butler.models import (
     NewObservation,
     NewProposal,
     ObservationSource,
+    OptionalProblemKind,
     PlanMeal,
     ProposalReview,
     SoftPreferenceKind,
@@ -113,6 +114,7 @@ from grocery_butler.replenishment import (
     ReplenishmentNeeds,
 )
 from grocery_butler.shopping_plans import (
+    OptionalDecisionsError,
     PlanNotFoundError,
     RecipeNotFoundError,
     ShoppingPlans,
@@ -1342,6 +1344,41 @@ class _PlanRequest(BaseModel):
     meals: list[PlanMeal] = Field(default_factory=list)
 
 
+# Status and code for each way a plan's optional-ingredient decisions can be
+# refused (ADR 0025). Decisions the caller still owes, or owes again, are a
+# conflict with the household's state; a decision that could never be right
+# is a bad request.
+_OPTIONAL_DECISION_ERRORS: dict[OptionalProblemKind, tuple[int, str]] = {
+    OptionalProblemKind.MISSING: (409, "optional_decisions_required"),
+    OptionalProblemKind.STALE: (409, "optional_decisions_stale"),
+    OptionalProblemKind.UNKNOWN: (400, "optional_decisions_invalid"),
+    OptionalProblemKind.DUPLICATE: (400, "optional_decisions_invalid"),
+}
+
+
+def _optional_decisions_error(err: OptionalDecisionsError) -> ApiError:
+    """Shape a refusal over optional ingredients as the confirmation requirement.
+
+    Args:
+        err: The plan builder's refusal.
+
+    Returns:
+        The error to raise. ``details.meals`` lists every meal that has
+        optional ingredients, each with the ``optional_token`` its
+        decisions must carry; ``details.problems`` lists what was wrong.
+    """
+    status, code = _OPTIONAL_DECISION_ERRORS[err.kind]
+    return ApiError(
+        status,
+        code,
+        str(err),
+        {
+            "meals": [meal.model_dump(mode="json") for meal in err.meals],
+            "problems": [problem.model_dump(mode="json") for problem in err.problems],
+        },
+    )
+
+
 def _plan_payload(plan: ShoppingPlan) -> dict[str, Any]:
     """Shape a stored plan, saying whether it still reflects the household.
 
@@ -1363,18 +1400,28 @@ def _plan_payload(plan: ShoppingPlan) -> dict[str, Any]:
 def build_plan() -> JsonResult:
     """Build the shopping plan from approved needs and the meals given.
 
+    A meal whose recipe has optional ingredients must carry a decision for
+    each one (ADR 0025). Until it does the build is refused, the refusal
+    lists the choices, and no version is stored.
+
     Returns:
         The plan: 201 when a new version was stored, 200 when nothing
         changed and the latest version still stands.
 
     Raises:
-        ApiError: 400 ``plan_invalid`` when a recipe is listed twice.
+        ApiError: 400 ``plan_invalid`` when a recipe is listed twice. 409
+            ``optional_decisions_required`` or ``optional_decisions_stale``,
+            or 400 ``optional_decisions_invalid``, when a meal's optional
+            ingredients are not each decided once against the current
+            ``optional_token``; ``details.meals`` lists the choices.
     """
     body = _PlanRequest.model_validate(request.get_json(silent=True) or {})
     plans = ShoppingPlans(_db_path())
     before = plans.latest()
     try:
         plan = plans.build(body.meals, actor=g.actor)
+    except OptionalDecisionsError as err:
+        raise _optional_decisions_error(err) from err
     except ValueError as err:
         raise ApiError(400, "plan_invalid", str(err)) from err
     created = before is None or plan.version != before.version

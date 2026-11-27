@@ -2408,3 +2408,103 @@ class TestDatabaseConnection:
 
         # After context teardown, g.db should have been popped
         # (verifying no exception from close)
+
+
+# ---------------------------------------------------------------------------
+# Optional ingredients on the dashboard (ADR 0025)
+# ---------------------------------------------------------------------------
+
+
+def _quesadilla_with_optional_salsa() -> ParsedMeal:
+    """Return a recipe with one required and one optional ingredient."""
+    return ParsedMeal(
+        name="Chicken Quesadilla",
+        servings=4,
+        known_recipe=True,
+        needs_confirmation=False,
+        purchase_items=[
+            Ingredient(
+                ingredient="tortillas",
+                quantity=1.0,
+                unit="package",
+                category=IngredientCategory.BAKERY,
+            ),
+            Ingredient(
+                ingredient="Casa Sanchez Medium Salsa",
+                quantity=1.0,
+                unit="jar",
+                category=IngredientCategory.PANTRY_DRY,
+                is_optional=True,
+            ),
+        ],
+        pantry_items=[],
+    )
+
+
+class TestOptionalIngredientsOnTheDashboard:
+    """The dashboard shows what is optional and never decides it."""
+
+    def test_recipe_detail_marks_only_the_optional_ingredient(
+        self, client: FlaskClient, recipe_store: RecipeStore
+    ) -> None:
+        """One badge, on the optional line."""
+        recipe_id = recipe_store.save_recipe(_quesadilla_with_optional_salsa())
+
+        html = client.get(f"/recipes/{recipe_id}").data.decode()
+
+        assert html.count("badge-optional") == 1
+        salsa = html.index("Casa Sanchez Medium Salsa")
+        assert html.index("badge-optional") > salsa
+        assert html.index("tortillas") < salsa
+
+    def test_recipe_detail_has_no_optional_badge_for_an_ordinary_recipe(
+        self, client: FlaskClient, recipe_store: RecipeStore, sample_meal: ParsedMeal
+    ) -> None:
+        """A recipe saved before optional ingredients existed looks the same."""
+        recipe_id = recipe_store.save_recipe(sample_meal)
+
+        html = client.get(f"/recipes/{recipe_id}").data.decode()
+
+        assert "badge-optional" not in html
+
+    def test_generating_a_list_with_an_undecided_optional_ingredient_is_refused(
+        self, client: FlaskClient, recipe_store: RecipeStore, db_path: str
+    ) -> None:
+        """Nothing is saved, and the page says what is undecided and where to go."""
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        recipe_store.save_recipe(_quesadilla_with_optional_salsa())
+
+        response = client.post(
+            "/shopping-list/generate",
+            data={"meals": "Chicken Quesadilla"},
+            follow_redirects=True,
+        )
+
+        html = response.data.decode()
+        assert "Chicken Quesadilla: Casa Sanchez Medium Salsa" in html
+        assert "OpenClaw" in html
+        assert "Generated shopping list" not in html
+        assert ShoppingListStore(db_path).get_latest_list() == []
+
+    def test_a_refused_list_leaves_the_previous_list_in_place(
+        self,
+        client: FlaskClient,
+        recipe_store: RecipeStore,
+        sample_meal: ParsedMeal,
+        db_path: str,
+    ) -> None:
+        """The refusal is not a way to lose the list the household already had."""
+        from grocery_butler.shopping_list_store import ShoppingListStore
+
+        recipe_store.save_recipe(sample_meal)
+        recipe_store.save_recipe(_quesadilla_with_optional_salsa())
+        client.post("/shopping-list/generate", data={"meals": "Test Pasta"})
+        before = ShoppingListStore(db_path).get_latest_list()
+
+        client.post(
+            "/shopping-list/generate", data={"meals": "Test Pasta\nChicken Quesadilla"}
+        )
+
+        assert before
+        assert ShoppingListStore(db_path).get_latest_list() == before

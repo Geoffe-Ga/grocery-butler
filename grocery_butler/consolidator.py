@@ -3,6 +3,11 @@
 Takes parsed meals, restock queue, and pantry state, then produces
 a consolidated shopping list with merged quantities and categories.
 Falls back to pure-Python dedup when no API client is configured.
+
+An optional recipe ingredient (ADR 0025) is never put on a list, or left
+off one, by this module's own choice. A list is refused while any optional
+ingredient is undecided; :func:`decide_optional` applies a person's
+decisions first.
 """
 
 from __future__ import annotations
@@ -23,10 +28,165 @@ from grocery_butler.prompt_loader import load_prompt
 from grocery_butler.units import convert, dimension_of
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
     from grocery_butler.config import Config
     from grocery_butler.models import Ingredient, InventoryItem, ParsedMeal
 
 logger = logging.getLogger(__name__)
+
+
+class UndecidedOptionalIngredientsError(ValueError):
+    """Raised when a list is asked for while optional ingredients are undecided.
+
+    ``undecided`` maps each meal's name to the optional ingredients nobody
+    has included or excluded.
+    """
+
+    def __init__(self, undecided: dict[str, list[str]]) -> None:
+        """Name what still needs a decision.
+
+        Args:
+            undecided: Undecided optional ingredient names, by meal name.
+        """
+        listed = "; ".join(
+            f"{meal}: {', '.join(names)}" for meal, names in undecided.items()
+        )
+        super().__init__(
+            "These optional ingredients need a decision before a list is made. "
+            f"{listed}. Include or exclude each one; nothing was added or left"
+            " off for you."
+        )
+        self.undecided = undecided
+
+
+class OptionalChoiceError(ValueError):
+    """Raised when a decision about optional ingredients can't be applied."""
+
+
+def undecided_optional(meals: Sequence[ParsedMeal]) -> dict[str, list[str]]:
+    """Find the optional ingredients nobody has decided on.
+
+    Args:
+        meals: The meals a list is wanted for.
+
+    Returns:
+        Optional ingredient names by meal name, in recipe order. Meals with
+        nothing optional are left out.
+    """
+    undecided: dict[str, list[str]] = {}
+    for meal in meals:
+        names = [
+            item.ingredient
+            for item in [*meal.purchase_items, *meal.pantry_items]
+            if item.is_optional
+        ]
+        if names:
+            undecided.setdefault(meal.name, []).extend(names)
+    return undecided
+
+
+def _choice_key(name: str) -> str:
+    """Normalize an ingredient name for matching a decision to it.
+
+    Args:
+        name: An ingredient name as typed or stored.
+
+    Returns:
+        The name trimmed and lowercased.
+    """
+    return name.strip().lower()
+
+
+def _checked_choices(
+    include: Iterable[str], exclude: Iterable[str], optional: set[str]
+) -> tuple[set[str], set[str]]:
+    """Check a set of decisions before anything is done with them.
+
+    Args:
+        include: Names of optional ingredients to add.
+        exclude: Names of optional ingredients to leave off.
+        optional: Normalized names of the meals' optional ingredients.
+
+    Returns:
+        The normalized include and exclude sets.
+
+    Raises:
+        OptionalChoiceError: If a name is decided more than once, is both
+            included and excluded, or is not an optional ingredient.
+    """
+    included = [_choice_key(name) for name in include]
+    excluded = [_choice_key(name) for name in exclude]
+    for name in included + excluded:
+        if name in included and name in excluded:
+            msg = f'"{name}" is both included and excluded. Choose one.'
+            raise OptionalChoiceError(msg)
+        if (included + excluded).count(name) > 1:
+            msg = f'"{name}" was decided more than once. Decide it once.'
+            raise OptionalChoiceError(msg)
+        if name not in optional:
+            msg = (
+                f'"{name}" is not an optional ingredient of these meals, so'
+                " there is nothing to decide about it."
+            )
+            raise OptionalChoiceError(msg)
+    return set(included), set(excluded)
+
+
+def decide_optional(
+    meals: Sequence[ParsedMeal], *, include: Iterable[str], exclude: Iterable[str]
+) -> list[ParsedMeal]:
+    """Apply a person's decisions about optional ingredients.
+
+    Names are matched without regard to case. A decision applies to every
+    meal that has the ingredient. An included ingredient becomes an
+    ordinary one, with the amount the recipe states; an excluded one is
+    removed. The meals passed in are not changed.
+
+    Args:
+        meals: The meals a list is wanted for.
+        include: Names of optional ingredients to add.
+        exclude: Names of optional ingredients to leave off.
+
+    Returns:
+        New meals with no optional ingredient left in them.
+
+    Raises:
+        OptionalChoiceError: If a name is decided more than once, is both
+            included and excluded, or is not an optional ingredient.
+        UndecidedOptionalIngredientsError: If an optional ingredient has
+            no decision.
+    """
+    optional = {
+        _choice_key(name)
+        for names in undecided_optional(meals).values()
+        for name in names
+    }
+    included, excluded = _checked_choices(include, exclude, optional)
+
+    def keep(items: list[Ingredient]) -> list[Ingredient]:
+        """Drop excluded ingredients and make included ones ordinary."""
+        return [
+            item.model_copy(update={"is_optional": False})
+            if _choice_key(item.ingredient) in included
+            else item
+            for item in items
+            if not (item.is_optional and _choice_key(item.ingredient) in excluded)
+        ]
+
+    decided = [
+        meal.model_copy(
+            update={
+                "purchase_items": keep(meal.purchase_items),
+                "pantry_items": keep(meal.pantry_items),
+            }
+        )
+        for meal in meals
+    ]
+    remaining = undecided_optional(decided)
+    if remaining:
+        raise UndecidedOptionalIngredientsError(remaining)
+    return decided
 
 
 def _format_pantry_staples(pantry_staples: list[str]) -> str:
@@ -359,7 +519,14 @@ class Consolidator:
 
         Returns:
             Consolidated shopping list.
+
+        Raises:
+            UndecidedOptionalIngredientsError: If a meal still has an
+                optional ingredient nobody has included or excluded.
         """
+        remaining = undecided_optional(meals)
+        if remaining:
+            raise UndecidedOptionalIngredientsError(remaining)
         if self._client is None:
             return self.consolidate_simple(
                 meals,
@@ -426,7 +593,14 @@ class Consolidator:
             ingredient that a meal needs and that is also on the restock
             queue is one line with both reasons (see
             :func:`merge_duplicate_lines`).
+
+        Raises:
+            UndecidedOptionalIngredientsError: If a meal still has an
+                optional ingredient nobody has included or excluded.
         """
+        remaining = undecided_optional(meals)
+        if remaining:
+            raise UndecidedOptionalIngredientsError(remaining)
         pantry_lower = {s.lower() for s in pantry_staples}
         merged = self._merge_meal_ingredients(meals, pantry_lower)
         result = self._build_items_from_merged(merged)

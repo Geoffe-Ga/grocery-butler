@@ -10,6 +10,8 @@ import pytest
 from grocery_butler.claude_utils import extract_json_text
 from grocery_butler.consolidator import (
     Consolidator,
+    OptionalChoiceError,
+    UndecidedOptionalIngredientsError,
     _build_ingredient_text,
     _flatten_meal_ingredients,
     _format_inventory_overrides,
@@ -17,7 +19,9 @@ from grocery_butler.consolidator import (
     _format_restock_queue,
     _parse_response_items,
     _parse_shopping_item,
+    decide_optional,
     merge_duplicate_lines,
+    undecided_optional,
 )
 from grocery_butler.models import (
     Ingredient,
@@ -1747,3 +1751,192 @@ class TestMergeDuplicateLines:
 
         assert first.quantity == 2.0
         assert first.from_meals == ["pancakes"]
+
+
+# ---------------------------------------------------------------------------
+# Optional ingredients (ADR 0025)
+# ---------------------------------------------------------------------------
+
+
+def _optional_meal(name: str = "Chicken Quesadilla") -> ParsedMeal:
+    """Return a meal with one required and two optional ingredients."""
+    return ParsedMeal(
+        name=name,
+        servings=2,
+        known_recipe=True,
+        needs_confirmation=False,
+        purchase_items=[
+            Ingredient(
+                ingredient="tortillas",
+                quantity=1.0,
+                unit=Unit.PACKAGE,
+                category=IngredientCategory.BAKERY,
+            ),
+            Ingredient(
+                ingredient="Casa Sanchez Medium Salsa",
+                quantity=1.0,
+                unit=Unit.JAR,
+                category=IngredientCategory.PANTRY_DRY,
+                is_optional=True,
+            ),
+            Ingredient(
+                ingredient="Casa Sanchez Tortilla Chips",
+                quantity=1.0,
+                unit=Unit.BAG,
+                category=IngredientCategory.PANTRY_DRY,
+                is_optional=True,
+            ),
+        ],
+        pantry_items=[],
+    )
+
+
+class TestOptionalIngredients:
+    """The older shopping list never decides an optional ingredient itself."""
+
+    def test_undecided_optional_lists_them_by_meal(self) -> None:
+        """Each meal's undecided optional ingredients are named."""
+        meals = [_optional_meal(), _optional_meal("Carne Asada Quesadilla")]
+
+        assert undecided_optional(meals) == {
+            "Chicken Quesadilla": [
+                "Casa Sanchez Medium Salsa",
+                "Casa Sanchez Tortilla Chips",
+            ],
+            "Carne Asada Quesadilla": [
+                "Casa Sanchez Medium Salsa",
+                "Casa Sanchez Tortilla Chips",
+            ],
+        }
+
+    def test_a_meal_with_nothing_optional_has_nothing_undecided(
+        self, sample_tacos_meal: ParsedMeal
+    ) -> None:
+        """Required ingredients need no decision."""
+        assert undecided_optional([sample_tacos_meal]) == {}
+
+    @pytest.mark.parametrize("method", ["consolidate", "consolidate_simple"])
+    def test_consolidating_undecided_optional_ingredients_is_refused(
+        self, method: str
+    ) -> None:
+        """No list is made, and the refusal says what to decide."""
+        consolidator = Consolidator(anthropic_client=None)
+
+        with pytest.raises(UndecidedOptionalIngredientsError) as caught:
+            getattr(consolidator, method)([_optional_meal()], [], [])
+
+        assert caught.value.undecided == {
+            "Chicken Quesadilla": [
+                "Casa Sanchez Medium Salsa",
+                "Casa Sanchez Tortilla Chips",
+            ]
+        }
+        assert "Chicken Quesadilla: Casa Sanchez Medium Salsa" in str(caught.value)
+
+    def test_claude_is_not_asked_about_an_undecided_list(self) -> None:
+        """The refusal comes before any model call."""
+        client = MagicMock()
+        consolidator = Consolidator(anthropic_client=client)
+
+        with pytest.raises(UndecidedOptionalIngredientsError):
+            consolidator.consolidate([_optional_meal()], [], [])
+
+        client.messages.create.assert_not_called()
+
+    def test_an_undecided_optional_pantry_item_is_refused_too(self) -> None:
+        """Optional is optional, whichever list the ingredient is on."""
+        meal = _optional_meal().model_copy(
+            update={
+                "purchase_items": [],
+                "pantry_items": [
+                    Ingredient(
+                        ingredient="hot sauce",
+                        quantity=1.0,
+                        unit=Unit.DASH,
+                        category=IngredientCategory.PANTRY_DRY,
+                        is_pantry_item=True,
+                        is_optional=True,
+                    )
+                ],
+            }
+        )
+
+        assert undecided_optional([meal]) == {"Chicken Quesadilla": ["hot sauce"]}
+
+    def test_deciding_keeps_the_included_and_drops_the_excluded(self) -> None:
+        """An included ingredient becomes an ordinary one with its own amount."""
+        decided = decide_optional(
+            [_optional_meal()],
+            include=["casa sanchez medium salsa "],
+            exclude=["Casa Sanchez Tortilla Chips"],
+        )
+
+        items = Consolidator(anthropic_client=None).consolidate_simple(decided, [], [])
+
+        assert [
+            (i.ingredient, i.quantity, i.unit, i.is_optional)
+            for i in decided[0].purchase_items
+        ] == [
+            ("tortillas", 1.0, Unit.PACKAGE, False),
+            ("Casa Sanchez Medium Salsa", 1.0, Unit.JAR, False),
+        ]
+        assert sorted(item.ingredient for item in items) == [
+            "Casa Sanchez Medium Salsa",
+            "tortillas",
+        ]
+
+    def test_deciding_leaves_the_original_meals_alone(self) -> None:
+        """The decision makes new meals; the saved recipe is untouched."""
+        meal = _optional_meal()
+
+        decide_optional(
+            [meal],
+            include=[],
+            exclude=["Casa Sanchez Medium Salsa", "Casa Sanchez Tortilla Chips"],
+        )
+
+        assert len(meal.purchase_items) == 3
+
+    def test_an_incomplete_decision_is_refused(self) -> None:
+        """Deciding one of two leaves one undecided."""
+        with pytest.raises(UndecidedOptionalIngredientsError) as caught:
+            decide_optional(
+                [_optional_meal()], include=["Casa Sanchez Medium Salsa"], exclude=[]
+            )
+
+        assert caught.value.undecided == {
+            "Chicken Quesadilla": ["Casa Sanchez Tortilla Chips"]
+        }
+
+    @pytest.mark.parametrize(
+        ("include", "exclude", "problem"),
+        [
+            (["guacamole"], [], "is not an optional ingredient"),
+            (
+                ["Casa Sanchez Medium Salsa"],
+                ["casa sanchez medium salsa"],
+                "both included and excluded",
+            ),
+            (
+                ["Casa Sanchez Medium Salsa", "Casa Sanchez Medium Salsa"],
+                [],
+                "more than once",
+            ),
+            (["tortillas"], [], "is not an optional ingredient"),
+        ],
+        ids=["unknown", "conflict", "duplicate", "required"],
+    )
+    def test_a_decision_that_makes_no_sense_is_refused(
+        self, include: list[str], exclude: list[str], problem: str
+    ) -> None:
+        """Unknown, conflicting and repeated names each have a clear error."""
+        with pytest.raises(OptionalChoiceError, match=problem):
+            decide_optional([_optional_meal()], include=include, exclude=exclude)
+
+    def test_with_nothing_optional_and_nothing_decided_meals_pass_through(
+        self, sample_tacos_meal: ParsedMeal
+    ) -> None:
+        """A recipe without optional ingredients is unchanged."""
+        assert decide_optional([sample_tacos_meal], include=[], exclude=[]) == [
+            sample_tacos_meal
+        ]

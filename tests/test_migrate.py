@@ -782,3 +782,116 @@ class TestPostgresMigrationLock:
             assert self._try_lock() is False
 
         assert self._try_lock() is True
+
+
+class TestMigration027OptionalRecipeIngredients:
+    """Tests for migration 027 (recipe_ingredients.is_optional, ADR 0025).
+
+    A recipe ingredient is required unless it is marked optional. Rows that
+    exist before the migration must come out required, and a writer that
+    has never heard of the column must keep working.
+    """
+
+    BEFORE = 26
+
+    def _old_recipe(self, db_path: str) -> None:
+        """Save a two-ingredient recipe the way a pre-027 writer did."""
+        with closing(get_connection(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO recipes (id, name, display_name, default_servings)"
+                " VALUES (?, ?, ?, ?)",
+                (900, "veggie chili", "Veggie Chili", 4),
+            )
+            for name, pantry in (("kidney beans", False), ("salt", True)):
+                conn.execute(
+                    "INSERT INTO recipe_ingredients (recipe_id, ingredient,"
+                    " quantity, unit, category, is_pantry_item,"
+                    " quantity_per_serving) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (900, name, 2.0, "can", "pantry_dry", pantry, 0.5),
+                )
+            conn.commit()
+
+    def _optional_flags(self, db_path: str) -> list[tuple[str, bool]]:
+        """Return each ingredient's name and stored optionality."""
+        with closing(get_connection(db_path)) as conn:
+            rows = conn.execute(
+                "SELECT ingredient, is_optional FROM recipe_ingredients ORDER BY id"
+            ).fetchall()
+        return [(row["ingredient"], bool(row["is_optional"])) for row in rows]
+
+    def test_the_column_does_not_exist_before_027(self, db_path: str) -> None:
+        """The test really starts from the older schema."""
+        migrate(db_path, target=self.BEFORE)
+
+        with closing(get_connection(db_path)) as conn:
+            columns = {
+                row["name"]
+                for row in conn.execute(
+                    "PRAGMA table_info(recipe_ingredients)"
+                ).fetchall()
+            }
+
+        assert "is_optional" not in columns
+
+    def test_existing_ingredients_migrate_as_required(self, db_path: str) -> None:
+        """Every old row, purchase or pantry, becomes a required ingredient."""
+        migrate(db_path, target=self.BEFORE)
+        self._old_recipe(db_path)
+
+        applied = migrate(db_path)
+
+        assert applied >= 1
+        assert self._optional_flags(db_path) == [
+            ("kidney beans", False),
+            ("salt", False),
+        ]
+        assert migrate(db_path) == 0
+
+    def test_migrated_recipes_read_back_unchanged(self, db_path: str) -> None:
+        """The old recipe is the same recipe, with nothing optional in it."""
+        from grocery_butler.recipe_store import RecipeStore
+
+        migrate(db_path, target=self.BEFORE)
+        self._old_recipe(db_path)
+        migrate(db_path)
+
+        meal = RecipeStore(db_path).get_recipe_by_id(900)
+
+        assert meal is not None
+        assert [(i.ingredient, i.quantity, i.unit) for i in meal.purchase_items] == [
+            ("kidney beans", 2.0, Unit.CAN)
+        ]
+        assert [i.ingredient for i in meal.pantry_items] == ["salt"]
+        assert not any(
+            i.is_optional for i in [*meal.purchase_items, *meal.pantry_items]
+        )
+
+    def test_a_writer_that_omits_the_column_still_inserts_a_required_row(
+        self, db_path: str
+    ) -> None:
+        """The column has a default and is never null."""
+        migrate(db_path)
+        self._old_recipe(db_path)
+
+        with closing(get_connection(db_path)) as conn:
+            table = conn.execute("PRAGMA table_info(recipe_ingredients)").fetchall()
+        (column,) = [row for row in table if row["name"] == "is_optional"]
+
+        assert self._optional_flags(db_path) == [
+            ("kidney beans", False),
+            ("salt", False),
+        ]
+        assert column["notnull"] == 1
+
+    @pytest.mark.parametrize("is_pg", [False, True])
+    def test_migration_027_exists_for_both_dialects(self, is_pg: bool) -> None:
+        """Both dialects add the same column."""
+        migrations = _discover_migrations(is_pg=is_pg)
+        (found,) = [m for m in migrations if m[0] == 27]
+
+        sql = found[2].read_text(encoding="utf-8")
+        assert found[1] == "optional_recipe_ingredients"
+        assert (
+            "ALTER TABLE recipe_ingredients ADD COLUMN is_optional"
+            " BOOLEAN NOT NULL DEFAULT FALSE;" in sql
+        )

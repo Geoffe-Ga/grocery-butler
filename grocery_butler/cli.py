@@ -16,7 +16,12 @@ import sys
 from typing import TYPE_CHECKING
 
 from grocery_butler.config import database_target
-from grocery_butler.consolidator import Consolidator
+from grocery_butler.consolidator import (
+    Consolidator,
+    OptionalChoiceError,
+    UndecidedOptionalIngredientsError,
+    decide_optional,
+)
 from grocery_butler.data_lifecycle import HouseholdData, LifecycleError
 from grocery_butler.db import init_db
 from grocery_butler.meal_parser import MealParser
@@ -33,7 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from grocery_butler.config import Config
-    from grocery_butler.models import ParsedMeal
+    from grocery_butler.models import Ingredient, ParsedMeal
 
 
 logger = logging.getLogger(__name__)
@@ -298,15 +303,18 @@ def _handle_plan(args: argparse.Namespace) -> int:
         print("Hint: Check your API key and try again.", file=sys.stderr)
         return 1
 
+    decided_meals = _decide_optional_or_report(
+        parsed_meals, args.include_optional, args.exclude_optional
+    )
+    if decided_meals is None:
+        return 1
+
     if args.save:
-        for meal in parsed_meals:
-            if not meal.known_recipe:
-                parser.save_parsed_meal(meal)
-                print(f"Saved recipe: {meal.name}")
+        _save_unknown_recipes(parser, parsed_meals)
 
     shopping_list = _consolidate_or_report(
         consolidator,
-        parsed_meals,
+        decided_meals,
         pantry_mgr.get_restock_queue(),
         store.get_pantry_staple_names(),
     )
@@ -315,6 +323,50 @@ def _handle_plan(args: argparse.Namespace) -> int:
 
     print(_format_shopping_list(shopping_list))
     return 0
+
+
+def _save_unknown_recipes(parser: MealParser, parsed_meals: list[ParsedMeal]) -> None:
+    """Save each meal that was not already a saved recipe, and say so.
+
+    Args:
+        parser: The meal parser, which owns saving.
+        parsed_meals: Meals parsed from the user's input.
+    """
+    for meal in parsed_meals:
+        if not meal.known_recipe:
+            parser.save_parsed_meal(meal)
+            print(f"Saved recipe: {meal.name}")
+
+
+def _decide_optional_or_report(
+    parsed_meals: list[ParsedMeal],
+    include: list[str],
+    exclude: list[str],
+) -> list[ParsedMeal] | None:
+    """Apply the optional-ingredient decisions given on the command line.
+
+    An optional ingredient is never added or left off without being named
+    in ``--include-optional`` or ``--exclude-optional`` (ADR 0025).
+
+    Args:
+        parsed_meals: Meals parsed from the user's input.
+        include: Names of optional ingredients to add.
+        exclude: Names of optional ingredients to leave off.
+
+    Returns:
+        The meals with every optional ingredient decided, or ``None`` after
+        printing what is undecided or wrong.
+    """
+    try:
+        return decide_optional(parsed_meals, include=include, exclude=exclude)
+    except (UndecidedOptionalIngredientsError, OptionalChoiceError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        print(
+            "Hint: name each optional ingredient once, with"
+            ' --include-optional "NAME" or --exclude-optional "NAME".',
+            file=sys.stderr,
+        )
+        return None
 
 
 def _consolidate_or_report(
@@ -478,12 +530,10 @@ def _handle_recipes(args: argparse.Namespace) -> int:
         print(f"Recipe: {meal.name} ({meal.servings} servings)")
         print("Purchase items:")
         for item in meal.purchase_items:
-            qty = _format_quantity(item.quantity).strip()
-            print(f"  {qty} {item.unit} {item.ingredient}")
+            print(_format_recipe_ingredient(item))
         print("Pantry items:")
         for item in meal.pantry_items:
-            qty = _format_quantity(item.quantity).strip()
-            print(f"  {qty} {item.unit} {item.ingredient}")
+            print(_format_recipe_ingredient(item))
         return 0
 
     if action == "forget":
@@ -491,6 +541,21 @@ def _handle_recipes(args: argparse.Namespace) -> int:
 
     print(f"Error: Unknown action '{action}'.", file=sys.stderr)
     return 1
+
+
+def _format_recipe_ingredient(item: Ingredient) -> str:
+    """Format one recipe ingredient as an indented line.
+
+    Args:
+        item: The ingredient.
+
+    Returns:
+        Its amount and name, marked ``(optional)`` when the recipe can be
+        made without it.
+    """
+    qty = _format_quantity(item.quantity).strip()
+    suffix = " (optional)" if item.is_optional else ""
+    return f"  {qty} {item.unit} {item.ingredient}{suffix}"
 
 
 def _forget_recipe(store: RecipeStore, recipe_name: str) -> int:
@@ -787,6 +852,20 @@ def _add_plan_parser(
         "--save",
         action="store_true",
         help="Save unknown recipes to the recipe store.",
+    )
+    plan_parser.add_argument(
+        "--include-optional",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Add this optional ingredient to the list. Repeat for each one.",
+    )
+    plan_parser.add_argument(
+        "--exclude-optional",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Leave this optional ingredient off the list. Repeat for each one.",
     )
 
 

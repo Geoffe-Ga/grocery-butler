@@ -1186,3 +1186,58 @@ class TestFuzzyMatchWithNoClient:
         # but store.find_recipe might still match via substring
         result = parser._try_fuzzy_match("something completely random")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Optional ingredients (ADR 0025)
+# ---------------------------------------------------------------------------
+
+
+class TestOptionalIngredients:
+    """Only a saved recipe says an ingredient is optional; a model never does."""
+
+    def test_a_model_cannot_mark_an_ingredient_optional(self) -> None:
+        """Optionality in Claude's output is ignored: it is not a planner."""
+        result = _parse_ingredient(
+            {
+                "ingredient": "tortilla chips",
+                "quantity": 1,
+                "unit": "bag",
+                "category": "pantry_dry",
+                "is_optional": True,
+            }
+        )
+
+        assert result is not None
+        assert result.is_optional is False
+
+    def test_a_saved_optional_ingredient_stays_optional_when_scaled(
+        self, store: RecipeStore, sample_meal: ParsedMeal
+    ) -> None:
+        """Scaling to other servings changes the amount and nothing else."""
+        chips = Ingredient(
+            ingredient="tortilla chips",
+            quantity=1.0,
+            unit="bag",
+            category=IngredientCategory.PANTRY_DRY,
+            is_optional=True,
+        )
+        store.save_recipe(
+            sample_meal.model_copy(
+                update={"purchase_items": [*sample_meal.purchase_items, chips]}
+            )
+        )
+
+        (meal,) = MealParser(store, anthropic_client=None).parse_meals(
+            [sample_meal.name], servings=sample_meal.servings * 2
+        )
+
+        scaled = meal.purchase_items[-1]
+        assert (scaled.ingredient, scaled.quantity, scaled.is_optional) == (
+            "tortilla chips",
+            2.0,
+            True,
+        )
+        assert [i.is_optional for i in meal.purchase_items[:-1]] == [False] * (
+            len(meal.purchase_items) - 1
+        )
