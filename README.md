@@ -622,6 +622,16 @@ unchanged. The blueprint lives in `grocery_butler/api.py` and is registered by
   `expired`, or `failed` (a claimed action whose execution failed). Rows
   from the retired Safeway order flow remain in the audit table as history.
 
+### OpenClaw skill
+
+`openclaw/grocery-butler/` is what OpenClaw reads to operate Grocery Butler:
+`SKILL.md`, a playbook of what to do, in what order and what to say, and
+`gb.py`, a standard-library script that signs each request. OpenClaw picks
+the skill up from this checkout, so `git pull` on the server updates it.
+`tests/test_openclaw_skill.py` holds the playbook to `docs/api/v2.md` (every
+capability, no phantom ones), runs the script against the real app, and
+holds its tokens to the published vectors.
+
 ### OpenClaw Capability API (/api/v2)
 
 The successor to `/api/v1`, served beside it from `grocery_butler/api_v2.py`.

@@ -117,7 +117,12 @@ before you deploy it.
    5432 (or your `DB_HOST_PORT`). On the server, `sudo ss -ltnp | grep -E ':(8000|5432)\b'` should
    list only `127.0.0.1`.
 
-8. **Point OpenClaw at it.** Set OpenClaw's Grocery Butler base URL to
+8. **Point OpenClaw at it.** OpenClaw reads the skill in
+   `openclaw/grocery-butler/` from this checkout: `SKILL.md` tells it what to
+   do, and `gb.py` beside it signs each request, reading the shared secret
+   from `deploy/vps/.env`. Check it works with
+   `python3 openclaw/grocery-butler/gb.py GET /api/v2/items`. If you configure a
+   client by hand instead, set its base URL to
    `http://127.0.0.1:8000/api/v1` (and `http://127.0.0.1:8000/api/v2` for
    the capability API). Plain HTTP is right here: the request never leaves
    the server. Use `127.0.0.1`, not `localhost`, which can resolve to an
