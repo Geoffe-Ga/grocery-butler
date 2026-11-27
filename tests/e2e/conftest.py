@@ -414,6 +414,18 @@ class V2:
             },
         )
 
+    def patch(self, path: str, body: dict[str, Any]) -> Any:
+        """PATCH a path under ``/api/v2`` and return the response."""
+        return self._send(
+            "PATCH",
+            f"/api/v2{path}",
+            body,
+            extra_headers={
+                MEMBER_HEADER: self._member,
+                IDEMPOTENCY_HEADER: f"journey-{next(self._keys):06d}",
+            },
+        )
+
     def ok(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
         """Send a request that must succeed and return its JSON.
 

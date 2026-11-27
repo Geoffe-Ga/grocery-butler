@@ -28,6 +28,7 @@ from grocery_butler.plan_preferences import (
     ORGANIC,
     PREFERRED_BRAND,
     PREFERRED_SIZE,
+    VERIFIED_UPC,
     unfiltered_phrases,
 )
 
@@ -55,6 +56,7 @@ _CSV_COLUMNS = (
     "preferred_brand",
     "preferred_size",
     "other_preferences",
+    "verified_upc",
     "must",
 )
 
@@ -176,8 +178,8 @@ def _preference_text(line: PlanLine) -> str:
         line: A plan line.
 
     Returns:
-        For example `` [prefer Brand, Size, organic; avoid Other]``, or an
-        empty string when there are none.
+        For example `` [prefer Brand, Size, organic; avoid Other; UPC
+        012345678905]``, or an empty string when there are none.
     """
     wanted = [
         str(line.constraints[key])
@@ -187,8 +189,11 @@ def _preference_text(line: PlanLine) -> str:
     wanted += ["organic"] if line.constraints.get(ORGANIC) is True else []
     wanted += ["the store brand"] if line.constraints.get(GENERIC) is True else []
     avoided = [str(brand) for brand in line.constraints.get(AVOID_BRANDS) or []]
-    parts = ([f"prefer {', '.join(wanted)}"] if wanted else []) + (
-        [f"avoid {', '.join(avoided)}"] if avoided else []
+    upc = line.constraints.get(VERIFIED_UPC)
+    parts = (
+        ([f"prefer {', '.join(wanted)}"] if wanted else [])
+        + ([f"avoid {', '.join(avoided)}"] if avoided else [])
+        + ([f"UPC {upc}"] if upc else [])
     )
     return f" [{'; '.join(parts)}]" if parts else ""
 
@@ -291,6 +296,7 @@ def render_json(plan: ShoppingPlan) -> str:
                     "organic": line.constraints.get(ORGANIC) is True,
                     "generic": line.constraints.get(GENERIC) is True,
                     "avoid_brands": list(line.constraints.get(AVOID_BRANDS) or []),
+                    "verified_upc": line.constraints.get(VERIFIED_UPC),
                     "must": _must(line),
                 }
                 for line in lines
@@ -338,6 +344,7 @@ def render_csv(plan: ShoppingPlan) -> str:
                         str(line.constraints.get(PREFERRED_BRAND) or ""),
                         str(line.constraints.get(PREFERRED_SIZE) or ""),
                         "; ".join(_other_preferences(line)),
+                        str(line.constraints.get(VERIFIED_UPC) or ""),
                         "; ".join(_must(line)),
                     )
                 )

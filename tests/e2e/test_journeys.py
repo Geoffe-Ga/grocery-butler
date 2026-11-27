@@ -348,3 +348,66 @@ def test_a_new_allergen_voids_an_approval_made_before_it(v2: V2) -> None:
     attempt = v2.ok("POST", f"/handoffs/{redraft['id']}/execute")
     assert attempt["status"] == "created"
     assert attempt["needs_your_check"] == ["Oat Milk: check for peanut"]
+
+
+@pytest.mark.usefixtures("instacart_stub")
+def test_a_product_code_is_learned_from_a_receipt_and_used_on_the_next_plan(
+    v2: V2,
+) -> None:
+    """Receipt, confirmation, item, next plan, handoff (ADR 0023).
+
+    The code comes in on a receipt line and is saved only because a
+    member confirmed that line and asked for it. The next plan's line
+    carries it, the list shows it, and the handoff sends the item by code
+    and says the organic filter was dropped for it.
+    """
+    code = "012345678905"
+    item_id = _item(v2, "oat milk")
+    v2.ok("POST", "/soft-preferences", {"kind": "organic"})
+    v2.ok("POST", "/needs", {"item_id": item_id})
+    first = v2.ok("POST", "/plans", {})
+    assert "verified_upc" not in first["lines"][0]["constraints"]
+
+    receipt = v2.ok(
+        "POST",
+        "/receipts",
+        {"lines": [{"name": "oat milk", "outcome": "received", "upc": code}]},
+    )
+    assert v2.ok("GET", f"/items/{item_id}")["verified_upc"] is None
+
+    v2.ok(
+        "POST",
+        f"/receipts/{receipt['id']}/resolve",
+        {
+            "reviews": [
+                {
+                    "line_id": receipt["lines"][0]["id"],
+                    "action": "confirm",
+                    "remember_upc": True,
+                }
+            ]
+        },
+    )
+    item = v2.ok("GET", f"/items/{item_id}")
+    assert item["verified_upc"] == code
+    assert item["upc_verified_by"].startswith("geoff@")
+    assert item["upc_verified_at"] is not None
+
+    v2.ok("POST", "/needs", {"item_id": item_id})
+    plan = v2.ok("POST", "/plans", {})
+    assert plan["lines"][0]["constraints"] == {"organic": True, "verified_upc": code}
+    assert f"UPC {code}" in v2.ok("GET", f"/plans/{plan['version']}/export")["content"]
+
+    draft = v2.ok(
+        "POST", f"/plans/{plan['version']}/handoffs", {"adapter": "instacart"}
+    )
+    assert [issue["kind"] for issue in draft["payload"]["issues"]] == [
+        "filter_dropped_by_upc"
+    ]
+
+    cleared = v2.patch(f"/items/{item_id}", {"verified_upc": None})
+    assert cleared.status_code == 200
+    assert cleared.get_json()["verified_upc"] is None
+    typed = v2.patch(f"/items/{item_id}", {"verified_upc": code})
+    assert typed.status_code == 400
+    assert v2.ok("GET", f"/items/{item_id}")["verified_upc"] is None

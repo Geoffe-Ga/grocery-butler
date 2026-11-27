@@ -311,6 +311,20 @@ class TestPreferences:
         assert _items(result)[0]["filters"]["health_filters"] == ["ORGANIC"]
         assert _kinds(result) == [IssueKind.PREFERENCE_NOT_APPLIED]
 
+    def test_a_code_on_the_line_is_sent_and_the_dropped_filter_reported(
+        self,
+    ) -> None:
+        """The plan line carries the verified code; no side table is needed."""
+        line = _line(
+            4, "Milk", prefer={"verified_upc": "012345678905", "organic": True}
+        )
+
+        result = translate(_plan(line), link_days=14)
+
+        assert _items(result)[0]["upcs"] == ["012345678905"]
+        assert "filters" not in _items(result)[0]
+        assert _kinds(result) == [IssueKind.FILTER_DROPPED_BY_UPC]
+
     def test_an_unknown_preference_is_reported(self) -> None:
         """A preference this translation doesn't understand is never dropped."""
         line = _line(1, "Oat Milk", prefer={"shelf_stable": True})

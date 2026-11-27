@@ -557,7 +557,9 @@ class ShoppingPlans:
                 key=lambda amount: amount.unit.value,
             ),
             reasons=sorted(entry.reasons, key=lambda r: (r.kind.value, r.source_key)),
-            constraints=line_preferences(self._rules.soft_for_item(item.id)),
+            constraints=line_preferences(
+                self._rules.soft_for_item(item.id), item.verified_upc
+            ),
             need_id=entry.need_id,
             hard_constraints=[
                 PlanHardConstraint(

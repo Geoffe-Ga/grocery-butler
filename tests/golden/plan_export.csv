@@ -1,7 +1,7 @@
-category,item,quantity,unit,reasons,preferred_brand,preferred_size,other_preferences,must
-Dairy,Buttermilk,4,cup,"running low; for Biscuits, Pancakes",Clover,1 qt,,no peanut; vegetarian; no substitutes
-Dairy,Oat Milk,,,out,,,"organic; prefer the store brand; avoid Silk, Planet Oat",no peanut; vegetarian
-Dairy,Yogurt,1,cup,"for Curry, Parfait",,,,
-Dairy,Yogurt,2,jar,"for Curry, Parfait",,,,
-Pantry Dry,Rice,1.5,lb,requested; for Curry,,,,
-Other,Birthday Candles,,,requested,,,,
+category,item,quantity,unit,reasons,preferred_brand,preferred_size,other_preferences,verified_upc,must
+Dairy,Buttermilk,4,cup,"running low; for Biscuits, Pancakes",Clover,1 qt,,012345678905,no peanut; vegetarian; no substitutes
+Dairy,Oat Milk,,,out,,,"organic; prefer the store brand; avoid Silk, Planet Oat",,no peanut; vegetarian
+Dairy,Yogurt,1,cup,"for Curry, Parfait",,,,,
+Dairy,Yogurt,2,jar,"for Curry, Parfait",,,,,
+Pantry Dry,Rice,1.5,lb,requested; for Curry,,,,,
+Other,Birthday Candles,,,requested,,,,,

@@ -24,7 +24,8 @@
           "reasons": [
             "running low",
             "for Biscuits, Pancakes"
-          ]
+          ],
+          "verified_upc": "012345678905"
         },
         {
           "amounts": [],
@@ -43,7 +44,8 @@
           "preferred_size": null,
           "reasons": [
             "out"
-          ]
+          ],
+          "verified_upc": null
         },
         {
           "amounts": [
@@ -65,7 +67,8 @@
           "preferred_size": null,
           "reasons": [
             "for Curry, Parfait"
-          ]
+          ],
+          "verified_upc": null
         }
       ]
     },
@@ -89,7 +92,8 @@
           "reasons": [
             "requested",
             "for Curry"
-          ]
+          ],
+          "verified_upc": null
         }
       ]
     },
@@ -107,7 +111,8 @@
           "preferred_size": null,
           "reasons": [
             "requested"
-          ]
+          ],
+          "verified_upc": null
         }
       ]
     }

@@ -440,6 +440,27 @@ class TestSoftPreferencesOnLines:
             "avoid_brands": ["Silk"],
         }
 
+    def test_a_verified_product_code_reaches_the_line(
+        self, plans: ShoppingPlans, needs: ReplenishmentNeeds, db_path: str
+    ) -> None:
+        """A code a member confirmed on a receipt travels with the plan."""
+        item_id = _approved_need(db_path, needs, "oat milk", NeedReasonKind.OUT)
+        items = HouseholdItemStore(db_path)
+        with closing(get_connection(db_path)) as conn:
+            items.verify_upc_in(
+                conn,
+                item_id,
+                "012345678905",
+                actor=ACTOR,
+                verified_at="2026-11-26T12:00:00+00:00",
+                evidence={"receipt_id": 1, "line_id": 1},
+            )
+            conn.commit()
+
+        plan = plans.build([], actor=ACTOR)
+
+        assert plan.lines[0].constraints == {"verified_upc": "012345678905"}
+
     def test_a_new_preference_makes_a_new_plan_version(
         self, plans: ShoppingPlans, needs: ReplenishmentNeeds, db_path: str
     ) -> None:

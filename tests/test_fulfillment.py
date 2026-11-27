@@ -145,6 +145,7 @@ def plan() -> ShoppingPlan:
                 [PEANUT, VEGETARIAN, NO_SUBSTITUTES],
                 preferred_brand="Clover",
                 preferred_size="1 qt",
+                verified_upc="012345678905",
             ),
             _line(
                 2,
@@ -237,6 +238,19 @@ class TestExportGoldenFiles:
         )
         assert rows[0]["other_preferences"] == ""
 
+    def test_a_verified_product_code_is_shown_in_every_format(
+        self, plan: ShoppingPlan
+    ) -> None:
+        """Someone shopping from the list can match the exact product."""
+        artifacts = ExportAdapter().create_handoff(plan).artifacts
+
+        rows = list(csv.DictReader(io.StringIO(artifacts["csv"])))
+        buttermilk = json.loads(artifacts["json"])["categories"][0]["lines"][0]
+        assert "[prefer Clover, 1 qt; UPC 012345678905]" in artifacts["text"]
+        assert buttermilk["verified_upc"] == "012345678905"
+        assert rows[0]["verified_upc"] == "012345678905"
+        assert rows[1]["verified_upc"] == ""
+
     def test_empty_plan_exports_cleanly(self, plan: ShoppingPlan) -> None:
         """Nothing to buy is still a valid export."""
         empty = plan.model_copy(update={"lines": []})
@@ -246,7 +260,7 @@ class TestExportGoldenFiles:
         assert artifacts["text"] == "Shopping plan v3\n\nNothing to buy.\n"
         assert artifacts["csv"].splitlines() == [
             "category,item,quantity,unit,reasons,preferred_brand,preferred_size,"
-            "other_preferences,must"
+            "other_preferences,verified_upc,must"
         ]
         assert json.loads(artifacts["json"])["categories"] == []
 

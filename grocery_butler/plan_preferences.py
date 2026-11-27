@@ -22,6 +22,10 @@ PREFERRED_SIZE = "preferred_size"
 ORGANIC = "organic"
 GENERIC = "generic"
 AVOID_BRANDS = "avoid_brands"
+VERIFIED_UPC = "verified_upc"
+
+#: Lengths of a product code a retailer accepts: UPC-A and GTIN-14.
+UPC_LENGTHS = (12, 14)
 
 #: Where a preference set on the item itself is stored. It beats the rest.
 ITEM_SOURCE = "item"
@@ -46,17 +50,22 @@ def _first_choice(
     return candidates[0] if candidates else None
 
 
-def line_preferences(preferences: Iterable[SoftPreference]) -> dict[str, Any]:
+def line_preferences(
+    preferences: Iterable[SoftPreference], verified_upc: str | None = None
+) -> dict[str, Any]:
     """Turn an item's soft preferences into a plan line's ``constraints``.
 
     Args:
         preferences: Every soft preference that applies to the item.
+        verified_upc: The product code a member confirmed for the item on a
+            receipt, if there is one (ADR 0023).
 
     Returns:
         A mapping with a key only for what is wanted: a preferred brand, a
-        preferred size, ``organic``, ``generic``, and the brands to avoid,
-        sorted and without repeats. The same preferences always give the
-        same mapping, so a plan's content hash is stable.
+        preferred size, ``organic``, ``generic``, the brands to avoid
+        (sorted, without repeats) and the verified product code. The same
+        inputs always give the same mapping, so a plan's content hash is
+        stable.
     """
     known = list(preferences)
     kinds = {p.kind for p in known}
@@ -69,6 +78,7 @@ def line_preferences(preferences: Iterable[SoftPreference]) -> dict[str, Any]:
         ORGANIC: SoftPreferenceKind.ORGANIC in kinds,
         GENERIC: SoftPreferenceKind.GENERIC in kinds,
         AVOID_BRANDS: avoided,
+        VERIFIED_UPC: verified_upc,
     }
     return {key: value for key, value in found.items() if value}
 
@@ -90,3 +100,15 @@ def unfiltered_phrases(constraints: Mapping[str, Any]) -> list[str]:
     if avoided:
         phrases.append(f"avoid {', '.join(avoided)}")
     return phrases
+
+
+def is_product_code(value: str) -> bool:
+    """Say whether text is a product code that can be sent as it stands.
+
+    Args:
+        value: The candidate code.
+
+    Returns:
+        True for exactly 12 or 14 ASCII digits.
+    """
+    return value.isascii() and value.isdigit() and len(value) in UPC_LENGTHS
