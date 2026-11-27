@@ -615,6 +615,17 @@ unchanged. The blueprint lives in `grocery_butler/api.py` and is registered by
   on write too, so a row never sits `pending` past its TTL just because the
   audit log went unread; `GET /actions/<action_id>` returns one action or a
   JSON 404.
+- **Recipe units:** `/recipes/save` validates each ingredient's `unit`
+  strictly. It accepts a canonical unit (`tsp`, `tbsp`, `cup`, `fl_oz`, `ml`,
+  `l`, `gal`, `pint`, `quart`, `oz`, `lb`, `g`, `kg`, `each`, `dozen`,
+  `bunch`, `head`, `clove`, `slice`, `can`, `bag`, `box`, `jar`, `bottle`,
+  `package`, `block`, `stick`, `pinch`, `dash`, `to_taste`) or a common alias
+  such as `cups`, `gallon` or `pounds`, ignoring case; a blank unit means
+  `each`. Any other unit is a 400 that names the ingredient by position
+  (`invalid ingredient 2: ...`) and saves nothing. An ingredient holds one
+  measurement only, a quantity and a unit: send `19 oz` or `1 can`, never a
+  compound `1 × 19 oz can`. A package count and a package size cannot both
+  be stored today.
 - **Safety:** destructive actions follow draft → confirm → execute. Staging
   returns a `pending_confirmation` action id with a 5-minute expiry; nothing
   executes until RubotPaul confirms after Geoff replies "confirm" in chat.
