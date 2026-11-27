@@ -246,6 +246,8 @@ class TestTheRunbook:
             "tailscale serve",
             "network_guard_rejected",
             "./scripts/backup.sh",
+            "grocery-butler-backup.timer",
+            "loginctl enable-linger",
             "chmod 600",
             "http://127.0.0.1:8000/api/v1",
         ],

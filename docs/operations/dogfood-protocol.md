@@ -86,7 +86,8 @@ Handoff page, or the path OpenClaw gives you, so it is counted.
 
 ### 6. Back up
 
-Take the weekly backup. In week 4, repeat the restore drill with that
+Check the nightly backup timer ran and copy the newest backup off the
+server ([how](vps-deployment.md#every-week)). In week 4, repeat the restore drill with that
 week's backup.
 
 ## How each pilot gate maps to the log

@@ -1,0 +1,15 @@
+# Runs the nightly backup (grocery-butler-backup.service).
+#
+# 03:17 in the server's own time zone: the household is asleep and nobody is
+# deploying. Persistent means a night the server was off is made up at the
+# next start instead of skipped.
+
+[Unit]
+Description=Nightly Grocery Butler backup
+
+[Timer]
+OnCalendar=*-*-* 03:17:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

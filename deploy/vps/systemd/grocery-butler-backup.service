@@ -1,0 +1,19 @@
+# Takes one encrypted backup of the household's data (ADR 0021).
+#
+# A user unit: install it for the account that owns the checkout, so it needs
+# no root and assumes no user name. %h is that account's home directory.
+# Setup: docs/operations/vps-deployment.md, "Backups".
+#
+# The passphrase and the database URL come from the environment file below.
+# It is outside the repository and must be readable only by its owner
+# (chmod 600). Nothing secret belongs in this unit.
+
+[Unit]
+Description=Grocery Butler nightly encrypted backup
+Documentation=file:%h/grocery-butler/docs/operations/vps-deployment.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/grocery-butler
+EnvironmentFile=%h/.config/grocery-butler/backup.env
+ExecStart=%h/grocery-butler/scripts/backup-nightly.sh
