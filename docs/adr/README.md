@@ -30,6 +30,7 @@ ADR that supersedes the old one, rather than an edit.
 | [0022](0022-browser-tests-in-the-gate.md) | The dashboard's JavaScript is tested in a real browser, in the gate | Accepted |
 | [0023](0023-verified-product-codes-from-receipts.md) | A product code is learned only from a receipt line a member confirms | Accepted |
 | [0024](0024-mcp-access-over-the-capability-api.md) | Agents reach Grocery Butler over MCP, through a wrapper around the capability API | Accepted, with conditions |
+| [0025](0025-optional-recipe-ingredients-are-decided-per-plan.md) | An optional recipe ingredient is decided by a member, per plan, before the plan is stored | Accepted |
 
 A status of "Accepted, with conditions" means the decision stands and work
 may start, but the ADR names something a person must still do before part

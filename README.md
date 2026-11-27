@@ -228,6 +228,11 @@ The ones the current code already enforces or must never break:
    import retailer-specific models.
 6. **Never claim a purchase without evidence.** A draft list, a browser click,
    or a retailer acknowledgment is not a completed order.
+7. **An optional ingredient is a person's call, every time.** A recipe
+   ingredient saved as optional is never added to a plan or a list, or left
+   off one, by the system itself. A member includes or excludes each one for
+   each plan, and nothing is stored until they have
+   ([ADR 0025](docs/adr/0025-optional-recipe-ingredients-are-decided-per-plan.md)).
 
 ## Retailer Integration Status
 
@@ -543,7 +548,7 @@ routes are server-rendered HTML except where noted.
 | `GET` | `/recipes` | List saved recipes with ingredient counts. |
 | `GET` | `/recipes/add` | Render the add-recipe form. |
 | `POST` | `/recipes/add` | Form: `name`, `servings`, repeated `ing_name_N`, `ing_qty_N`, `ing_unit_N`, `ing_category_N`, `ing_pantry_N`. A unit the system does not know is refused with the ingredient named, and nothing is saved (same units as `/api/v1/recipes/save`). |
-| `GET` | `/recipes/<id>` | Recipe detail page. |
+| `GET` | `/recipes/<id>` | Recipe detail page. An optional ingredient is marked `optional`. |
 | `POST` | `/recipes/<id>/delete` | Delete recipe. |
 
 #### Shopping list
@@ -551,7 +556,7 @@ routes are server-rendered HTML except where noted.
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/shopping-list` | Render the most recently generated shopping list (stored in the Flask session), grouped by category. |
-| `POST` | `/shopping-list/generate` | Form: `meals` (newline-delimited meal names). Runs `MealParser` + `Consolidator` and stores the result in the session. |
+| `POST` | `/shopping-list/generate` | Form: `meals` (newline-delimited meal names). Runs `MealParser` + `Consolidator` and stores the result in the session. A meal with an optional ingredient is refused with a message naming it, and the previous list is kept: this form can't ask about optional ingredients, so plan those meals through OpenClaw. |
 
 #### Pantry staples
 
@@ -626,6 +631,21 @@ unchanged. The blueprint lives in `grocery_butler/api.py` and is registered by
   measurement only, a quantity and a unit: send `19 oz` or `1 can`, never a
   compound `1 × 19 oz can`. A package count and a package size cannot both
   be stored today.
+- **Optional ingredients:** an ingredient saved with `"is_optional": true`
+  is one the recipe can be made without
+  ([ADR 0025](docs/adr/0025-optional-recipe-ingredients-are-decided-per-plan.md)).
+  It keeps every ordinary field (`ingredient`, `quantity`, `unit`,
+  `category`, `notes`, `is_pantry_item`) and the same strict unit rule. The
+  field defaults to `false`, so a client that never sends it saves required
+  ingredients as before. `GET /recipes/<id>`, the `/recipes/save` response
+  and `/meals/parse` return `is_optional` on every ingredient.
+  `/shopping-list/preview` never decides one: while a meal it is sent still
+  carries an ingredient with `is_optional` true it answers 409 with
+  `{"error": ..., "optional_ingredients": {"<meal>": ["<ingredient>", ...]}}`.
+  The caller asks a person, then sends each wanted ingredient with
+  `is_optional` false and leaves each unwanted one out. Planning through
+  `/api/v2/plans` has a proper confirmation step for this; see
+  [`docs/api/v2.md`](docs/api/v2.md#optional-ingredients).
 - **Safety:** destructive actions follow draft → confirm → execute. Staging
   returns a `pending_confirmation` action id with a 5-minute expiry; nothing
   executes until RubotPaul confirms after Geoff replies "confirm" in chat.
@@ -760,10 +780,16 @@ Encrypted backups and the restore runbook:
 
 ```
 python -m grocery_butler plan <meal> [<meal> ...] [--servings N]
+    [--include-optional NAME ...] [--exclude-optional NAME ...]
 ```
 
 Parse and consolidate a list of meals into a printed shopping list grouped by
 store aisle, applying pantry staples and the restock queue.
+
+If a saved recipe has optional ingredients, the command prints them by meal
+and exits 1 until each one is named exactly once, with `--include-optional`
+or `--exclude-optional` (repeat the flag for each name; case is ignored).
+It never adds or drops one by itself. `recipes show` marks them `(optional)`.
 
 #### `stock`
 
@@ -846,7 +872,7 @@ public ones:
 
 | Model | Description |
 |-------|-------------|
-| `Ingredient` | One ingredient with `quantity`, `unit`, `category`, `is_pantry_item`. |
+| `Ingredient` | One ingredient with `quantity`, `unit`, `category`, `notes`, `is_pantry_item`, `is_optional`. |
 | `ParsedMeal` | A meal split into `purchase_items` and `pantry_items`. |
 | `ShoppingListItem` | A consolidated item across one or more meals. |
 | `InventoryItem` | A tracked household item with `status` (`on_hand`/`low`/`out`). |
@@ -973,6 +999,20 @@ makes the next version. Amounts come only from recipes; a line that only a
 need put there has no amount and means "the usual". The older shopping list
 (`/api/v1/shopping-list/preview` and the dashboard page) still works as
 before and is retired with v1.
+
+**Optional recipe ingredients ([ADR 0025](docs/adr/0025-optional-recipe-ingredients-are-decided-per-plan.md)).**
+`recipe_ingredients.is_optional` (migration 027) marks an ingredient the
+recipe can be made without; every older row is required. Building a plan
+for a recipe that has optional ingredients is refused until the request
+carries one include-or-exclude decision per optional ingredient, with the
+token of the question they answer. The refusal lists the choices by meal
+and stores nothing, so an unconfirmed plan can never be the current plan.
+An included ingredient is then planned exactly like a required one, an
+excluded one is not on the plan, and the decisions are kept in the plan's
+`meals` as part of its hashed content. The amounts shown are the recipe's
+own. The older list paths (`Consolidator`, used by the CLI, the dashboard
+and `/api/v1/shopping-list/preview`) refuse a meal that still has an
+undecided optional ingredient.
 
 **Hard constraints and soft preferences ([ADR 0012](docs/adr/0012-hard-constraints-and-soft-preferences.md)).**
 `grocery_butler/constraints.py` keeps two things apart. A hard constraint
